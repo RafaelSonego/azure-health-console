@@ -9,10 +9,9 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 import requests
-import yaml
 from requests.adapters import HTTPAdapter
 
-from .. import access
+from .. import access, yamlio
 from ..cache import TtlCache
 from ..guarded import GuardedClient
 from ..arm import WriteBlocked
@@ -170,8 +169,8 @@ def _from_kubeconfig(arm, hosts, extra_paths):
     skipped = []
     for path in kubeconfig_files(extra_paths):
         try:
-            config = yaml.safe_load(path.read_text()) or {}
-        except (OSError, yaml.YAMLError, UnicodeDecodeError):
+            config = yamlio.load(path.read_bytes()) or {}
+        except (OSError, yamlio.YAMLError, UnicodeDecodeError):
             continue
         if not isinstance(config, dict):
             continue
@@ -213,7 +212,7 @@ def _from_azure(arm, cluster_id):
     configs = payload.get("kubeconfigs") or []
     if not configs:
         raise KubeUnavailable("Azure returned no cluster credential for this identity.")
-    config = yaml.safe_load(base64.b64decode(configs[0]["value"]))
+    config = yamlio.load(base64.b64decode(configs[0]["value"]))
     cluster = config["clusters"][0]["cluster"]
     ca_pem = base64.b64decode(cluster["certificate-authority-data"]).decode()
     tokens = _token_source(arm, config["users"][0]["user"], Path("."))

@@ -1,10 +1,10 @@
 import types
 import base64
 
-import yaml
 import pytest
 
 from healthconsole.core.arm import WriteBlocked, check_read_only
+from healthconsole.core import yamlio
 from healthconsole.core.explore import aks_checks, detectors, kube, scaling
 from healthconsole.core.explore.details import _generic
 from healthconsole.core.model import CRITICAL, HEALTHY, INFO, WARNING
@@ -297,7 +297,7 @@ class _KubeArm:
         config = {"clusters": [{"name": "c", "cluster": {"server": "https://c-abc.privatelink.canadacentral.azmk8s.io:443",
                                                          "certificate-authority-data": CA}}],
                   "users": [{"name": "u", "user": {"exec": {"command": "kubelogin"}}}]}
-        return {"kubeconfigs": [{"value": base64.b64encode(yaml.safe_dump(config).encode()).decode()}]}
+        return {"kubeconfigs": [{"value": base64.b64encode(yamlio.dump(config).encode()).decode()}]}
 
 
 def _kubeconfig(tmp_path, server, user, insecure=False):
@@ -305,7 +305,7 @@ def _kubeconfig(tmp_path, server, user, insecure=False):
     if insecure:
         cluster["insecure-skip-tls-verify"] = True
     path = tmp_path / "config"
-    path.write_text(yaml.safe_dump({
+    path.write_text(yamlio.dump({
         "clusters": [{"name": "c", "cluster": cluster}], "users": [{"name": "u", "user": user}],
         "contexts": [{"name": "my-aks", "context": {"cluster": "c", "user": "u"}}], "current-context": "my-aks"}))
     return path

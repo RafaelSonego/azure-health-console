@@ -6,7 +6,7 @@ import os
 import re
 from pathlib import Path
 
-import yaml
+from . import yamlio
 
 DEFAULT_PATH = Path("~/.config/azure-health-console/config.yaml")
 
@@ -367,8 +367,7 @@ def load(config_path=None):
     file = Path(config_path).expanduser() if config_path else path()
     if not file.is_file():
         return copy.deepcopy(DEFAULTS)
-    with file.open() as handle:
-        data = yaml.safe_load(handle) or {}
+    data = yamlio.load(file.read_bytes()) or {}
     return from_data(data, str(file))
 
 

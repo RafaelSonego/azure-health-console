@@ -23,7 +23,6 @@ dependencies = [
   "flask>=3.0",
   "requests>=2.32",
   "azure-identity>=1.17",
-  "pyyaml>=6.0",
   "fpdf2>=2.8",
   "ruamel.yaml>=0.18",
   "keyring>=25",
@@ -36,7 +35,6 @@ Issues = "https://github.com/RafaelSonego/azure-health-console/issues"
 
 [project.optional-dependencies]
 test = ["pytest>=8"]
-build = ["pyinstaller>=6.10"]
 
 [project.scripts]
 azure-health-console = "healthconsole.cli:main"

@@ -4,6 +4,30 @@ All notable changes to this project are documented here. The format is based
 on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.1] - 2026-11-16
+
+### Changed
+
+- README: Homebrew is the recommended install on macOS, with when to use brew, pipx or pip, and how to remove
+  everything (settings, cache, Keychain secrets) for a fresh start.
+- README: Prerequisites per OS (Azure CLI, Python 3.11+, pipx on macOS, Windows and Linux), pipx as the way for
+  Windows and Linux (not tested there yet), and Uninstall and Remove everything for each OS.
+- `serve` no longer prints a line for every page request; `-v` shows them again. Warnings and errors still show.
+
+### Fixed
+
+- Homebrew: the formula no longer depends on `azure-cli`, which Homebrew moved to a cask (a formula can't depend
+  on one), so `brew install` failed. Install it with `brew install --cask azure-cli`; the formula's notes say so.
+- pipx/pip on the newest Python (3.15 on Windows): the install failed building PyYAML, which has no ready-built
+  package for it yet. PyYAML is gone; every YAML file is read and written with ruamel.yaml in pure Python
+  (`core/yamlio.py`), with the same rules as before (`yes`/`on` are booleans). Files are now read as UTF-8 on every OS.
+
+### Removed
+
+- Chocolatey and the Windows executable: never published. `packaging/chocolatey/`, `scripts/build.py`,
+  `scripts/launcher.py` and the `build` (PyInstaller) extra are gone; Windows users install with pipx.
+- A stray file named `0` at the repo root, left by a shell redirect.
+
 ## [1.1.0] - 2026-11-16
 
 ### Security

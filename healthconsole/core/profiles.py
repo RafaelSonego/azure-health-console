@@ -2,7 +2,7 @@
 from dataclasses import dataclass, field
 from pathlib import Path
 
-import yaml
+from . import yamlio
 
 BUILT_IN_DIR = Path(__file__).resolve().parent.parent / "profiles"
 OPERATORS = {"GreaterThan", "GreaterThanOrEqual", "LessThan", "LessThanOrEqual"}
@@ -88,7 +88,6 @@ def load(user_dir=None):
         if not directory or not directory.is_dir():
             continue
         for path in sorted(directory.glob("*.yaml")):
-            with path.open() as handle:
-                profile = parse(yaml.safe_load(handle) or {}, source=path.name)
+            profile = parse(yamlio.load(path.read_bytes()) or {}, source=path.name)
             profiles[profile.type] = profile
     return profiles

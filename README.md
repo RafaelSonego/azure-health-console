@@ -31,7 +31,7 @@ What changed in each version is in [`CHANGELOG.md`](CHANGELOG.md). MIT licensed 
 - [How health is decided](#how-health-is-decided)
 - [Commands](#commands)
 - [Troubleshooting](#troubleshooting)
-- [For maintainers](#for-maintainers): development, building the executable, releasing
+- [For maintainers](#for-maintainers): development, releasing
 
 ---
 
@@ -40,7 +40,8 @@ What changed in each version is in [`CHANGELOG.md`](CHANGELOG.md). MIT licensed 
 **To run it:**
 
 - The **Azure CLI** (`az`), signed in with `az login` (or the console's **Sign in** button runs it for you).
-- **Python 3.11 or later**, unless you use the Windows executable.
+- **Python 3.11 or later** and **pipx**, unless you install with Homebrew, which brings its own Python. See
+  [Prerequisites](#prerequisites) for the commands on macOS, Windows and Linux.
 - An Azure account with **Reader** on what you want to look at (see [Permissions](#permissions)). PIM roles work:
   activate them, then click **Refresh access** (in your account menu, top right).
 - A browser. The console runs on `127.0.0.1` and sends nothing anywhere else.
@@ -70,72 +71,133 @@ console works there too, with the platform checks, health, timeline and the rest
 
 ## Install
 
-Every way needs the **Azure CLI** (`az`), since the console signs in through it; Homebrew and Chocolatey install it
-for you. Pick one:
-
-| Way | Best for | You need |
+| Way | Use it when | You need first |
 |---|---|---|
-| [Homebrew](#homebrew-macos) | macOS | Homebrew |
-| [Chocolatey](#chocolatey-windows) | Windows | Chocolatey |
-| [pipx](#pipx-any-system) | any system with Python, Linux included | Python 3.11+, pipx |
-| [The Windows executable](#the-windows-executable) | Windows without a package manager | nothing else |
-| [From the source](#from-the-source) | changing the console | Python 3.11+, this repo |
+| [Homebrew](#homebrew-macos) | **macOS: the recommended way** | Homebrew, the Azure CLI |
+| [pipx](#pipx-windows-linux-or-a-mac-without-homebrew) | Windows, Linux, or a Mac without Homebrew | Python 3.11+, pipx, the Azure CLI |
+| [From the source](#from-the-source) | changing the console | Python 3.11+, this repo, the Azure CLI |
 
-Your settings, saved scopes and Watchlist live in `~/.config/azure-health-console/`, outside the install, so upgrades
-and removals keep them.
+Windows and Linux are expected to work but haven't been tested yet; please open an issue if something breaks.
+
+### Prerequisites
+
+The console signs in through the **Azure CLI** (`az`), and no install method installs it for you: Homebrew ships
+it as a cask, which a formula can't depend on, and pipx installs Python packages only. Without it the console
+still starts, and its page says *Install the Azure CLI to continue* with a link to Microsoft's instructions.
+
+| | macOS | Windows (PowerShell) | Linux (Debian/Ubuntu) |
+|---|---|---|---|
+| Azure CLI | `brew install --cask azure-cli` | `winget install --exact --id Microsoft.AzureCLI` | `curl -sL https://aka.ms/InstallAzureCLIDeb \| sudo bash` |
+| Python 3.11+ (pipx only) | `brew install python` | `winget install --exact --id Python.Python.3.13` | `sudo apt install python3` |
+| pipx (pipx only) | `brew install pipx` | `py -m pip install --user pipx` | `sudo apt install pipx` |
+
+Other Linux distributions: see [Microsoft's Azure CLI instructions](https://learn.microsoft.com/cli/azure/install-azure-cli)
+and [pipx's](https://pipx.pypa.io/stable/installation/). Check `python3 --version` (`py --version` on Windows) says
+3.11 or later; older Ubuntu releases ship 3.10. After installing pipx, run `pipx ensurepath` once (`py -m pipx
+ensurepath` on Windows) and open a new terminal, so the commands pipx installs are on your `PATH`.
+
+### pip, pipx or brew?
+
+- **brew** installs the console with its own Python, and upgrades and removes it as one package.
+- **pipx** does the same for any system with Python: the console gets its own virtual environment and its command
+  goes on your `PATH`.
+- **pip** is only for a virtual environment you made yourself, such as the one [from the source](#from-the-source)
+  uses. Outside one, macOS has no `pip` command (`command not found`) and Homebrew's Python refuses
+  (`externally-managed-environment`); inside one that already has the console, `pip install azure-health-console`
+  says "Requirement already satisfied" and installs nothing new. Deactivate a virtual environment (`deactivate`)
+  before installing with brew or pipx.
+
+Your settings, saved scopes and Watchlist live in `~/.config/azure-health-console/` (`%USERPROFILE%\.config\azure-health-console\`
+on Windows), outside the install, so upgrades and an uninstall keep them; [Remove everything](#remove-everything)
+clears them too.
 
 ### Homebrew (macOS)
 
 ```bash
+brew install --cask azure-cli    # once, if you don't have az yet
 brew install rafaelsonego/tools/azure-health-console
 az login
-azure-health-console        # starts it and opens your browser
+azure-health-console             # starts it and opens your browser
 ```
 
-**Upgrade** with `brew upgrade azure-health-console`; **remove** with `brew uninstall azure-health-console`.
+**Upgrade** with `brew upgrade azure-health-console`; **uninstall** with `brew uninstall azure-health-console`.
 
-### Chocolatey (Windows)
+### pipx (Windows, Linux, or a Mac without Homebrew)
 
-```powershell
-choco install azure-health-console      # in an administrator PowerShell
+With the [prerequisites](#prerequisites) installed:
+
+```bash
+pipx install azure-health-console
 az login
 azure-health-console
 ```
 
-**Upgrade** with `choco upgrade azure-health-console`. A new version appears on Chocolatey once its moderators have
-approved it, usually a few days after the GitHub release.
-
-### pipx (any system)
-
-[pipx](https://pipx.pypa.io) puts the console in its own virtual environment and its command on your `PATH`:
-
-```bash
-pipx install azure-health-console        # once: brew install pipx, or python3 -m pip install --user pipx
-azure-health-console
-```
-
-**Upgrade** with `pipx upgrade azure-health-console`. A plain virtual environment works too
-(`python3 -m venv ~/.ahc && ~/.ahc/bin/pip install azure-health-console`).
-
-### The Windows executable
-
-Each [GitHub release](https://github.com/RafaelSonego/azure-health-console/releases) has a single
-`azure-health-console-<version>-windows-x64.exe`; no Python needed. `SHA256SUMS.txt` on the same page has its checksum.
-
-1. `az login`
-2. Double-click the file (or run it from a terminal). If SmartScreen says "Windows protected your PC", choose
-   **More info → Run anyway**, only if your organisation allows it: the file is unsigned.
-3. Your browser opens the console. Keep the small terminal window open while you use it; close it to stop.
+**Upgrade** with `pipx upgrade azure-health-console`; **uninstall** with `pipx uninstall azure-health-console`.
 
 ### From the source
 
 ```bash
-python3 -m venv .venv                          # Windows: py -m venv .venv
-.venv/bin/pip install -e ".[test]"              # Windows: .venv\Scripts\pip install -e ".[test]"
-.venv/bin/python -m healthconsole serve --open  # Windows: .venv\Scripts\python -m healthconsole serve --open
+python3 -m venv .venv
+.venv/bin/pip install -e ".[test]"
+.venv/bin/python -m healthconsole serve --open
 ```
 
-Every dependency is plain Python (PDF export included), so nothing else needs installing.
+Every dependency is plain Python (PDF export included), so nothing else needs installing. The version `pip show`
+reports for this editable install is the one it was first installed with; the code is your working tree.
+
+### Uninstall
+
+Remove it the way you installed it:
+
+| Installed with | Uninstall |
+|---|---|
+| Homebrew | `brew uninstall azure-health-console`, then `brew untap rafaelsonego/tools` if you don't use the tap for anything else |
+| pipx | `pipx uninstall azure-health-console` |
+| From the source | delete the repo folder (the `.venv` is inside it) |
+
+This keeps your settings, cache and saved secrets, so a reinstall picks up where you left off. The Azure CLI, Python
+and pipx stay too; remove them with the same tool you installed them with (for example `brew uninstall --cask
+azure-cli`, `winget uninstall --exact --id Microsoft.AzureCLI`, `sudo apt remove azure-cli`) if nothing else uses
+them.
+
+### Remove everything
+
+For a fresh start, uninstall it as above, then delete its settings, cache and the secrets it saved.
+
+**macOS:**
+
+```bash
+brew uninstall azure-health-console 2>/dev/null
+pipx uninstall azure-health-console 2>/dev/null
+rm -rf ~/.config/azure-health-console ~/.cache/azure-health-console
+security dump-keychain | grep -E '"svce"<blob>="(Azure Health Console|azure-health-console)' \
+  | sed 's/.*="//; s/"$//' | sort -u \
+  | while read -r s; do while security delete-generic-password -s "$s" >/dev/null 2>&1; do :; done; done
+hash -r
+```
+
+**Windows (PowerShell):**
+
+```powershell
+pipx uninstall azure-health-console
+Remove-Item -Recurse -Force "$HOME\.config\azure-health-console", "$HOME\.cache\azure-health-console" -ErrorAction SilentlyContinue
+```
+
+Then remove the secrets in **Credential Manager** → **Windows Credentials**: every entry named *Azure Health
+Console - …* (or *azure-health-console*).
+
+**Linux:**
+
+```bash
+pipx uninstall azure-health-console
+rm -rf ~/.config/azure-health-console ~/.cache/azure-health-console
+```
+
+Then remove the secrets from your Secret Service (for example Seahorse, *Passwords and Keys*): every item named
+*Azure Health Console - …*. Without a Secret Service the console keeps no secrets, only the `AHC_…` environment
+variables you set yourself.
+
+Exported reports stay in the `exports` folder wherever you ran the console.
 
 ---
 
@@ -149,7 +211,7 @@ Every dependency is plain Python (PDF export included), so nothing else needs in
    group. **Sign out <account>** there runs `az logout --username <account>` after asking: only that account is
    signed out, others stay. Both change the Azure CLI's sign-in on your machine, so terminals see it too. Only the
    local console has these buttons.
-2. **Start it:** `azure-health-console` (or the executable, or `python -m healthconsole serve --open`). It listens
+2. **Start it:** `azure-health-console` (or `python -m healthconsole serve --open`). It listens
    on `http://127.0.0.1:8765`, your machine only (another port if that one is busy). It prints (and with `--open`,
    opens) an address carrying your key: open it once per browser and `http://127.0.0.1:8765` works for 30 days,
    restarts included. Another user or program on the same machine can't use the console without it. The key is kept
@@ -1017,6 +1079,7 @@ every command go **before** it.
 | `--tenant <id>` | another tenant you're signed in to |
 | `--config <path>` | another config file |
 | `--log-calls` | print every request as it's sent (method and path, never tokens) |
+| `-v`, `--verbose` | more detail in the terminal, including a line for every request the page makes; without it only the start-up lines, warnings and errors show |
 
 **`bench`** runs Triage, search, a resource, its dependencies, its group, the AKS fleet and Network one after
 another, each with an empty cache, and reports the wall time, the number of Azure calls, where the time goes by
@@ -1066,8 +1129,7 @@ healthconsole/
   web/             Flask blueprint (mountable) and the local app with a loopback guard; static/app.js is the page
   profiles/        built-in per-type health profiles
   cli.py           the commands
-scripts/build.py   the executable and the wheel for the machine it runs on
-packaging/         the Homebrew formula template and the Chocolatey package
+packaging/         the Homebrew formula template
 ```
 
 Rules worth knowing before changing anything:
@@ -1077,22 +1139,6 @@ Rules worth knowing before changing anything:
 - **Nothing silently missing:** a setting that isn't configured, or something that couldn't be read, is named on
   the page with its fix.
 
-### Building the executable
-
-PyInstaller can't cross-build, so build on the OS you want to support (Windows for Windows users):
-
-```bash
-.venv/bin/python scripts/build.py      # Windows: .venv\Scripts\python scripts\build.py
-```
-
-`dist/` then holds `azure-health-console-<version>-<os>-<cpu>` (`.exe` on Windows, about 25 MB; no Python
-needed) and the wheel. `--onedir` builds a folder instead: it starts faster, and antivirus flags it less often.
-
-The executable is **unsigned**: company antivirus or application control may block it, and
-SmartScreen/Gatekeeper will warn. Check with whoever owns those tools before passing it around; a code-signing
-certificate is what removes the warnings. On macOS a downloaded build needs `xattr -d com.apple.quarantine <file>`
-once.
-
 ### Releasing
 
 Releases come from a private pipeline built on a shared release template:
@@ -1100,8 +1146,8 @@ Releases come from a private pipeline built on a shared release template:
 1. Bump [`VERSION`](VERSION) (semver) and date the CHANGELOG's section for it.
 2. The code is exported without private paths (`export-ignore` in `.gitattributes`) and checked: a list of what must
    never be published stops the release on any match.
-3. The sdist, the wheel and the Windows executable (`scripts/build.py`) are built from that export.
-4. They go to **PyPI**; this repository's `main` becomes the export as one commit, tagged `v<version>`, with a GitHub
-   release holding the files and `SHA256SUMS.txt`; the [Homebrew tap](https://github.com/RafaelSonego/homebrew-tools)'s
-   formula is updated from `packaging/homebrew/`; and the executable is packed from `packaging/chocolatey/` and
-   submitted to Chocolatey for moderation.
+3. The sdist and the wheel are built from that export.
+4. After an approval they go to an Azure Artifacts feed and **PyPI**; this repository's `main` becomes the export as
+   one commit, tagged `v<version>`, with a GitHub release holding the files and `SHA256SUMS.txt`; and the
+   [Homebrew tap](https://github.com/RafaelSonego/homebrew-tools)'s formula is updated from `packaging/homebrew/`.
+   The private commit is tagged last.

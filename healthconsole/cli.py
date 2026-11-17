@@ -9,9 +9,7 @@ import webbrowser
 from . import __version__
 from pathlib import Path
 
-import yaml
-
-from .core import config, health, profiles, readiness, report, snapshot, tables
+from .core import config, health, profiles, readiness, report, snapshot, tables, yamlio
 from .core.arm import ArmClient, ArmError
 from .core.credentials import AzureCliTokenProvider, CredentialError
 from .core.guarded import ServiceError
@@ -128,7 +126,7 @@ def cmd_profile_draft(args, settings):
     ]}
     print(f"# Draft profile. Add operator/warn/crit, then save under {settings['profiles_dir']}/")
     print(f"# All {len(definitions)} metrics: " + ", ".join(sorted(d["name"] for d in definitions.values())))
-    print(yaml.safe_dump(draft, sort_keys=False), end="")
+    print(yamlio.dump(draft), end="")
 
 
 def cmd_config(args, settings):
@@ -238,6 +236,16 @@ def cmd_whoami(args, settings):
     print(f"{identity.name}  tenant {identity.tenant_id}")
 
 
+def _setup_logging(verbose, log_calls):
+    logging.basicConfig(level=logging.INFO if verbose else logging.WARNING,
+                        format="%(levelname)s %(name)s: %(message)s")
+    # Flask's server logs every request at INFO unless its logger has a level: only -v shows them.
+    logging.getLogger("werkzeug").setLevel(logging.INFO if verbose and not log_calls else logging.WARNING)
+    if log_calls:
+        logging.getLogger("healthconsole.calls").setLevel(logging.INFO)
+        logging.getLogger().setLevel(min(logging.getLogger().level, logging.INFO))
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(prog="azure-health-console",
                                      description="Read-only Azure health view from your az login session.")
@@ -311,12 +319,7 @@ def main(argv=None):
         # Double-clicked (or run with nothing): start the page and open it, like a desktop app.
         argv = ["serve", "--open"]
     args = parser.parse_args(argv)
-    logging.basicConfig(level=logging.INFO if args.verbose else logging.WARNING,
-                        format="%(levelname)s %(name)s: %(message)s")
-    if args.log_calls:
-        logging.getLogger("healthconsole.calls").setLevel(logging.INFO)
-        logging.getLogger().setLevel(min(logging.getLogger().level, logging.INFO))
-        logging.getLogger("werkzeug").setLevel(logging.WARNING)
+    _setup_logging(args.verbose, args.log_calls)
     try:
         settings = config.load(args.config)
         args.handler(args, settings)

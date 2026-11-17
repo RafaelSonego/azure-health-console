@@ -3,9 +3,7 @@ add and remove them without rewriting (and losing comments in) config.yaml."""
 import threading
 from pathlib import Path
 
-import yaml
-
-from . import baseline, snapshot
+from . import baseline, snapshot, yamlio
 from .arm import ArmError
 from .localfiles import write_private_text
 
@@ -30,7 +28,7 @@ class Watchlist:
     def _read(self):
         if not self.path.is_file():
             return []
-        data = yaml.safe_load(self.path.read_text()) or {}
+        data = yamlio.load(self.path.read_bytes()) or {}
         items = []
         for i in data.get("items") or []:
             if isinstance(i, dict) and i.get("id"):
@@ -43,7 +41,7 @@ class Watchlist:
 
     def _write(self, items):
         header = "# Managed by Azure Health Console's Watchlist; editing by hand is fine.\n"
-        write_private_text(self.path, header + yaml.safe_dump({"items": items}, sort_keys=False))
+        write_private_text(self.path, header + yamlio.dump({"items": items}))
 
     def add(self, resource_id, name, kind="resource", tenant=None):
         with _lock:
