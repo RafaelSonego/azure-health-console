@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Health snapshot: {{ title }}</title>
+<style>
+  @page { size: A4 landscape; margin: 14mm; @bottom-right { content: counter(page) " / " counter(pages); font-size: 9px; color: #57606a; } }
+  body { font-family: Helvetica, Arial, sans-serif; font-size: 11px; color: #1f2328; }
+  h1 { font-size: 20px; margin: 0 0 6px; }
+  h2 { font-size: 15px; margin: 18px 0 6px; border-bottom: 1px solid #d0d7de; padding-bottom: 3px; }
+  h3 { font-size: 12px; margin: 14px 0 4px; }
+  .meta { color: #57606a; margin-bottom: 10px; }
+  .pill { display: inline-block; padding: 1px 7px; border-radius: 9px; font-weight: bold; font-size: 10px; }
+  table { border-collapse: collapse; width: 100%; margin: 4px 0 8px; }
+  th, td { border: 1px solid #d0d7de; padding: 3px 5px; text-align: left; vertical-align: top; }
+  th { background: #f6f8fa; }
+  code { font-size: 9px; color: #57606a; word-break: break-all; }
+  .node { page-break-inside: avoid; }
+  .graph { page-break-inside: avoid; margin: 6px 0; }
+  .print-bar { margin-bottom: 10px; }
+  @media print { .print-bar { display: none; } }
+</style>
+</head>
+<body>
+{% if printable %}<div class="print-bar"><button onclick="window.print()">Print / Save as PDF</button></div>{% endif %}
+{% macro pill(status) -%}
+<span class="pill" style="background: {{ colours[status][0] }}; color: {{ colours[status][1] }}">{{ status }}</span>
+{%- endmacro %}
+<h1>Health snapshot: {{ title }} {{ pill(s.status) }}</h1>
+<div class="meta">
+  {{ s.nodes|length }} resources: {{ counts.critical }} critical, {{ counts.warning }} warning,
+  {{ counts.healthy }} healthy, {{ counts.unknown }} unknown ·
+  taken {{ s.taken_at }} by {{ s.taken_by }} · depth {{ s.depth }} · {{ s.arm_calls }} Azure calls, read-only
+</div>
+
+{% if s.service_health %}
+<h2>Active Service Health events</h2>
+<ul>
+{% for e in s.service_health %}
+  <li><b>{{ e.type }}</b>: {{ e.title }}{% if e.tracking_ids|length > 1 %}, {{ e.tracking_ids|length }} events{% endif %} ({{ e.services|join(", ") }}; {{ e.regions|join(", ") or "all regions" }})</li>
+{% endfor %}
+</ul>
+{% endif %}
+
+<h2>Dependency graph</h2>
+<div class="graph">{{ svg|safe }}</div>
+
+<h2>Resources</h2>
+<table>
+  <tr><th>Status</th><th>Name</th><th>Type</th><th>Resource group</th><th>Why</th></tr>
+  {% for n in s.nodes %}
+  <tr><td>{{ pill(n.status) }}</td><td>{{ n.name }}</td><td>{{ n.display_type }}</td>
+      <td>{{ n.resource_group }}</td><td>{{ summary(n) }}</td></tr>
+  {% endfor %}
+</table>
+
+{% for n in s.nodes %}
+<div class="node">
+  <h3>{{ n.name }} {{ pill(n.status) }}</h3>
+  <code>{{ n.id }}</code>
+  {% if n.signals %}
+  <table>
+    <tr><th>Signal</th><th>Source</th><th>Status</th><th>Value</th><th>Threshold</th><th>Last week</th><th>Detail</th></tr>
+    {% for sig in n.signals %}
+    <tr><td>{{ sig.name }}</td><td>{{ sig.source }}</td><td>{{ pill(sig.status) }}</td>
+        <td>{% if sig.value is not none %}{{ sig.value|num }} {{ sig.unit }}{% else %}–{% endif %}</td>
+        <td>{{ sig.threshold }}</td><td>{{ sig.baseline|num }}</td><td>{{ sig.detail }}</td></tr>
+    {% endfor %}
+  </table>
+  {% endif %}
+  {% if n.changes %}
+  <b>Recent changes</b>
+  <ul>
+    {% for c in n.changes[:10] %}
+    <li>{{ c.at }}: {{ c.type }} by {{ c.by or "unknown" }}{% if c.fields %} ({{ c.fields|join(", ") }}){% endif %}</li>
+    {% endfor %}
+  </ul>
+  {% endif %}
+</div>
+{% endfor %}
+
+{% if s.warnings %}
+<h2>Notes</h2>
+<ul>{% for w in s.warnings %}<li>{{ w }}</li>{% endfor %}</ul>
+{% endif %}
+</body>
+</html>

@@ -1,0 +1,4 @@
+type: microsoft.compute/virtualmachinescalesets
+metrics:
+  - {name: Percentage CPU, aggregation: Average, operator: GreaterThan, warn: 85, crit: 95}
+  - {name: Available Memory Percentage, aggregation: Average, operator: LessThan, warn: 15, crit: 5}

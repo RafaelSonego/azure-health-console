@@ -1,0 +1,9 @@
+type: microsoft.storage/storageaccounts
+states:
+  - path: properties.statusOfPrimary
+    healthy: [available]
+    critical: [unavailable]
+metrics:
+  - {name: Availability, aggregation: Average, operator: LessThan, warn: 99.9, crit: 99}
+  - {name: SuccessE2ELatency, aggregation: Average}
+  - {name: Transactions, aggregation: Total}

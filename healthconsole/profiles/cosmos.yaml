@@ -1,0 +1,6 @@
+type: microsoft.documentdb/databaseaccounts
+metrics:
+  - {name: ServiceAvailability, aggregation: Average, operator: LessThan, warn: 99.9, crit: 99}
+  - {name: NormalizedRUConsumption, aggregation: Maximum, operator: GreaterThan, warn: 80, crit: 95}
+  - {name: ServerSideLatency, aggregation: Average}
+  - {name: TotalRequests, aggregation: Count}

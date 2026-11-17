@@ -1,0 +1,20 @@
+VERIFICATION
+Verification is intended to assist the Chocolatey moderators and community
+in verifying that this package's contents are trustworthy.
+
+The embedded azure-health-console.exe is the Windows build attached to the
+GitHub release this package version comes from:
+
+  https://github.com/RafaelSonego/azure-health-console/releases/tag/v@VERSION@
+  (azure-health-console-@VERSION@-windows-x64.exe)
+
+To verify it:
+  1. Download that file from the release page above.
+  2. Get its checksum:  Get-FileHash -Algorithm SHA256 <file>
+     (or compare with SHA256SUMS.txt on the same release page)
+  3. It matches the checksum of tools\azure-health-console.exe in this package:
+
+  SHA256: @SHA256@
+
+The executable is built from the tagged source by the project's release pipeline
+(scripts/build.py, PyInstaller). LICENSE.txt is the project's MIT license.

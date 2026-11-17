@@ -1,0 +1,6 @@
+type: microsoft.cache/redis
+metrics:
+  - {name: serverLoad, aggregation: Maximum, operator: GreaterThan, warn: 80, crit: 90}
+  - {name: usedmemorypercentage, aggregation: Maximum, operator: GreaterThan, warn: 80, crit: 90}
+  - {name: errors, aggregation: Maximum}
+  - {name: cacheLatency, aggregation: Average}

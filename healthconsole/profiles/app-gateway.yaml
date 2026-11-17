@@ -1,0 +1,10 @@
+type: microsoft.network/applicationgateways
+states:
+  - path: properties.operationalState
+    healthy: [Running]
+    warning: [Stopped, Starting, Stopping]
+metrics:
+  - {name: UnhealthyHostCount, aggregation: Maximum, operator: GreaterThan, warn: 0, crit: 1}
+  - {name: FailedRequests, aggregation: Total}
+  - {name: ApplicationGatewayTotalTime, aggregation: Average}
+  - {name: TotalRequests, aggregation: Total}

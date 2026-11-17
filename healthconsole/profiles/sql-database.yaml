@@ -1,0 +1,13 @@
+type: microsoft.sql/servers/databases
+states:
+  - path: properties.status
+    healthy: [Online]
+    warning: [Paused, Pausing, Resuming, Scaling]
+    critical: [Offline, Suspect, EmergencyMode, Inaccessible]
+metrics:
+  - {name: cpu_percent, aggregation: Average, operator: GreaterThan, warn: 80, crit: 90}
+  - {name: workers_percent, aggregation: Average, operator: GreaterThan, warn: 80, crit: 90}
+  - {name: sessions_percent, aggregation: Average, operator: GreaterThan, warn: 80, crit: 90}
+  - {name: storage_percent, aggregation: Maximum, operator: GreaterThan, warn: 85, crit: 95}
+  - {name: deadlock, aggregation: Total, operator: GreaterThan, warn: 0, crit: 10}
+  - {name: connection_failed, aggregation: Total, operator: GreaterThan, warn: 10, crit: 50}

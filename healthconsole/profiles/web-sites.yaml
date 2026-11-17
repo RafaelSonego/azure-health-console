@@ -1,0 +1,10 @@
+type: microsoft.web/sites
+states:
+  - path: properties.state
+    healthy: [Running]
+    warning: [Stopped]
+metrics:
+  - {name: Http5xx, aggregation: Total, operator: GreaterThan, warn: 10, crit: 50}
+  - {name: HttpResponseTime, aggregation: Average, operator: GreaterThan, warn: 2, crit: 5}
+  - {name: HealthCheckStatus, aggregation: Average, operator: LessThan, warn: 100, crit: 50}
+  - {name: Requests, aggregation: Total}

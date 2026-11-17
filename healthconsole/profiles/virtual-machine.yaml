@@ -1,0 +1,8 @@
+type: microsoft.compute/virtualmachines
+states:
+  - path: properties.extended.instanceView.powerState.code
+    healthy: [PowerState/running]
+    warning: [PowerState/stopped, PowerState/deallocated, PowerState/stopping, PowerState/deallocating]
+metrics:
+  - {name: Percentage CPU, aggregation: Average, operator: GreaterThan, warn: 85, crit: 95}
+  - {name: Available Memory Percentage, aggregation: Average, operator: LessThan, warn: 15, crit: 5}

@@ -1,0 +1,12 @@
+type: microsoft.dbforpostgresql/flexibleservers
+states:
+  - path: properties.state
+    healthy: [Ready]
+    warning: [Stopped, Starting, Stopping, Updating]
+    critical: [Disabled, Dropping]
+metrics:
+  - {name: cpu_percent, aggregation: Average, operator: GreaterThan, warn: 80, crit: 90}
+  - {name: memory_percent, aggregation: Average, operator: GreaterThan, warn: 80, crit: 90}
+  - {name: storage_percent, aggregation: Average, operator: GreaterThan, warn: 85, crit: 95}
+  - {name: is_db_alive, aggregation: Minimum, operator: LessThan, crit: 1}
+  - {name: connections_failed, aggregation: Total}

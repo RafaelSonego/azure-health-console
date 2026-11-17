@@ -1,0 +1,3 @@
+# Left out of the public export (git archive, scripts/release/export.py): ADO-only planning notes and pipelines.
+PLAN.md export-ignore
+.azuredevops/ export-ignore

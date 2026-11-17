@@ -1,0 +1,5 @@
+type: microsoft.web/serverfarms
+metrics:
+  - {name: CpuPercentage, aggregation: Average, operator: GreaterThan, warn: 80, crit: 90}
+  - {name: MemoryPercentage, aggregation: Average, operator: GreaterThan, warn: 80, crit: 90}
+  - {name: HttpQueueLength, aggregation: Average, operator: GreaterThan, warn: 10, crit: 50}

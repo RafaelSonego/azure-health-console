@@ -1,0 +1,4 @@
+type: microsoft.network/loadbalancers
+metrics:
+  - {name: VipAvailability, aggregation: Average, operator: LessThan, warn: 99, crit: 90}
+  - {name: DipAvailability, aggregation: Average, operator: LessThan, warn: 99, crit: 90}

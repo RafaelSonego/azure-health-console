@@ -1,0 +1,11 @@
+type: microsoft.containerservice/managedclusters
+states:
+  - path: properties.powerState.code
+    healthy: [Running]
+    warning: [Stopped]
+metrics:
+  - {name: node_cpu_usage_percentage, aggregation: Average, operator: GreaterThan, warn: 80, crit: 90}
+  - {name: node_memory_working_set_percentage, aggregation: Average, operator: GreaterThan, warn: 80, crit: 90}
+  - {name: node_disk_usage_percentage, aggregation: Average, operator: GreaterThan, warn: 80, crit: 90}
+  - {name: cluster_autoscaler_unschedulable_pods_count, aggregation: Average, operator: GreaterThanOrEqual, warn: 1, crit: 5}
+  - {name: apiserver_cpu_usage_percentage, aggregation: Maximum, operator: GreaterThan, warn: 80, crit: 90}

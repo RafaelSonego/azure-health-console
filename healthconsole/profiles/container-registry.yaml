@@ -1,0 +1,4 @@
+type: microsoft.containerregistry/registries
+metrics:
+  - {name: TotalPullCount, aggregation: Total}
+  - {name: SuccessfulPullCount, aggregation: Total}

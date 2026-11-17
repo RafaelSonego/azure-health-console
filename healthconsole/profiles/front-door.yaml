@@ -1,0 +1,6 @@
+type: microsoft.cdn/profiles
+metrics:
+  - {name: Percentage5XX, aggregation: Average, operator: GreaterThan, warn: 1, crit: 5}
+  - {name: OriginHealthPercentage, aggregation: Average, operator: LessThan, warn: 95, crit: 75}
+  - {name: TotalLatency, aggregation: Average}
+  - {name: RequestCount, aggregation: Total}

@@ -1,0 +1,11 @@
+type: microsoft.servicebus/namespaces
+states:
+  - path: properties.status
+    healthy: [Active]
+    warning: [Disabled, Activating]
+metrics:
+  - {name: ServerErrors, aggregation: Total, operator: GreaterThan, warn: 0, crit: 10}
+  - {name: ThrottledRequests, aggregation: Total, operator: GreaterThan, warn: 0, crit: 50}
+  - {name: NamespaceCpuUsage, aggregation: Maximum, operator: GreaterThan, warn: 80, crit: 90}
+  - {name: DeadletteredMessages, aggregation: Average}
+  - {name: ActiveMessages, aggregation: Average}

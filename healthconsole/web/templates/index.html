@@ -1,0 +1,707 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Azure Health Console</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%232563eb'/%3E%3Cpath d='M5 17h6l3-7 4 13 3-6h6' fill='none' stroke='white' stroke-width='2.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+<script>
+  // Before the stylesheet paints, so a picked theme shows at once instead of flashing the system one first.
+  (function () { try { var t = localStorage.getItem("ahc.theme"); if (t === "light" || t === "dark") document.documentElement.setAttribute("data-theme", t); } catch (e) {} })();
+</script>
+<link rel="stylesheet" href="{{ asset('style.css') }}">
+<script src="{{ url_for('healthconsole.static', filename='vendor/cytoscape-3.30.2.min.js') }}"></script>
+<script src="{{ url_for('healthconsole.static', filename='vendor/chart-4.4.4.umd.min.js') }}"></script>
+</head>
+<body>
+<div id="alert-bar" class="alert-bar hidden" aria-live="polite">
+  <div class="alert-line">
+    <span id="alert-summary"></span>
+    <span class="spacer"></span>
+    <span id="alert-heartbeat" class="muted"></span>
+    <button id="alert-history" type="button" class="link">History</button>
+    <button id="alert-dismiss" type="button" class="hidden">Dismiss</button>
+  </div>
+  <div id="alert-list" class="alert-list hidden"></div>
+</div>
+<header class="topbar">
+  <a id="home" class="home" href="./" title="Back to Triage"><strong>Azure Health Console</strong></a>
+  <span class="muted readonly-tag">read-only</span>
+  <div class="search">
+    <input id="search" type="search" placeholder="Search any resource or resource group…" autocomplete="off"
+           aria-label="Search resources and resource groups in every subscription">
+    <div id="search-results" class="search-results hidden" role="listbox"></div>
+  </div>
+  <label class="search-scope muted" title="Search every subscription you can read (in-scope results first), or only the scope in use">
+    <input id="search-only-scope" type="checkbox"> only in scope</label>
+  <span class="spacer"></span>
+  <label>Tenant <select id="tenant"></select></label>
+  <label class="persona-pick" title="How the console is laid out for you: home page, menu, card order and detail. It never changes what you can read: your Azure roles decide that.">View as
+    <select id="persona" aria-label="View as persona"></select></label>
+  <div class="dropdown account">
+    <button id="account-button" type="button" aria-haspopup="true" title="Your sign-in, Refresh access, Sign in / out, theme and About"><span id="identity"></span><span class="account-word">Account</span></button>
+    <div id="account-panel" class="panel account-panel hidden" role="menu" aria-label="Account">
+      <div class="account-head"><span id="account-avatar" class="avatar" aria-hidden="true"></span>
+        <div><strong id="account-who"></strong><span id="account-tenant" class="muted"></span></div></div>
+      <button id="refresh" type="button" class="menu-item" role="menuitem" title="Drop cached tokens and results, e.g. after activating PIM or a new az login"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg><span>Refresh access<small>After activating PIM, or a new az login</small></span></button>
+      <button id="clear-cache" type="button" class="menu-item" role="menuitem" title="Forget the costs kept on this machine and every answer kept in memory"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M6 6l1 14h10l1-14"/></svg><span>Clear cached data<small>Costs kept on this machine, answers in memory</small></span></button>
+      <button id="signin-again" type="button" class="menu-item hidden" role="menuitem" title="Run az login or az logout from here: switch account or tenant, add another account's tenant, or sign out"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/><path d="M10 17l5-5-5-5"/><path d="M15 12H3"/></svg><span>Sign in or out<small>Switch account or tenant, or sign out</small></span></button>
+      <div class="menu-sep" role="separator"></div>
+      <div class="account-theme"><span class="muted">Theme</span>
+        <div class="theme-switch" role="group" aria-label="Theme">
+          <button type="button" data-theme-value="light" aria-label="Light theme" title="Light"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/></svg><span>Light</span></button>
+          <button type="button" data-theme-value="system" aria-label="Match system theme" title="Follow your system's setting"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="2" y="4" width="20" height="13" rx="2"/><path d="M8 21h8M12 17v4"/></svg><span>Auto</span></button>
+          <button type="button" data-theme-value="dark" aria-label="Dark theme" title="Dark"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg><span>Dark</span></button>
+        </div></div>
+      <div class="menu-sep" role="separator"></div>
+      <button id="about-open" type="button" class="menu-item" role="menuitem" title="What this console is, its version and where your files are"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/></svg><span>About<small>Version, and where your files are</small></span></button>
+    </div>
+  </div>
+</header>
+<section id="signin-panel" class="signin-panel hidden" aria-label="Sign in again"></section>
+
+<section id="signin" class="signin hidden" aria-live="assertive"></section>
+
+<nav class="viewbar">
+  <div class="views" role="tablist">
+    <button data-view="summary" role="tab" title="Problems now, costs, security and readiness in a few lines">Summary</button>
+    <button data-view="triage" role="tab">Triage</button>
+    <button data-view="browse" role="tab">Browse</button>
+    <button data-view="investigate" role="tab" title="One failing request end to end, down to its pod">Investigate</button>
+    <button data-view="readiness" role="tab">Readiness</button>
+    <button data-view="security" role="tab" title="Exposure, keys, transport and deletion protection across the scope, and Defender's vulnerabilities">Security</button>
+    <button data-view="cost" role="tab" title="What the scope costs, what moved and spiked, and resources billed while doing nothing">Cost</button>
+    <span class="nav-menu">
+      <button type="button" class="nav-menu-btn" data-menu="menu-sweeps" aria-haspopup="true"
+        title="Sweeps across the scope: Secrets and certificates, Network">Sweeps<span class="nav-current"></span> <span id="secrets-badge" class="badge hidden"></span></button>
+      <div id="menu-sweeps" class="nav-panel hidden">
+        <button data-view="secrets" role="tab" data-short="Secrets">Secrets &amp; certificates</button>
+        <button data-view="network" role="tab">Network</button>
+      </div>
+    </span>
+    <span class="nav-menu" id="tools-menu">
+      <button type="button" class="nav-menu-btn" data-menu="menu-tools" aria-haspopup="true" title="ServiceNow and monitoring tools">Tools<span class="nav-current"></span></button>
+      <div id="menu-tools" class="nav-panel hidden">
+        <button data-view="servicenow" role="tab" id="tab-servicenow" class="hidden">ServiceNow</button>
+        <span id="tool-tabs" class="tool-tabs"></span>
+      </div>
+    </span>
+    <button data-view="watchlist" role="tab">Watchlist</button>
+    <button data-view="access" role="tab">Access <span id="access-badge" class="badge ok hidden"></span></button>
+    <span class="nav-menu hidden" id="more-menu">
+      <button type="button" class="nav-menu-btn" data-menu="menu-more" aria-haspopup="true" title="Views outside your persona: all still here">More<span class="nav-current"></span></button>
+      <div id="menu-more" class="nav-panel hidden"></div>
+    </span>
+    <span class="spacer"></span>
+    <button data-view="settings" role="tab">Settings</button>
+  </div>
+</nav>
+
+<div id="session-bar" class="session-bar hidden" role="status"></div>
+<div class="scopebar" aria-label="Scope used by Triage, Browse, Secrets and Network">
+  <span class="scope-field"><span class="field-label" title="A saved scope sets everything to its right in one pick">Using</span>
+  <div class="dropdown">
+      <button id="saved-button" type="button" aria-haspopup="true" title="Named scopes: subscriptions, filters and connections in one pick">Saved scopes</button>
+      <div id="saved-panel" class="panel hidden">
+        <div id="saved-changed" class="panel-tools saved-changed hidden">
+          <span class="muted">The scope differs from this saved scope.</span>
+          <button type="button" id="saved-update">Update</button>
+          <button type="button" id="saved-revert" class="link">Revert</button>
+        </div>
+        <div id="saved-list" class="list"></div>
+        <div class="panel-tools"><button type="button" id="saved-save">Save current as…</button></div>
+      </div>
+    </div>
+  </span>
+  <span class="scope-sep" aria-hidden="true"></span>
+  <span class="scope-field"><span class="field-label">Subscriptions</span>
+  <div class="dropdown">
+    <button id="subs-button" type="button" aria-haspopup="true">Subscriptions</button>
+    <div id="subs-panel" class="panel hidden">
+      <div class="panel-tools">
+        <button type="button" id="subs-all">All</button>
+        <button type="button" id="subs-none">Clear</button>
+      </div>
+      <input id="sub-filter" type="search" placeholder="Filter subscriptions">
+      <div id="subs" class="list"></div>
+    </div>
+  </div>
+  </span>
+  <span class="scope-field"><span class="field-label" title="Narrow resource groups by their tags">Tags</span>
+  <div id="scope-tags" class="tag-filters"></div></span>
+  <span class="scope-field"><span class="field-label">Resource groups</span>
+  <div class="dropdown">
+    <button id="rgs-button" type="button" aria-haspopup="true">Resource groups</button>
+    <div id="rgs-panel" class="panel hidden">
+      <div class="panel-tools">
+        <button type="button" id="rgs-all" title="Every resource group in the chosen subscriptions (after tag filters)">All</button>
+        <button type="button" id="rgs-shown" title="Type in the search box, then keep only the groups it shows">Only these</button>
+      </div>
+      <input id="rg-pick-filter" type="search" placeholder="Search resource groups">
+      <p id="rg-picks-state" class="muted pick-state"></p>
+      <div id="rg-picks" class="list"></div>
+    </div>
+  </div>
+  </span>
+  <span class="scope-sep" aria-hidden="true"></span>
+  <span id="conn-pickers" class="conn-pickers"></span>
+  <span class="spacer"></span>
+  <span id="scope-pending" class="scope-pending hidden" role="status">
+    <span id="scope-pending-text"></span>
+    <button type="button" id="scope-apply" class="primary" title="Reload every tab for this scope">Apply</button>
+    <button type="button" id="scope-discard" title="Go back to the scope in use">Discard</button>
+  </span>
+  <span id="scope-summary" class="muted"></span>
+</div>
+<section id="persona-first" class="persona-first hidden" aria-label="Pick how you use the console"></section>
+
+<section id="view-triage" class="view hidden">
+  <div class="view-head">
+    <h2>What's wrong now</h2>
+    <span id="triage-meta" class="muted"></span>
+    <span class="spacer"></span>
+    <button id="triage-readiness" type="button" title="Before a peak: what would stop the scope from scaling">Pre-peak readiness</button>
+    <label class="inline muted" title="For this tab; the default is in Settings → General → Triage">Auto-refresh
+      <select id="triage-auto"><option value="0">off</option><option value="1">1 min</option><option value="2">2 min</option>
+        <option value="5">5 min</option><option value="10">10 min</option><option value="15">15 min</option></select></label>
+    <button id="triage-refresh" type="button">Refresh</button>
+  </div>
+  <div id="triage-notice"></div>
+  <p id="triage-summary" class="summary-line"></p>
+  <div id="triage-cards" class="cards"></div>
+</section>
+
+<section id="view-summary" class="view hidden">
+  <div class="view-head">
+    <h2>Summary</h2>
+    <span id="summary-meta" class="muted"></span>
+    <span class="spacer"></span>
+    <button id="summary-copy" type="button" title="Copy these lines as plain text, for a status update or a message">Copy summary</button>
+    <button id="summary-refresh" type="button">Refresh</button>
+  </div>
+  <div id="summary-status" class="summary-status" aria-label="Status by area"></div>
+  <p id="summary-line" class="summary-line"></p>
+  <div id="summary-cards" class="summary-cards"></div>
+  <details class="how-it-works"><summary>How Summary works</summary>
+    <p>Each card is the headline of one view, read with your own access for the scope in use. Your persona picks the
+      cards and their order (<code>personas:</code> → <code>summary</code>); Settings → Summary sets how many items each
+      lists and the thresholds below.</p>
+    <ul>
+      <li><strong>Status line:</strong> one colour per card. Problems: red with a critical problem, yellow with a warning.
+        Security: red when a resource reachable from the internet has high vulnerabilities, yellow with any warning or high
+        finding. Cost: red with a budget spent, yellow with a spike or a budget past the warning share (or forecast past
+        100%). Readiness: red or yellow by its worst finding. <strong>Copy summary</strong> puts it on the first line.</li>
+      <li><strong>Cost</strong> comes from your cost store (see Cost → How this works): this month, where it's heading at
+        its rate so far, the last 30 days, and budgets (one read per subscription, kept an hour). A 7-day change that
+        includes the 1st of the month says so: monthly charges are booked that day.</li>
+      <li><strong>Security</strong> is Security's exposure and configuration checks plus Defender's vulnerability totals.</li>
+      <li><strong>Readiness</strong> shows the last full report for this scope, or runs its quick checks (no Kubernetes or
+        Key Vault reads) for the peak date last used on Readiness.</li>
+      <li><strong>What changed</strong> compares with the summary from at least a day ago (Settings → Summary). Each
+        summary is kept on this machine, readable only by you, for a week by default; Clear cached data removes them.</li>
+    </ul></details>
+</section>
+
+<section id="view-investigate" class="view hidden">
+  <div class="view-head">
+    <h2>Investigate a failing request</h2>
+    <span class="muted">Start with the app that's failing, then follow one request down to the pod that served it. Each
+      step is one read, and nothing runs until you click.</span>
+    <span class="spacer"></span>
+    <label title="How far back steps 2 to 4 look">Look back <select id="inv-window"></select></label>
+    <button id="inv-refresh" type="button" title="Read every step that's open again, from Azure">Refresh</button>
+  </div>
+  <div id="inv-current" class="inv-current hidden"></div>
+  <div id="inv-tools" class="table-tools inv-tools hidden">
+    <span id="inv-gateways" class="inv-gateways"></span>
+  </div>
+  <nav class="subtabs" id="inv-subtabs" aria-label="Investigate views">
+    <button type="button" data-inv-sub="flow" class="active">Failing requests</button>
+    <button type="button" data-inv-sub="search">Search logs</button>
+  </nav>
+  <div id="inv-flow" class="inv-flow">
+    <div class="inv-step" id="inv-apps"><h3><span class="q-num">1</span> Which app is failing?</h3>
+      <p class="muted">Every Application Insights component in scope (where an app sends its requests and errors), with its
+        last hour against the same hour last week, worst first. Pick one.</p>
+      <div id="inv-apps-out"></div>
+      <div class="inv-trace-row"><span class="muted">Already have an operation ID (trace ID) from a log or an alert?</span>
+        <input id="inv-trace" type="search" autocomplete="off" placeholder="Paste it here" aria-label="Operation ID">
+        <button type="button" id="inv-trace-go">Follow</button></div></div>
+    <div class="inv-step hidden" id="inv-ops"><h3><span class="q-num">2</span> What's failing in it<span class="inv-what muted"></span></h3>
+      <div class="inv-parts"><div id="inv-ops-part"><h4>Failing endpoints</h4>
+        <p class="muted">Requests that failed in the look-back window, by endpoint and the service that answered. <strong>Samples</strong>
+        lists the latest failures of one.</p><div id="inv-ops-out"></div></div>
+      <div id="inv-exc-part"><h4>Exceptions</h4>
+        <p class="muted">Exceptions in the look-back window by type, operation and service, including ones thrown where the request
+        still succeeded. <strong>Follow</strong> opens the latest one's request end to end.</p><div id="inv-exc-out"></div></div>
+      <div id="inv-dep-part"><h4>Failing dependencies</h4>
+        <p class="muted">Calls it made that failed (databases, queues, other APIs), by type and target. <strong>Follow</strong> opens
+        a request with one of those failed calls.</p><div id="inv-dep-out"></div></div>
+      <div id="inv-chg-part"><h4>Recent changes</h4>
+        <p class="muted">Changes to the component, the apps that report to it and its gateways, from Azure's change history
+        (settings, configuration, scale). Code deployments don't appear here.</p><div id="inv-chg-out"></div></div></div></div>
+    <div class="inv-step hidden" id="inv-samples"><h3><span class="q-num">3</span> Its latest failures<span class="inv-what muted"></span></h3><div class="inv-body"></div></div>
+    <div class="inv-step hidden" id="inv-request"><h3><span class="q-num">4</span> One request end to end<span class="inv-what muted"></span></h3><div class="inv-body"></div></div>
+    <div class="inv-step hidden" id="inv-pod"><h3><span class="q-num">5</span> The pod that served it<span class="inv-what muted"></span></h3><div class="inv-body"></div></div>
+  </div>
+  <div id="inv-search" class="hidden">
+    <div class="table-tools">
+      <label class="inline">1. App Insights component <select id="inv-search-app" aria-label="App Insights component to search"></select></label>
+      <input id="inv-search-text" type="search" placeholder="2. Message contains… (optional)" aria-label="Message contains">
+      <select id="inv-severity" aria-label="Level"></select>
+      <button type="button" id="inv-search-run" class="primary">Search</button>
+    </div>
+    <p class="muted">Log lines and exceptions the app sent to that component, over the Look back window above. The list
+      is the components in scope, worst first, as on Failing requests.</p>
+    <div id="inv-search-out"></div>
+  </div>
+</section>
+
+<section id="view-cost" class="view hidden">
+  <div class="view-head">
+    <h2>Cost</h2>
+    <span id="cost-meta" class="muted"></span>
+    <span class="spacer"></span>
+    <span class="seg" id="cost-type" title="Actual: as invoiced, a purchase on the day it's billed. Amortized: reservations and savings plans spread over their days and charged to the resources that use them."><button type="button" data-cost-type="actual">Actual</button><button type="button" data-cost-type="amortized">Amortized</button></span>
+    <span class="head-actions"><span class="muted">Export</span>
+    <button id="cost-export-md" type="button" disabled>Markdown</button><button id="cost-export-csv" type="button" disabled>CSV</button>
+    <button id="cost-refresh" type="button">Refresh</button></span>
+  </div>
+  <nav class="subtabs" id="cost-subtabs" aria-label="Cost views">
+    <button type="button" data-cost-sub="spend" class="active">Spending</button>
+    <button type="button" data-cost-sub="waste">Billed while idle</button>
+  </nav>
+  <div id="cost-spend">
+    <details class="how-it-works"><summary>How this works</summary><p class="muted"><strong>Costs are kept on this machine and updated
+      every 6 hours; Refresh gets the latest now (a big scope takes a few minutes).</strong> <strong>Actual</strong> cost (as invoiced) or
+      <strong>Amortized</strong> (reservations and savings plans spread over their days and charged to what uses them; read
+      and kept apart, the first time you pick it). This month is compared with the same days of last month, and purchases
+      (a reservation's monthly payment, billed on one day) are counted in This month but kept out of the 7-day figures and
+      spikes. From Azure Cost Management, read with your own access and kept on this
+      machine (<code>cache_dir</code>, readable only by you), so subscriptions, resource groups, Summary and this view are
+      answered from what's kept instead of asking Azure each time. Azure throttles cost queries to about two dozen
+      subscriptions a minute, so the first read of every subscription you can see runs in the background: the scope in
+      use first, the last 30 days of each before the rest. After that, a subscription older than 6 hours has only its
+      last 3 days read again (older days don't change). <strong>Refresh</strong> rereads the scope now; <strong>Clear
+      cached data</strong> in your account menu forgets everything kept.</p></details>
+    <div id="cost-progress"></div>
+    <div id="cost-counters" class="counters"></div>
+    <div class="table-tools">
+      <span class="muted">Group by</span>
+      <span class="seg" id="cost-group"><button type="button" data-cost-group="subscription">Subscription</button><button type="button" data-cost-group="group">Resource group</button><button type="button" data-cost-group="tag">Tag</button></span>
+      <select id="cost-tag" class="hidden" aria-label="Tag to group by"></select>
+      <select id="cost-sub" class="hidden" aria-label="Subscription"><option value="">All subscriptions</option></select>
+      <span class="muted">Sort by</span>
+      <select id="cost-sort" aria-label="Sort by"><option value="last_30_days">last 30 days</option><option value="month_to_date">this month</option><option value="last_month">last month</option><option value="month_rise">biggest rise vs last month (same days)</option><option value="change">biggest rise (7 days)</option><option value="fall">biggest fall (7 days)</option></select>
+      <span class="spacer"></span>
+      <input id="cost-filter" type="search" placeholder="Filter by name…">
+    </div>
+    <div id="cost-body"></div>
+  </div>
+  <div id="cost-waste" class="hidden">
+    <details class="how-it-works"><summary>How this works</summary><p class="muted">Resources that are billed while doing nothing: unattached disks and public IPs, App Service plans with no
+      apps, VMs stopped without being deallocated, old snapshots, load balancers with nothing behind them. One Resource Graph
+      query, no cost reads.</p></details>
+    <div id="waste-body"></div>
+  </div>
+</section>
+
+<section id="view-security" class="view hidden">
+  <div class="view-head">
+    <h2>Security</h2>
+    <span class="muted">Across the scope in use, with your own access. Read-only.</span>
+  </div>
+  <nav class="subtabs" id="sec-subtabs" aria-label="Security views">
+    <button type="button" data-sec-sub="config" class="active">Exposure &amp; configuration</button>
+    <button type="button" data-sec-sub="vulnerabilities">Vulnerabilities</button>
+  </nav>
+  <div id="sec-config">
+    <div class="table-tools">
+      <span id="sec-meta" class="muted"></span>
+      <span class="spacer"></span>
+      <button id="sec-refresh" type="button">Refresh</button>
+    </div>
+    <details class="how-it-works"><summary>How this works</summary><p class="muted">Every resource in scope whose settings say it's reachable from the internet, accepts keys instead of
+      Entra ID, allows old TLS or HTTP, or isn't protected from deletion: checked by setting, so every resource type that
+      has the setting is covered. Plus NSG rules open to the internet and public IPs on network interfaces.</p></details>
+    <div id="sec-counters" class="counters"></div>
+    <div class="table-tools">
+      <span class="muted">Show</span>
+      <label class="inline"><input type="checkbox" data-sec-sev value="warning" checked> warnings</label>
+      <label class="inline"><input type="checkbox" data-sec-sev value="info" checked> info</label>
+      <label class="inline" title="A public endpoint behind a firewall or authorized IP ranges"><input type="checkbox" data-sec-sev value="restricted"> restricted</label>
+      <label class="inline" title="Created, or one of the checked settings changed, in the last 14 days (Azure keeps 14 days of change history)"><input type="checkbox" id="sec-recent"> only created or changed in the last 14 days</label>
+      <span class="spacer"></span>
+      <input id="sec-filter" type="search" placeholder="Filter by name, type, group or finding…">
+      <span class="seg"><button type="button" data-sec-group="resource">By resource</button><button type="button" data-sec-group="finding">By finding</button></span>
+    </div>
+    <div id="sec-body"></div>
+  </div>
+  <div id="sec-vulns" class="hidden">
+  <div class="view-head">
+    <span id="vuln-meta" class="muted"></span>
+    <span class="spacer"></span>
+    <span class="head-actions"><span class="muted">Export</span>
+    <button id="vuln-export-md" type="button">Markdown</button><button id="vuln-export-csv" type="button">CSV</button><button id="vuln-export-pdf" type="button">PDF</button>
+    <button id="vuln-refresh" type="button">Refresh</button></span>
+  </div>
+  <details class="how-it-works"><summary>How this works</summary><p class="muted">Microsoft Defender for Cloud's findings for the scope in use, where they run, and what isn't scanned; plus platform
+    checks that need no Defender. Read-only, with your own access.</p></details>
+  <div id="vuln-summary" class="ov-cards"></div>
+  <div class="table-tools vuln-filters">
+    <input id="vuln-search" type="search" placeholder="CVE-2026-1234, package, resource, image or version" autocomplete="off"
+           aria-label="Search findings by CVE, package, resource, container or image, or version" title="Several words: all must match. A full CVE ID matches exactly.">
+    <label class="inline" title="VMs and containers running in AKS, not images only stored in a registry"><input type="checkbox" id="vuln-running"> only running</label>
+    <span class="muted">Severity</span>
+    <label class="inline"><input type="checkbox" data-vuln-sev value="High" checked> High</label>
+    <label class="inline"><input type="checkbox" data-vuln-sev value="Medium" checked> Medium</label>
+    <label class="inline"><input type="checkbox" data-vuln-sev value="Low" checked> Low</label>
+    <label class="inline"><input type="checkbox" id="vuln-fixable"> has a fix</label>
+    <label class="inline">CVSS at least <select id="vuln-cvss"><option value="0">any</option><option value="7">7</option><option value="9">9</option></select></label>
+    <label class="inline"><select id="vuln-type"><option value="">all types</option></select></label>
+    <span class="spacer"></span>
+    <span class="seg"><button type="button" data-vuln-view="resources" class="active">By resource</button><button type="button" data-vuln-view="software">By software</button></span>
+  </div>
+  <div id="vuln-search-note"></div>
+  <div id="vuln-body"></div>
+  <h3>Platform checks <span class="muted">(no Defender needed)</span></h3>
+  <div id="vuln-platform" class="cards"></div>
+  <h3>Not scanned</h3>
+  <div id="vuln-coverage"></div>
+  </div>
+</section>
+
+<section id="view-readiness" class="view hidden">
+  <div class="view-head">
+    <h2>Pre-peak readiness</h2>
+    <span id="readiness-meta" class="muted"></span>
+    <span class="spacer"></span>
+    <button id="readiness-export-md" type="button" disabled>Export Markdown</button>
+    <button id="readiness-export-pdf" type="button" disabled>Export PDF</button>
+  </div>
+  <p class="muted">Before a busy period (a sale, a launch, a seasonal peak): if traffic doubled, what would stop the scope
+    above from scaling, and what would expire before the busy period is over? One report, read-only.</p>
+  <details class="how-it-works">
+    <summary>How Readiness works</summary>
+    <p><strong>Peak ends on</strong> is the last day of your busy period. It's only used for expiry: a certificate (or,
+      if ticked, a secret or key) that expires <em>before</em> that date (or has already expired) is red, one that
+      expires within the warning days after it (Settings → expiry warning days, 30 by default) is yellow. Everything else is checked as it stands <em>now</em>: how much room is left to grow.</p>
+    <ul>
+      <li><strong>Scaling headroom</strong>: each autoscale setting, AKS node pool and App Service plan against its
+        maximum. At the maximum is red; at 80% or more is yellow, because it can't absorb double the load.</li>
+      <li><strong>vCPU quota</strong>: free vCPUs per subscription, region and VM family, against what the pools and scale
+        sets in scope would add at their maximum. Quota is shared with everything else in the subscription.</li>
+      <li><strong>Subnet IPs</strong>: subnets running out of addresses, and whether each AKS subnet can hold its pools at
+        their maximum.</li>
+      <li><strong>Single points of failure</strong>: single-instance plans and pools and, with the Kubernetes checks,
+        one-replica workloads and PodDisruptionBudgets that block node drains.</li>
+      <li><strong>HPAs</strong>: each HorizontalPodAutoscaler's replicas against its maximum, and ones that can't scale.</li>
+      <li><strong>Certificates</strong>: expiry against the peak end date, read from Key Vaults and App Service.</li>
+    </ul>
+    <p>The basic checks are a few Resource Graph and quota reads. <strong>Kubernetes and Key Vault checks</strong> add one
+      request per cluster and per vault, so they take longer on a big scope. Each item says what to do before the peak.</p>
+  </details>
+  <div class="table-tools">
+    <label class="inline" title="The last day of your busy period. Only certificates (and secrets, if ticked) use it: anything expiring before it is red.">Peak ends on <input id="readiness-peak-end" type="date"></label>
+    <label class="inline"><input id="readiness-deep" type="checkbox" checked> Kubernetes and Key Vault checks
+      (one request per cluster and vault)</label>
+    <label class="inline"><input id="readiness-secrets" type="checkbox"> include secrets and keys, not only certificates</label>
+    <button id="readiness-run" type="button">Run</button>
+    <button id="readiness-cancel" type="button" class="hidden">Cancel</button>
+  </div>
+  <div id="readiness-counters" class="counters"></div>
+  <div id="readiness-body"></div>
+</section>
+
+<div id="view-browse" class="view layout hidden">
+  <aside class="pickers">
+    <div id="browse-outside" class="outside-bar hidden"></div>
+    <section>
+      <h2>In scope <span id="rg-count" class="muted"></span></h2>
+      <input id="rg-filter" type="search" placeholder="Filter by name or type, e.g. kubernetes"
+             title="Groups by name; resources by name or type across every group in scope (2 characters or more)">
+      <div id="rgs" class="list tree" role="tree"></div>
+      <div id="resources" class="hidden"></div>
+      <p class="muted tree-hint">Click a group to open it; a dot shows a resource's last check.</p>
+    </section>
+  </aside>
+
+  <main>
+    <nav id="crumbs" class="crumbs hidden" aria-label="Where this is"></nav>
+    <div id="group-summary" class="group-summary hidden"></div>
+    <div class="controls">
+      <button id="rerun" disabled title="Run this check again, reading Azure afresh">Check again</button>
+      <span class="dropdown" id="deps-controls">
+        <button id="deps-menu" type="button" aria-haspopup="true" disabled>Dependencies</button>
+        <div id="deps-panel" class="panel menu-panel hidden">
+          <button id="deps" type="button" disabled title="Find what this resource depends on (and what points at it), and draw it coloured by health">Show dependencies</button>
+          <label>Hops <select id="depth"><option>1</option><option>2</option><option>3</option><option>4</option></select></label>
+          <label><input id="inbound" type="checkbox"> also what points at it</label>
+        </div>
+      </span>
+      <span class="control-group hidden" id="group-view" role="group" aria-label="Show the resource group as">
+        <button type="button" data-groupview="table" class="active">Table</button>
+        <button type="button" data-groupview="graph">Graph</button>
+      </span>
+      <span class="spacer"></span>
+      <span class="dropdown">
+        <button id="export-menu" type="button" aria-haspopup="true" disabled>Export</button>
+        <div id="export-panel" class="panel menu-panel menu-right hidden">
+          <button id="export-md" type="button" disabled>Markdown</button>
+          <button id="export-pdf" type="button" disabled>PDF</button>
+          <button id="print" type="button" disabled title="Open the report as a page; print it or Save as PDF from the browser">Printable report</button>
+          <button id="copy-link" type="button" disabled title="Copy a link that opens this view">Copy link</button>
+        </div>
+      </span>
+      <button id="watch" disabled title="Add what's on screen to the Watchlist">Watch</button>
+    </div>
+    <div id="message" class="message hidden"></div>
+    <div id="summary" class="summary hidden"></div>
+    <div id="service-health" class="banner hidden"></div>
+    <div class="workspace">
+      <div id="graph" class="graph"><p class="empty">Pick a resource, or click "check" next to a resource group, to see its health.
+        Or search at the top.</p></div>
+      <div id="detail" class="detail hidden"></div>
+    </div>
+    <div id="notes" class="notes hidden"></div>
+  </main>
+</div>
+
+<section id="view-secrets" class="view hidden">
+  <div class="view-head">
+    <h2>Secrets &amp; certificates</h2>
+    <span id="secrets-meta" class="muted"></span>
+    <span class="spacer"></span>
+    <button id="secrets-export-md" type="button" disabled>Export Markdown</button>
+    <button id="secrets-export-csv" type="button" disabled>Export CSV</button>
+    <button id="secrets-export-pdf" type="button" disabled>Export PDF</button>
+    <button id="secrets-refresh" type="button">Refresh</button>
+  </div>
+  <p class="muted">Key Vault secrets, keys and certificates, plus App Service certificates, in the scope above.
+    Names and dates only; values are never read.</p>
+  <div id="secrets-counters" class="counters"></div>
+  <div class="table-tools">
+    <input id="secrets-filter" type="search" placeholder="Filter by name, vault, resource group, subscription…">
+    <label class="inline"><input id="secrets-long-expired" type="checkbox"> include items expired more than 90 days ago</label>
+  </div>
+  <div id="secrets-body"></div>
+</section>
+
+<section id="view-network" class="view hidden">
+  <div class="view-head">
+    <h2>Network: address space and subnet IPs</h2>
+    <span id="network-meta" class="muted"></span>
+    <span class="spacer"></span>
+    <button id="network-refresh" type="button">Refresh</button>
+  </div>
+  <div class="table-tools"><input id="network-filter" type="search" placeholder="Filter VNets…"></div>
+  <div id="network-body"></div>
+  <div id="vnet-detail"></div>
+</section>
+
+<section id="view-servicenow" class="view hidden">
+  <div class="view-head">
+    <h2>ServiceNow</h2>
+    <span id="sn-meta" class="muted"></span>
+    <span class="spacer"></span>
+    <button id="sn-refresh" type="button">Refresh</button>
+  </div>
+  <div class="table-tools">
+    <input id="sn-filter-text" type="search" placeholder="Filter by number, text, group, resource…">
+    <select id="sn-priority" aria-label="Priority">
+      <option value="">All priorities</option><option value="1">P1 only</option><option value="2">P1–P2</option><option value="3">P1–P3</option>
+    </select>
+    <label class="inline"><input type="checkbox" id="sn-scope-only" checked> only records naming Azure resources in scope</label>
+  </div>
+  <div id="sn-body"></div>
+</section>
+
+<section id="view-monitors" class="view hidden">
+  <div class="view-head">
+    <h2 id="mon-title">Monitoring</h2>
+    <span id="mon-meta" class="muted"></span>
+    <span class="spacer"></span>
+    <button id="mon-refresh" type="button">Refresh</button>
+  </div>
+  <nav class="subtabs" id="mon-subtabs" aria-label="New Relic views">
+    <button type="button" data-mon-sub="alerts" class="active">Alerts <span id="mon-alert-count" class="badge hidden"></span></button>
+    <button type="button" data-mon-sub="query">Query</button>
+  </nav>
+  <div id="mon-q" class="mon-q hidden">
+    <div class="q-steps">
+      <div class="q-step">
+        <h3><span class="q-num">1</span> Resource or entity</h3>
+        <label class="muted" for="mon-q-res">Search the resources in scope, or an app or entity name in <span data-tool-label>the tool</span></label>
+        <input id="mon-q-res" type="search" autocomplete="off" placeholder="Type part of a name, e.g. shop">
+        <ul id="mon-q-list" class="q-list" role="listbox"></ul>
+      </div>
+      <div class="q-step">
+        <h3><span class="q-num">2</span> What <span data-tool-label>the tool</span> has for it</h3>
+        <div id="mon-q-plan" class="q-plan"><p class="muted">Pick a resource: this shows what will be read, before anything is.</p></div>
+      </div>
+      <div class="q-step">
+        <h3><span class="q-num">3</span> What to read</h3>
+        <div id="mon-q-kinds" class="segmented" role="group" aria-label="What to read"></div>
+        <p id="mon-q-kind-note" class="muted"></p>
+      </div>
+    </div>
+    <div id="mon-q-out" class="q-out"></div>
+  </div>
+  <div id="mon-alerts">
+  <div class="table-tools">
+    <input id="mon-filter-text" type="search" placeholder="Filter by entity, issue, account, resource…">
+    <select id="mon-severity" aria-label="Severity">
+      <option value="">Critical and warning</option><option value="critical">Critical only</option>
+    </select>
+    <label class="inline"><input type="checkbox" id="mon-scope-only" checked> only what matches Azure resources in scope</label>
+  </div>
+  <div id="mon-body"></div>
+  </div>
+</section>
+
+<section id="view-watchlist" class="view hidden">
+  <div class="view-head">
+    <h2>Watchlist</h2>
+    <span id="watchlist-meta" class="muted"></span>
+    <span class="spacer"></span>
+    <span id="watch-rule" class="muted"></span>
+    <button id="watch-check" type="button">Check now</button>
+  </div>
+  <div class="watch-add">
+    <input id="watch-search" type="search" placeholder="Add to the Watchlist: search any resource or resource group…" autocomplete="off">
+    <div id="watch-search-results"></div>
+  </div>
+  <div id="watchlist-body"></div>
+</section>
+
+<section id="view-settings" class="view hidden">
+  <div class="view-head">
+    <h2>Settings</h2>
+    <span class="spacer"></span>
+    <button id="settings-reload" type="button" title="Re-read the file, e.g. after editing it by hand">Reload from file</button>
+  </div>
+  <div id="settings-message"></div>
+  <div class="settings-layout">
+    <nav id="settings-nav" class="settings-nav" aria-label="Settings sections">
+      <button type="button" data-pane="general" class="active">General</button>
+      <button type="button" data-pane="thresholds">Thresholds</button>
+      <button type="button" data-pane="graph">Dependency graph</button>
+      <button type="button" data-pane="aks">AKS</button>
+      <button type="button" data-pane="files">Files and Watchlist</button>
+      <button type="button" data-pane="integrations">Integrations</button>
+      <button type="button" data-pane="alerts">Alerts</button>
+      <p class="muted settings-file">Saved in <span id="settings-path"></span></p>
+    </nav>
+    <div class="settings-main">
+      <div id="settings-body"></div>
+      <div class="settings-section" id="integrations" data-pane="integrations">
+        <h3 id="integrations-title">Integrations</h3>
+        <p class="muted">Connections to ServiceNow and monitoring tools for the tenant you're signed in to: each tenant has its
+          own, and switching tenant switches them. Read-only: the console only reads from them.</p>
+        <div id="integrations-body"></div>
+      </div>
+      <div class="settings-section" id="alerts" data-pane="alerts">
+        <h3>Alerts</h3>
+        <p class="muted">Keep the page open (or just the console running) and be told when something stops being normal. The
+          console checks each rule on its interval and alerts on a change only: a status that gets worse or something new,
+          never something that was already red at the first check, and an alert resolves itself once it is back to how it was.
+          Alerts stay on this machine: nothing is sent anywhere.</p>
+        <div id="alerts-body"></div>
+      </div>
+    </div>
+  </div>
+  <div id="settings-bar" class="save-bar hidden" role="status">
+    <span id="settings-changes"></span>
+    <span class="spacer"></span>
+    <button id="settings-discard" type="button">Discard</button>
+    <button id="settings-save" type="button" class="primary" disabled>Save</button>
+  </div>
+</section>
+
+<dialog id="about" class="about-dialog" aria-labelledby="about-title">
+  <div class="about">
+    <button type="button" class="about-close link" id="about-close" aria-label="Close">close</button>
+    <h2 id="about-title">Azure Health Console <span id="about-version" class="muted"></span></h2>
+    <p class="about-lead">One place to check the health of everything an app depends on, fast, from your laptop: during an
+      incident, or before a peak. It answers <em>"this resource and everything connected to it: is any of it unhealthy, and
+      what changed?"</em> from what Azure reports, next to ServiceNow and your monitoring tool. It doesn't replace your APM; it
+      answers a different question.</p>
+    <h3>How it works</h3>
+    <ul>
+      <li><strong>Your access, nobody else's.</strong> It reads with your own Azure CLI sign-in (and your PIM roles). It has no
+        access of its own, so it shows exactly what you're allowed to see.</li>
+      <li><strong>Read-only by construction.</strong> Every request to Azure, Kubernetes, ServiceNow and monitoring tools goes
+        through a guard that refuses anything that isn't a read, before it's sent.</li>
+      <li><strong>Stays on your machine.</strong> It runs on 127.0.0.1, keeps settings in your config folder and secrets in
+        the operating system's keychain, and sends nothing anywhere else.</li>
+      <li><strong>Works in any tenant.</strong> No organisation's names or conventions are built in: tags, scopes and rules
+        come from what it finds.</li>
+    </ul>
+    <h3>What's where</h3>
+    <ul class="about-files">
+      <li>Settings: <code id="about-config"></code></li>
+      <li>Watchlist: <code id="about-watchlist"></code></li>
+    </ul>
+    <p class="about-author">Made by <strong>Rafael Sonego da Silva</strong> ·
+      <a href="https://rafaelsonego.com" target="_blank" rel="noopener">rafaelsonego.com</a></p>
+  </div>
+</dialog>
+
+<section id="view-access" class="view hidden">
+  <div class="view-head">
+    <h2>Access</h2>
+    <span class="muted">Read from Azure. The console never activates or changes anything.</span>
+  </div>
+  <nav class="subtabs" id="access-subtabs" aria-label="Access views">
+    <button type="button" data-access-sub="mine" class="active">My access</button>
+    <button type="button" data-access-sub="someone">Check someone's access</button>
+  </nav>
+  <div id="access-someone" class="hidden">
+  <div class="table-tools">
+    <span class="muted">Another user's roles and groups in the subscriptions in scope, read with your own access. Nothing
+      is changed or saved.</span>
+  </div>
+  <div class="user-search">
+    <input id="user-search" type="search" placeholder="Find a user: name, sign-in name, mail or object ID (2 characters or more)"
+           autocomplete="off" aria-label="Search users" aria-controls="user-results">
+    <div id="user-results" class="search-results hidden" role="listbox"></div>
+  </div>
+  <div id="user-access"></div>
+  </div>
+  <div id="access-mine">
+  <div class="table-tools">
+    <span class="muted">Your account's roles and groups.</span>
+    <span class="spacer"></span>
+    <a id="access-activate" data-portal="https://portal.azure.com/#view/Microsoft_Azure_PIMCommon/ActivationMenuBlade/~/azurerbac" href="https://portal.azure.com/#view/Microsoft_Azure_PIMCommon/ActivationMenuBlade/~/azurerbac" target="_blank" rel="noopener">Activate Azure roles in the portal</a>
+    <button id="access-refresh" type="button">Refresh</button>
+  </div>
+  <div id="access-cards" class="ov-cards"></div>
+  <div class="table-tools">
+    <input id="pim-filter" type="search" placeholder="Filter by role, scope or group, e.g. reader prod">
+    <label class="inline"><input id="pim-scope-only" type="checkbox" checked> only roles that cover the scope in use</label>
+  </div>
+  <h3>Azure roles you have now <span id="current-count" class="muted"></span></h3>
+  <p class="muted">Standing assignments and PIM roles you've activated, given to you directly or through a group.</p>
+  <div id="current-body"></div>
+  <h3>Azure roles you can activate <span id="pim-count" class="muted"></span></h3>
+  <div id="pim-body"></div>
+  <h3>Groups</h3>
+  <div class="ov-cards">
+    <div class="card ov-card"><h4>Groups you're in now <span id="groups-count" class="muted"></span></h4>
+      <p class="muted">Includes PIM groups you've activated, so after activating one you can check it took effect. Permanent and
+        PIM memberships look the same here.</p>
+      <input id="groups-filter" type="search" placeholder="Filter groups">
+      <div id="groups-body"></div></div>
+    <div class="card ov-card"><h4>PIM groups you can activate</h4>
+      <p class="muted">Microsoft only lets its own apps read this list, so the console can't show it. The portal's PIM page lists
+        and activates them.</p>
+      <a class="button-link" data-portal="https://portal.azure.com/#view/Microsoft_Azure_PIMCommon/ActivationMenuBlade/~/aadgroup" href="https://portal.azure.com/#view/Microsoft_Azure_PIMCommon/ActivationMenuBlade/~/aadgroup" target="_blank" rel="noopener">Open PIM groups in the portal</a>
+      <div class="notice"><strong>After activating a PIM group, run <code>az login</code> again.</strong> Group membership is part
+        of your sign-in, so Refresh access isn't enough for groups. Azure roles only need Refresh access.</div></div>
+  </div>
+  </div>
+</section>
+
+<script src="{{ asset('app.js') }}"></script>
+</body>
+</html>

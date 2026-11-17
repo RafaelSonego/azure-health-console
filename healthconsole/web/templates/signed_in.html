@@ -1,0 +1,13 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ServiceNow sign-in</title>
+<link rel="stylesheet" href="{{ url_for('healthconsole.static', filename='style.css') }}"></head>
+<body>
+<section class="signin"><div class="signin-card" role="status">
+  <h2>{{ "Signed in to ServiceNow" if ok else "ServiceNow sign-in didn't finish" }}</h2>
+  <p>{{ message }}</p>
+  <p class="muted">{{ "You can close this tab and go back to the console's Settings." if ok else "Go back to the console's Settings and try again." }}</p>
+</div></section>
+</body>
+</html>

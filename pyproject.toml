@@ -1,0 +1,54 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "azure-health-console"
+dynamic = ["version"]
+description = "Read-only Azure health view: pick a resource, see what it depends on and whether any of it is unhealthy."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Rafael Sonego da Silva" }]
+keywords = ["azure", "health", "monitoring", "triage", "cost", "security", "observability"]
+classifiers = [
+  "Environment :: Web Environment",
+  "Intended Audience :: System Administrators",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Topic :: System :: Monitoring",
+]
+dependencies = [
+  "flask>=3.0",
+  "requests>=2.32",
+  "azure-identity>=1.17",
+  "pyyaml>=6.0",
+  "fpdf2>=2.8",
+  "ruamel.yaml>=0.18",
+  "keyring>=25",
+]
+
+[project.urls]
+Homepage = "https://github.com/RafaelSonego/azure-health-console"
+Changelog = "https://github.com/RafaelSonego/azure-health-console/blob/main/CHANGELOG.md"
+Issues = "https://github.com/RafaelSonego/azure-health-console/issues"
+
+[project.optional-dependencies]
+test = ["pytest>=8"]
+build = ["pyinstaller>=6.10"]
+
+[project.scripts]
+azure-health-console = "healthconsole.cli:main"
+
+[tool.setuptools.dynamic]
+version = { file = "VERSION" }
+
+[tool.setuptools.packages.find]
+include = ["healthconsole*"]
+
+[tool.setuptools.package-data]
+healthconsole = ["profiles/*.yaml", "report_templates/*.html", "web/templates/*.html", "web/static/*", "web/static/vendor/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

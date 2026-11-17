@@ -1,0 +1,151 @@
+# Azure Health Console: your settings.
+#
+# Copy this file to:
+#   macOS / Linux:  ~/.config/azure-health-console/config.yaml
+#   Windows:        C:\Users\<you>\.config\azure-health-console\config.yaml
+# (or point the AHC_CONFIG environment variable at it).
+#
+# Everything is optional. Unknown keys are rejected, so a typo fails loudly.
+# After editing, run `python -m healthconsole config` to see what it resolves to.
+
+# ---------------------------------------------------------------- scopes
+# Per tenant: its domain (az account show --query tenantDefaultDomain -o tsv) or its ID.
+tenants:
+  contoso.onmicrosoft.com:
+    # What the page opens with: none (nothing queried until you pick), all, or a saved scope's name.
+    open_with: none
+    # Named scopes (Scope bar → Saved scopes ▾ → Save current as… writes these). Names or IDs; * means
+    # "any text"; case doesn't matter. No scope may be called none or all.
+    saved_scopes: []
+    #   - name: Prod
+    #     subscriptions: ["app-*-002", "app-*-003"]
+    #     resource_groups: ["*-checkout-*"]     # optional
+    #     tag_filters: {costcenter: "1234567"}  # optional
+
+# Tenant opened by default; omit to follow `az account show`.
+# default_tenant: 00000000-0000-0000-0000-000000000000
+
+# ---------------------------------------------------------------- triage
+triage:
+  changes_hours: 1             # how far back "Recent changes" looks
+  include_system_changes: false  # changes made by Azure itself are noisy
+  secret_scan_max_vaults: 200    # the Secrets tab scans automatically up to this many vaults
+  azure_status_feed: true        # read azure.status.microsoft's public feed for Azure-wide outages
+
+# ---------------------------------------------------------------- summary
+summary:
+  top_items: 3                 # items each Summary card lists
+  readiness_quick: true        # run Readiness's quick checks (no Kubernetes or Key Vault) when Summary opens
+  budget_warn_percent: 80      # a budget spent past this share turns yellow (spent past 100% is red)
+  compare_hours: 24            # What changed compares with the summary from at least this long ago
+  keep_days: 8                 # summaries kept on this machine for What changed
+
+# ---------------------------------------------------------------- graphs
+graph:
+  auto: false                  # draw the dependency graph on every click (off: Show dependencies draws it)
+  depth: 2                     # hops followed by Show dependencies
+  max_nodes: 60
+  inbound: true                # also find resources that point at the selected one
+  inbound_limit: 25
+  inbound_scope: subscription  # or "tenant" (slower; catches hub private endpoints)
+
+# ---------------------------------------------------------------- health
+health:
+  window_minutes: 15           # metric window for "now"
+  compare_last_week: true      # same window 7 days earlier, for context
+  changes_hours: 24
+  alert_hours: 24              # stateless alerts never resolve; only ones this recent count
+  critical_max_severity: 1     # fired alerts / breached rules at Sev0-1 -> critical
+  warning_max_severity: 2      # Sev2 -> warning; Sev3-4 are shown but don't change status
+  heuristic_limit: 8
+  expiry_warning_days: 30      # Key Vault secrets/keys and certificates: yellow within this many days
+  expiry_critical_days: 7      # ...and red within this many (expired is always red)
+  detectors: true              # run Azure's health/risk detectors (AKS, App Service, Redis...) in each snapshot
+
+# ---------------------------------------------------------------- network
+network:
+  subnet_warning_percent: 80   # share of a subnet's usable IPs in use that turns it yellow
+  subnet_critical_percent: 90  # ...and red
+
+# ---------------------------------------------------------------- AKS
+aks:
+  # Local kubeconfig contexts are tried first: $KUBECONFIG (or ~/.kube/config) and
+  # AKS desktop's folder. Add files or folders here if yours live elsewhere.
+  kubeconfig_paths: []
+  # When no local context matches, fetch the cluster *user* credential from Azure (kept in memory).
+  fetch_credentials: true
+
+# ---------------------------------------------------------------- integrations
+# Per tenant, inside its entry under `tenants:` (by domain or ID; "*" is never used for integrations, so one
+# tenant's ServiceNow or New Relic never shows up in another). Off until enabled; easiest to set in
+# Settings → Integrations, which saves for the tenant you're signed in to.
+# Passwords and API keys are NEVER written here: they go to your OS keychain (or AHC_... env variables).
+# tenants:
+#   contoso.onmicrosoft.com:
+#     integrations:
+#       servicenow:                  # one entry per instance; the Scope bar picks which one is used
+#         - name: SN Prod
+#           enabled: true
+#           instance: https://yourcompany.service-now.com
+#           auth: basic              # basic | oauth_browser (your own login) | oauth_client (service account)
+#           username: your.name      # basic only
+#           client_id: ""            # oauth_* only
+#           tables: [incident, change_request, task_ci, change_task, em_alert, em_event]
+#           incident_filter: active=true^state!=6   # active=true alone includes Resolved
+#           match_fields: [short_description, description, cmdb_ci.name]
+#           change_history_days: 30  # closed changes that started this far back
+#           change_ahead_days: 14    # scheduled changes starting within this many days
+#           change_max_records: 5000 # open and closed changes are each read up to this many, a page at a time
+#           incident_max_records: 2000  # incidents matching the filter, highest priority first, a page at a time
+#           max_records: 500         # the page size, and the most Event Management alerts and events
+#           change_match_fields: [justification, implementation_plan, backout_plan, test_plan, business_service]
+#       monitors:                    # one entry per connection; each tool gets its own tab
+#         - name: NR Prod
+#           type: newrelic           # newrelic (now) | datadog | grafana (later)
+#           enabled: true
+#           region: us               # us | eu
+#           account_ids: [1234567]
+#     # Named scopes (Scope bar → Saved scopes): subscriptions, groups, tag filters and connections in one pick.
+#     saved_scopes:
+#       - name: Prod
+#         subscriptions: ["*-prod-*"]
+#         connections: {servicenow: SN Prod, newrelic: NR Prod}
+#     # Alert rules (Settings → Alerts): each watches a saved scope or the Watchlist and alerts on a change only.
+#     alert_rules:
+#       - name: Prod
+#         scope: Prod                # a saved scope's name; or `watchlist: true` instead
+#         signals: [status, new_red, service_health]   # also servicenow, monitors; a Watchlist rule: [status, last_week]
+#         servicenow_priority: 2     # with servicenow: P1 and P2 (1 to 5)
+#         interval_minutes: 5        # 2-30; 5 or more for a scope
+#         notify: true               # browser notification as well as the bar
+#         notify_recovered: true     # and one when it's back to normal
+#         enabled: true
+
+# ---------------------------------------------------------------- personas
+# View as (top right): how a kind of user looks at the console, never what they can read. Built in: manager, sre,
+# devops, security, everything. Change a built-in by giving only the fields that differ, or add your own (label and
+# views at least). views: summary triage browse investigate readiness security cost secrets network tools watchlist
+# access; cards: alerts appinsights service_health failed aks autoscale private_endpoints public_access subnets;
+# tabs: overview timeline metrics workloads nodes appinsights details scaling diagnostics vulnerabilities
+# recommendations cost security; detail: full | summary; summary (Summary's cards, in order; empty = all): problems
+# changes cost security readiness access.
+# personas:
+#   sre:
+#     home: investigate
+#   finops:
+#     label: FinOps
+#     about: What we spend, where it moved, and what's billed for nothing.
+#     views: [cost, summary, browse]
+#     tabs: [cost, overview]
+#     detail: summary
+#     summary: [cost, changes, problems]
+# The persona the console opens with at every start (Settings → General → Persona); empty asks on first run.
+# persona: sre
+
+# ---------------------------------------------------------------- files
+watchlist_file: ~/.config/azure-health-console/watchlist.yaml
+profiles_dir: ~/.config/azure-health-console/profiles
+exports_dir: exports
+cache_dir: ~/.cache/azure-health-console  # the cost store: one file per tenant and account, readable only by you
+# PDF uses built-in Latin fonts. For names in other scripts, point this at any .ttf (e.g. DejaVuSans.ttf).
+pdf_font: null

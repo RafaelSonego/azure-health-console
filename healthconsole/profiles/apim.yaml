@@ -1,0 +1,6 @@
+type: microsoft.apimanagement/service
+metrics:
+  - {name: Capacity, aggregation: Average, operator: GreaterThan, warn: 75, crit: 90}
+  - {name: FailedRequests, aggregation: Total}
+  - {name: Duration, aggregation: Average}
+  - {name: BackendDuration, aggregation: Average}
