@@ -46,7 +46,7 @@ version = { file = "VERSION" }
 include = ["healthconsole*"]
 
 [tool.setuptools.package-data]
-healthconsole = ["profiles/*.yaml", "report_templates/*.html", "web/templates/*.html", "web/static/*", "web/static/vendor/*"]
+healthconsole = ["profiles/*.yaml", "report_templates/*.html", "web/templates/*.html", "web/static/*", "web/static/vendor/*", "diagram_icons/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -4,6 +4,107 @@ All notable changes to this project are documented here. The format is based
 on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.2] - 2026-11-18
+
+### Added
+
+- Security → Exposure: Service Bus and Event Hubs namespaces and SQL servers with public access are judged by their
+  firewall rules (one read each, in parallel, only on Security and a resource's Overview, not Triage) instead of
+  "firewall rules aren't read here". A namespace whose default action is Allow is open even with rules stored
+  (Azure keeps them but doesn't apply them); a SQL rule for every address is a warning, *Allow Azure services* is named.
+- AI Search is judged by its IP rules; Recovery Services vaults say they have no IP firewall; Arc private link
+  scopes are no longer listed (they aren't endpoints).
+- **A new version is out**: an installed copy (pip, pipx or brew) asks PyPI every 6 hours; a newer release puts a dot
+  on the account button and a line in its menu, and About gives the upgrade command for how it was installed
+  (`brew upgrade`, `pipx upgrade` or `pip install -U`, from where its Python lives) and links to the release notes.
+  **Not now** hides the dot until the next version (per browser). A checkout never asks. Setting `updates.check`
+  (on); copies older than this one can't tell.
+- About → **On PyPI**: the latest release (and "you have …" when it's newer than yours), downloads for the last day,
+  week and month and in all (pypistats.org, without mirrors), with links to the project page and pypistats. Three
+  public GETs, guarded to those URLs, only when About opens; kept 6 hours (a failure 10 minutes), **Read again**
+  reads now. About's "Stays on your machine" now names the public pages the console reads.
+- Diagnostics: for a type without detectors (SQL databases, say) or whose detectors API doesn't answer (Storage), the
+  tab shows Microsoft's troubleshooting guides: service, then problem type, as in the portal's form, then that
+  problem's self-help guides, read on the page, and its solutions and checks, listed with the portal link (Microsoft
+  opens those by creating a Help resource, a write). Tenant-level reads of Microsoft.Support and Microsoft.Help, kept for a day.
+
+### Changed
+
+- Graph and a group's Table: **Minimize** in the bar folds it to that bar (room for the tabs below); **Show graph** /
+  **Show table** brings it back. Each view keeps its own choice until a reload; a folded panel is outlined and
+  tinted in the accent colour and says it's minimized.
+- Browse → a group's page: each type tile opens just that type (or the types behind "other" / "supporting") in the
+  tree on the left, the others folded.
+- Diagnostics: a type whose detectors API times out or answers 5xx (Storage, Event Hubs, Service Bus, Container
+  Registry: 503 after ~41 s on every API version) counts as having no detectors, instead of "didn't answer, tries
+  again in 15 minutes", which never came true. A 401 is still named.
+- Scope bar: the tag filter's key and value pickers show at most 32 characters (the full text on hover) and stay
+  18em wide, like the Cost view's tag picker; a long tag key no longer stretches the list across the screen.
+- Subscriptions picker: with a filter typed, **All shown (N)** ticks just the subscriptions it shows (keeping the
+  others ticked) and **Clear shown** unticks just those; with no filter they work on every subscription as before.
+
+- Graph: a group is a diagram drawn by the console (`core/diagram.py`, inline SVG): bands by role (Ingress,
+  Compute, Hosting, Data & messaging, Identity & secrets, Observability, Network), each box near what it links to,
+  right-angle connectors with lanes for long jumps, Azure's icons (`healthconsole/diagram_icons`), a health colour and
+  dot per box, names cut in the middle. Drawn at 100% in a taller, scrolling box with zoom, Fit, full screen and
+  **Open in new tab**; click a box for its details. Hovering or clicking a box lights its connectors and what they
+  reach and fades the rest (also in the new tab). An identity one resource signs in as folds into it as 🔑 with its
+  role arrows starting there (an AKS cluster's AcrPull on its registry is one arrow); unused identities sit in a small
+  row; container registries are drawn with Hosting; a legend explains the marks; boxes sit near what they link to
+  in both directions. A single resource's dependencies are laid out by ELK's layered
+  layout (bundled, `static/vendor`), left to right.
+- Graph: role assignments are drawn as dashed amber arrows, from an identity (or the resource that signs in as it) to
+  a resource it holds a role on, labelled with the role, e.g. an AKS kubelet identity's AcrPull on its registry. One
+  Resource Graph query per check; roles on a whole group or subscription aren't drawn.
+- Graph: plumbing is left out unless it joins two other resources (network interfaces, private endpoints, Event Grid
+  system topics, API connections, autoscale settings, registry replications; links to the Network band don't count);
+  a private endpoint shows as 🔒 on what it serves and an AKS cluster's node pools as +N on it; anything critical or
+  warning is always drawn; a line names what was left out, with **Show everything**. On an 81-resource group: 34
+  boxes. The Table, exports and Browse still list every resource.
+- A group's summary lists its workloads first, by role (compute, hosting, data…, the diagram's bands) then by count,
+  up to 8 types; network interfaces, private endpoints, system topics and the like share one "supporting" tile at the
+  end (hover lists them).
+- A group's summary offers **Show last check** (its kept check, without checking again) beside **Check again**.
+
+- Diagram: a filter box lights the boxes whose name or type matches every word typed, with what they connect to,
+  and scrolls to the first; it uses search's type names, so "k8s" finds an AKS cluster. In the new tab too.
+- A group check opens on Table each time (Graph with `graph.auto`); the Table/Graph choice is no longer remembered.
+- Diagram: connectors run along the gaps between boxes on a grid, so none passes behind a box (no side lanes);
+  **Problems** lights every critical or warning box and what it connects to; a problem box shows its worst signal on
+  a third line, the hover text up to three; connector labels sit beside the arrow into a box, the role only (the
+  identity it goes through is in the hover text).
+- A single resource's dependencies are the same diagram (bands, icons, focus, the resource outlined) and include
+  what its identities hold a role on, e.g. an AKS cluster's registry. Cytoscape and ELK are no longer bundled.
+- Roles held on a whole group, subscription or management group are listed in the box's hover text and in the
+  resource's Overview (**Roles it holds**, with roles on resources and which identity holds them).
+- The printable report draws the same diagram (PDF and Markdown keep their simpler graph).
+- Security → Exposure: API Management is judged by its virtual network mode, Data Explorer (Kusto) by its allowed IP
+  ranges, Synapse by its firewall rules (read like SQL's); Databricks and Data Factory say they have no IP firewall
+  in ARM instead of "not read". Measured: "not read" went from 38 to 8 resources.
+
+### Fixed
+
+- Overview → Needs attention: a monitoring tool's entity in critical or warning with no matched open issue (New
+  Relic's alert state on the entity itself) is listed, as Triage's alerting card already did; it said "Nothing needs
+  attention" before. The tool's tab badge counts it too. An entity an open issue already covers (by guid, or New
+  Relic's entity for the issue itself, same name) isn't listed twice.
+- ServiceNow → **OAuth sign-in** is now offered in Settings (it was hidden). On SSO instances that block basic auth
+  over the REST API, pick *OAuth: sign in with your own ServiceNow login*, enter the Application Registry client ID
+  and secret, Save, then **Sign in with ServiceNow**: the browser does the login (MFA included) and the console keeps
+  a refresh token. One app registration by an admin, then every user self-serves; the backend already existed. The
+  app's **Scope Restriction** must be **Broadly scoped** (the default Securely scoped issues a token that 403s every
+  table, even as admin), and its Redirect URL must match the console's host:port exactly. See the README.
+- ServiceNow and monitoring matches: a name glued to more text by an underscore (`my-rg_prod query result…`, a
+  condition name pasted into the incident) matches the resource; the whole word is still tried for names with `_`.
+- Graph and Dependencies: a nested resource is linked to its parent by its ID ("part of"), so a SQL database whose
+  `managedBy` is empty is no longer drawn alone; a parent's Dependencies list its children.
+- A resource group check stopped at `graph.max_nodes` (60) resources and dropped the rest from the Table and the
+  graph, in type order (storage accounts and scale sets went first), saying so only in Notes. It now reads every
+  resource in the group; `max_nodes` limits only what's added from outside it.
+- Security → Exposure & configuration showed at most 1,000 resources with findings, a different 1,000 each time,
+  and didn't say so: a Resource Graph query ending in `take` gets no next page. The queries now page up to the
+  10,000 cap, and a query cut that way is an error instead of a silent cut.
+
 ## [1.1.1] - 2026-11-16
 
 ### Changed

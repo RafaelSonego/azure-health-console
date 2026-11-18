@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <title>Health snapshot: {{ title }}</title>
 <style>
+{{ theme|safe }}
   @page { size: A4 landscape; margin: 14mm; @bottom-right { content: counter(page) " / " counter(pages); font-size: 9px; color: #57606a; } }
   body { font-family: Helvetica, Arial, sans-serif; font-size: 11px; color: #1f2328; }
   h1 { font-size: 20px; margin: 0 0 6px; }
@@ -16,7 +17,8 @@
   th { background: #f6f8fa; }
   code { font-size: 9px; color: #57606a; word-break: break-all; }
   .node { page-break-inside: avoid; }
-  .graph { page-break-inside: avoid; margin: 6px 0; }
+  .graph { margin: 6px 0; }
+  .graph svg { max-width: 100%; height: auto; }
   .print-bar { margin-bottom: 10px; }
   @media print { .print-bar { display: none; } }
 </style>

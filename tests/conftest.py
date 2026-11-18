@@ -50,7 +50,7 @@ class FakeClient:
         self.call_count = 0
         self.identity = FakeTokens.identity
 
-    def query(self, kql, subscriptions=None):
+    def query(self, kql, subscriptions=None, limit=None):
         self.call_count += 1
         self.queries.append(kql)
         for marker, handler in self.query_handlers:

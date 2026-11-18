@@ -34,6 +34,7 @@ DEFAULTS = {
                 "keep_days": 8},
     "personas": {},
     "persona": "",
+    "updates": {"check": True},
 }
 # One ServiceNow connection's settings; `servicenow` is a list of these, each with a unique name.
 SERVICENOW_DEFAULTS = {"name": "ServiceNow", "enabled": False, "instance": "", "auth": "basic", "username": "",
@@ -160,6 +161,9 @@ SCHEMA = [
     ("summary", "compare_hours", "int",
      "Summary's What changed compares with the summary from at least this many hours ago (24 = since yesterday)."),
     ("summary", "keep_days", "int", "Summary: how many days of summaries are kept on this machine for What changed."),
+    ("updates", "check", "bool",
+     "Ask PyPI, once every 6 hours while the page is open, whether a newer version is out, and say so in the account "
+     "menu. Nothing about you is sent; off for machines that can't reach PyPI or teams that pin a version."),
     (None, "persona", "text",
      "The persona the console opens with: its home page, which views lead the menu, card order and detail. Empty asks "
      "on first run, then keeps the last one picked in this browser. View as still switches it for the session."),

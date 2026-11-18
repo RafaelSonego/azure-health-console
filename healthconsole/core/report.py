@@ -1,12 +1,11 @@
 """Snapshot → Markdown (Mermaid graph), PDF (fpdf2, pure Python) or a printable HTML page.
 Exports return bytes; the front end decides whether to save or download them."""
 import re
-from html import escape
 from pathlib import Path
 
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
-from . import alert_detail, baseline
+from . import alert_detail, baseline, diagram
 from .model import CRITICAL, HEALTHY, INFO, UNKNOWN, WARNING
 
 TEMPLATES = Path(__file__).resolve().parent.parent / "report_templates"
@@ -195,43 +194,12 @@ def layout(snapshot):
     return position, width, height
 
 
-def to_svg(snapshot):
-    position, width, height = layout(snapshot)
-
-    parts = [f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width} {height}" '
-             f'width="100%" font-family="Helvetica, Arial, sans-serif">']
-    for edge in snapshot.edges:
-        if edge.source not in position or edge.target not in position:
-            continue
-        (sx, sy), (tx, ty) = position[edge.source], position[edge.target]
-        if sx <= tx:
-            x1, x2 = sx + BOX_W, tx
-        else:
-            x1, x2 = sx, tx + BOX_W
-        parts.append(f'<line x1="{x1}" y1="{sy + BOX_H / 2}" x2="{x2}" y2="{ty + BOX_H / 2}" '
-                     f'stroke="#8c959f" stroke-width="1"/>')
-    for node in snapshot.nodes:
-        x, y = position[node.id]
-        fill, stroke = STATUS_COLOURS.get(node.status, STATUS_COLOURS[UNKNOWN])
-        width_px = 2.5 if node.direction == "root" else 1
-        name = node.name if len(node.name) <= 26 else node.name[:25] + "…"
-        parts.append(
-            f'<rect x="{x}" y="{y}" width="{BOX_W}" height="{BOX_H}" rx="6" fill="{fill}" '
-            f'stroke="{stroke}" stroke-width="{width_px}"/>'
-            f'<text x="{x + 8}" y="{y + 19}" font-size="12" fill="#1f2328">{escape(name)}</text>'
-            f'<text x="{x + 8}" y="{y + 35}" font-size="10" fill="#57606a">'
-            f'{escape(node.display_type)} · {node.status}</text>'
-        )
-    parts.append("</svg>")
-    return "".join(parts)
-
-
 def to_html(snapshot, printable=False):
     environment = Environment(loader=FileSystemLoader(TEMPLATES),
                               autoescape=select_autoescape(["html"]))
     environment.filters["num"] = _fmt
     return environment.get_template("report.html").render(
-        s=snapshot, counts=snapshot.counts(), svg=to_svg(snapshot),
+        s=snapshot, counts=snapshot.counts(), svg=diagram.render_svg(snapshot.to_dict()), theme=diagram.theme_css(light_only=True),
         summary=summary, colours=STATUS_COLOURS, printable=printable, title=title(snapshot),
     )
 

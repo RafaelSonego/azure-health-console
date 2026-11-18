@@ -80,6 +80,8 @@ def _resource(row):
         "subscription_id": (row.get("subscriptionId") or "").lower(),
         "provisioning_state": row.get("provisioningState") or "",
         "exposure": exposure.classify(row),
+        "tier_rank": taxonomy.TIER_RANK[taxonomy.tier(row.get("type"))],
+        "plumbing": bool(taxonomy.graph_role(row.get("type"))),
     }
 
 

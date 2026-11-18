@@ -84,9 +84,11 @@ def merge(*lists):
 
 
 def _words(text):
-    """Every word, plus the parts of a dotted one, so `myapp.azurewebsites.net` also tries `myapp`."""
+    """Every word, plus the parts of a dotted or underscored one, so `myapp.azurewebsites.net` also tries `myapp` and
+    `my-rg_prod` (a condition name glued on) tries `my-rg`; the whole word still counts, for names with `_` in them."""
     words = set(TOKEN.findall((text or "").lower()))
-    return words | {part for word in words if "." in word for part in word.split(".") if len(part) > 1}
+    return words | {part for word in words if "." in word or "_" in word
+                    for part in re.split(r"[._]", word) if len(part) > 1}
 
 
 def hits_resource(matches, resource_id):

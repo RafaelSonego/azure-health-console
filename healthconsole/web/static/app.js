@@ -8,7 +8,7 @@ const state = {
   pendingTagKey: "",
   subscriptions: [], groups: [], resources: [],
   scope: { subs: new Set(), groups: new Set(), tags: {} }, browseGroup: null, selectedResource: null,
-  jobId: null, snapshot: null, cy: null, busy: false, graphAuto: false, groupView: "table",
+  jobId: null, snapshot: null, busy: false, graphAuto: false, groupView: "table",
   secrets: null, secretsFilter: "problems", network: null, networkLoaded: false,
 };
 
@@ -811,9 +811,17 @@ function inUseFirst(rows, inUse, render) {
     <div class="pick-head">Others (${rows.length - first.length})</div>${rows.filter((r) => !inUse(r)).map(render).join("")}`;
 }
 
-function renderSubscriptions() {
+// The subscriptions the picker's filter shows; All and Clear act on these alone while a filter is typed.
+function shownSubscriptions() {
   const filter = $("sub-filter").value.toLowerCase();
-  const rows = state.subscriptions.filter((s) => !filter || s.name.toLowerCase().includes(filter) || s.id.includes(filter));
+  return state.subscriptions.filter((s) => !filter || s.name.toLowerCase().includes(filter) || s.id.includes(filter));
+}
+
+function renderSubscriptions() {
+  const rows = shownSubscriptions();
+  const filtered = rows.length < state.subscriptions.length;
+  $("subs-all").textContent = filtered ? `All shown (${rows.length})` : "All";
+  $("subs-none").textContent = filtered ? "Clear shown" : "Clear";
   const applied = state.applied ? state.applied.subs : new Set();
   $("subs").innerHTML = inUseFirst(rows, (s) => applied.has(s.id), (s) => `<div class="sub-row">
       <label><input type="checkbox" data-id="${esc(s.id)}" ${state.scope.subs.has(s.id) ? "checked" : ""}>
@@ -942,9 +950,9 @@ function renderTagFilters() {
   const available = Object.entries(keys).filter(([key]) => !(key in state.scope.tags))
     .sort((a, b) => b[1].total - a[1].total || a[0].localeCompare(b[0]));
   if (state.pendingTagKey && !keys[state.pendingTagKey]) state.pendingTagKey = "";
-  const keySelect = available.length ? `<select id="tag-key" aria-label="Filter resource groups by tag">
+  const keySelect = available.length ? `<select id="tag-key" aria-label="Filter resource groups by tag" title="${esc(state.pendingTagKey || "Filter resource groups by tag")}">
       <option value="">${Object.keys(state.scope.tags).length ? "+ add" : "+ filter by tag"}</option>
-      ${available.map(([key, info]) => `<option value="${esc(key)}" ${key === state.pendingTagKey ? "selected" : ""}>${esc(key)} (${info.total})</option>`).join("")}
+      ${available.map(([key, info]) => `<option value="${esc(key)}" title="${esc(key)}" ${key === state.pendingTagKey ? "selected" : ""}>${esc(shortTag(key))} (${info.total})</option>`).join("")}
     </select>` : "";
   let valueSelect = "";
   if (state.pendingTagKey) {
@@ -952,8 +960,8 @@ function renderTagFilters() {
     const values = Object.entries(info.values).sort((a, b) => a[0].localeCompare(b[0]));
     valueSelect = `<select id="tag-value" aria-label="Tag value">
       <option value="">choose a value…</option>
-      ${values.map(([value, count]) => `<option value="${esc(value)}">${esc(value)} (${count})</option>`).join("")}
-      <option value="${UNTAGGED}">(no ${esc(state.pendingTagKey)}) (${base.length - info.total})</option>
+      ${values.map(([value, count]) => `<option value="${esc(value)}" title="${esc(value)}">${esc(shortTag(value))} (${count})</option>`).join("")}
+      <option value="${UNTAGGED}" title="${esc(`no ${state.pendingTagKey} tag`)}">(no ${esc(shortTag(state.pendingTagKey))}) (${base.length - info.total})</option>
     </select>`;
   }
   const hidden = state.groups.length - base.length;
@@ -1119,6 +1127,19 @@ function treeResources(all, key, busy = state.resourcesLoading, settingsLike = [
   }).join("");
 }
 
+// From a group summary tile: those types open, every other one folded, the first scrolled into view.
+function showTypesInTree(key, types) {
+  const heads = [...document.querySelectorAll(`#rgs [data-fold-key="${CSS.escape(key)}"][data-type-toggle]`)].map((el) => el.dataset.typeToggle);
+  const fold = state.typeFold[key];
+  if (!fold || !heads.length) return;
+  fold.closed = new Set(heads.filter((t) => !types.includes(t)));
+  for (const t of heads) fold.touched.add(t);
+  renderGroups();
+  const first = [...document.querySelectorAll(`#rgs [data-fold-key="${CSS.escape(key)}"][data-type-toggle]`)]
+    .find((el) => types.includes(el.dataset.typeToggle));
+  if (first) { first.scrollIntoView({ block: "start", behavior: "smooth" }); first.focus({ preventScroll: true }); }
+}
+
 function foldType(key, type, all = null) {
   const fold = state.typeFold[key];
   if (!fold) return;
@@ -1227,6 +1248,8 @@ async function startSnapshot(value, options = {}) {
   }
   hideGroupSummary();
   state.detailNode = null;
+  state.diagramFilter = "";
+  if (target.kind === "group") state.groupView = state.graphAuto ? "graph" : "table";  // Graph is a one-off look
   state.target = target;
   state.selectedResource = target.kind === "resource" ? target.id : null;
   state.loadingResource = state.selectedResource;
@@ -1244,7 +1267,7 @@ async function startSnapshot(value, options = {}) {
   document.querySelector(".workspace").classList.remove("solo");
   for (const id of ["summary", "service-health", "notes"]) $(id).classList.add("hidden");
   showMessage("");
-  if (state.cy) { state.cy.destroy(); state.cy = null; }
+  state.diagramSeq = (state.diagramSeq || 0) + 1;  // a diagram still on its way doesn't replace the new check
   const what = target.kind === "group" ? `every resource in <strong>${esc(target.name)}</strong>`
     : target.depth > 0 ? `<strong>${esc(target.name)}</strong> and what it depends on (${target.depth} hop${target.depth === 1 ? "" : "s"})`
       : `<strong>${esc(target.name)}</strong>`;
@@ -1353,7 +1376,7 @@ function renderSnapshot() {
   document.querySelector(".workspace").classList.toggle("solo", solo);
   if (solo && $("graph").querySelector(".graph-loading")) $("graph").innerHTML = "";  // hidden, but its spinner kept counting
   if (s.kind === "group" && state.groupView === "table") renderGroupTable(s);
-  else if (!solo) { if (state.cy && state.partialDrawn) updateStatuses(s); else drawGraph(s); }
+  else if (!solo) drawGraph(s);
   const pending = state.pendingDetail;
   state.pendingDetail = null;
   const linked = pending && s.nodes.find((n) => sameId(n.id, pending.node));
@@ -1378,9 +1401,11 @@ function nodeWhy(node) {
 
 // A resource group reads best as a list, worst first; the graph is one click away.
 function renderGroupTable(s) {
-  if (state.cy) { state.cy.destroy(); state.cy = null; }
+  state.diagramSeq = (state.diagramSeq || 0) + 1;  // a diagram still on its way doesn't replace the table
   const box = $("graph");
+  box.classList.remove("has-diagram");
   box.classList.add("as-table");
+  box.classList.toggle("graph-min", !!state.tableMin);
   const groups = new Set(s.nodes.map((n) => n.resource_group.toLowerCase()));
   const rows = [...s.nodes].sort((a, b) => (STATUS_ORDER[a.status] ?? 5) - (STATUS_ORDER[b.status] ?? 5)
     || a.display_type.localeCompare(b.display_type) || a.name.localeCompare(b.name));
@@ -1388,7 +1413,8 @@ function renderGroupTable(s) {
   const b = s.baseline || {};
   const moved = {};
   for (const m of b.movers || []) (moved[m.node_id] = moved[m.node_id] || []).push(m);
-  box.innerHTML = baselineHtml(s) + `<table class="data-table"><thead><tr><th>Status</th><th>Name</th><th>Type</th>
+  box.innerHTML = `<div class="graph-note table-bar"><span>${rows.length} resource(s), worst first</span><span class="min-slot">${minButton("table")}</span></div>`
+    + baselineHtml(s) + `<table class="data-table"><thead><tr><th>Status</th><th>Name</th><th>Type</th>
       ${groups.size > 1 ? "<th>Resource group</th>" : ""}<th>Why</th><th>Against last week</th><th></th></tr></thead><tbody>${rows.map((n) => `
     <tr class="clickable ${n.id === selected ? "selected" : ""}" data-node="${esc(n.id)}">
       <td>${pill(n.status)}</td><td>${esc(n.name)}</td><td>${esc(n.display_type)}</td>
@@ -1459,10 +1485,17 @@ function renderPartial(partial, phase) {
 }
 
 function updateStatuses(s) {
-  if (!state.cy) return;
-  for (const node of s.nodes) {
-    const element = state.cy.getElementById(node.id);
-    if (element.nonempty() && element.data("status") !== node.status) element.data("status", node.status);
+  const svg = $("graph").querySelector(".diagram svg");
+  if (svg) {  // recolour in place; a left-out item that now has a problem needs a redraw
+    for (const node of s.nodes) {
+      const g = svg.querySelector(`.dg-node[data-id="${CSS.escape(node.id)}"]`);
+      if (!g) { if (GRAPH_PROBLEM.has(node.status) && !state.graphAll) { drawGraph(s); return; } continue; }
+      for (const el of [g, g.querySelector(".dg-dot")]) {
+        if (!el) continue;
+        for (const c of [...el.classList]) if (c.startsWith("st-")) el.classList.remove(c);
+        el.classList.add(`st-${node.status}`);
+      }
+    }
   }
 }
 
@@ -1471,54 +1504,150 @@ function cssVar(name) {
 }
 
 function librariesMissing() {
-  const missing = [["cytoscape", "graph"], ["Chart", "chart"]].filter(([name]) => typeof window[name] === "undefined");
+  const missing = [["Chart", "chart"]].filter(([name]) => typeof window[name] === "undefined");
   return missing.length ? `The ${missing.map(([, what]) => what).join(" and ")} library didn't load. It ships with the
     console (static/vendor), so something on this machine is blocking local files; try a hard refresh (Ctrl/Cmd+Shift+R).` : "";
 }
 
-function drawGraph(s) {
-  if (typeof window.cytoscape === "undefined") {
-    $("graph").innerHTML = noticeHtml(librariesMissing());
-    return;
-  }
-  const container = $("graph");
-  container.innerHTML = "";
-  if (state.cy) state.cy.destroy();
-  state.cy = cytoscape({
-    container,
-    elements: [
-      ...s.nodes.map((n) => ({ data: { id: n.id, label: `${n.name}\n${n.display_type}`, status: n.status, root: n.id === s.root_id } })),
-      ...s.edges.map((e, i) => ({ data: { id: `e${i}`, source: e.source, target: e.target, label: e.label } })),
-    ],
-    style: graphStyle(),
-    layout: s.kind === "group"
-      ? { name: "cose", animate: false, padding: 20, nodeRepulsion: () => 12000, idealEdgeLength: () => 110 }
-      : { name: "breadthfirst", directed: false, roots: [s.root_id], spacingFactor: 1.15, padding: 20 },
-    wheelSensitivity: 0.2,
-  });
-  state.cy.on("tap", "node", (event) => {
-    showDetail(event.target.id(), "overview", { push: true });
-    $("detail").scrollIntoView({ behavior: "smooth", block: "start" });
-  });
+const GRAPH_PROBLEM = new Set(["critical", "warning"]);
+const NO_FOLD = { hidden: [], locked: [], parts: {}, left: {} };
+
+// What was left out and why, with Show everything; `tools` is the diagram's zoom bar.
+function graphNoteHtml(fold, tools = "") {
+  const left = state.graphAll ? "" : Object.entries(fold.left || {}).map(([t, n]) => `${n} ${t}`).join(", ");
+  const marks = [fold.locked.length ? "🔒 marks what a private endpoint serves" : "",
+    Object.keys(fold.parts).length ? "+N counts what's part of a resource (an AKS cluster's node pools)" : ""].filter(Boolean);
+  if (!left && !state.graphAll && !tools) return "";
+  return `<div class="graph-note"><span>${left ? `Not drawn: ${esc(left)}${marks.length ? ` (${marks.join("; ")})` : ""}; the Table lists
+    everything.` : ""}</span><label><input type="checkbox" id="graph-all" ${state.graphAll ? "checked" : ""}> Show everything</label>${tools}</div>`;
 }
 
-// Colours come from the theme's CSS variables, read when drawn; a theme switch re-applies this.
-function graphStyle() {
-  const colour = (status, suffix = "") => cssVar(`--${status === "info" ? "unknown" : status}${suffix}`);
-  return [
-      { selector: "node", style: {
-        shape: "round-rectangle", width: 190, height: 46, label: "data(label)", "text-wrap": "wrap",
-        "text-max-width": 180, "font-size": 11, "text-valign": "center", color: cssVar("--text"),
-        "background-color": (n) => colour(n.data("status"), "-bg"),
-        "border-color": (n) => colour(n.data("status")), "border-width": (n) => (n.data("root") ? 3 : 1) } },
-      { selector: "node:selected", style: { "border-color": cssVar("--accent"), "border-width": 3 } },
-      { selector: "edge", style: {
-        width: 1, "line-color": cssVar("--muted"), "target-arrow-color": cssVar("--muted"),
-        "target-arrow-shape": "triangle", "curve-style": "bezier", label: "data(label)",
-        "font-size": 9, color: cssVar("--muted"), "text-background-color": cssVar("--bg"),
-        "text-background-opacity": 1, "text-rotation": "autorotate" } },
-  ];
+// Every graph (a group, or a resource and its dependencies) is drawn by the server (core/diagram.py) from the snapshot
+// this page holds, at 100% and scrolled; the bar lights the problems, zooms, fits, goes full screen or opens a tab.
+function drawGraph(s) {
+  drawDiagram(s);
 }
+
+// Minimize / Show for the panel's current view (graph or table), each kept on its own until a reload.
+const MIN_VIEWS = { graph: ["graphMin", "graph"], table: ["tableMin", "table"] };
+const minButton = (view) => {
+  const [key, what] = MIN_VIEWS[view];
+  return state[key] ? `<span class="min-note">The ${what} is minimized</span><button type="button" class="primary" data-dz="min" data-min-view="${view}"
+    title="Show the ${what} here again">Show ${what}</button>`
+    : `<button type="button" data-dz="min" data-min-view="${view}" title="Fold the ${what} to this bar, for room below">Minimize</button>`;
+};
+
+const diagramTools = () => `<span class="dg-tools"><input type="search" class="dg-filter" placeholder="Filter: name or type"
+  aria-label="Filter the diagram by name or type" value="${esc(state.diagramFilter || "")}"><span class="dg-count"></span>
+  <button type="button" data-dz="problems" title="Light every critical or warning box and what it connects to">Problems</button>
+  <button type="button" data-dz="-1" title="Zoom out">−</button><span class="dg-zoom">100%</span>
+  <button type="button" data-dz="1" title="Zoom in">+</button><button type="button" data-dz="fit" title="Fit the width">Fit</button>
+  <button type="button" data-dz="full" title="Full screen">⤢</button><button type="button" data-dz="tab">Open in new tab</button>
+  ${minButton("graph")}</span>`;
+
+const diagramTitle = (s) => s.title
+  || `${(s.nodes.find((n) => n.id === s.root_id) || {}).name || "Resource"} and what it connects to`;
+
+async function fetchDiagram(s, page = false) {
+  const response = await api("api/diagram", { method: "POST", raw: true, body: {
+    snapshot: s, show_all: !!state.graphAll, title: diagramTitle(s), page,
+    note: page ? $("graph").querySelector(".graph-note span")?.textContent.replace(/\s+/g, " ").trim() || "" : "" } });
+  if (!response.ok) throw new Error((await response.json().catch(() => ({}))).error || `${response.status} ${response.statusText}`);
+  return response.text();
+}
+
+async function drawDiagram(s) {
+  const seq = (state.diagramSeq = (state.diagramSeq || 0) + 1);
+  const graph = $("graph");
+  const shown = graph.querySelector(".diagram svg");  // kept on screen until the new one arrives
+  graph.classList.add("has-diagram");
+  graph.classList.toggle("graph-min", !!state.graphMin);
+  const note = graphNoteHtml(state.graphAll ? NO_FOLD : s.graph || NO_FOLD, diagramTools());
+  if (!shown) graph.innerHTML = `${note}<div class="diagram">${loading("Drawing the diagram…")}</div>`;
+  let svg;
+  try {
+    svg = await fetchDiagram(s);
+  } catch (error) {
+    if (seq === state.diagramSeq) graph.querySelector(".diagram").innerHTML = noticeHtml(error.message);
+    return;
+  }
+  if (seq !== state.diagramSeq) return;
+  const scroll = graph.querySelector(".diagram") ? [graph.querySelector(".diagram").scrollLeft, graph.querySelector(".diagram").scrollTop] : [0, 0];
+  graph.innerHTML = `${note}<div class="diagram">${svg}</div>`;
+  zoomDiagram(state.diagramZoom || 1);
+  if (state.diagramFilter) filterDiagram(state.diagramFilter, false);
+  else diagramFocusing.refresh();
+  [graph.querySelector(".diagram").scrollLeft, graph.querySelector(".diagram").scrollTop] = scroll;
+}
+
+function zoomDiagram(z) {
+  const svg = $("graph").querySelector(".diagram svg");
+  if (!svg || !svg.viewBox.baseVal) return;
+  state.diagramZoom = Math.max(0.2, Math.min(3, z));
+  svg.setAttribute("width", svg.viewBox.baseVal.width * state.diagramZoom);
+  svg.setAttribute("height", svg.viewBox.baseVal.height * state.diagramZoom);
+  const label = $("graph").querySelector(".dg-zoom");
+  if (label) label.textContent = `${Math.round(state.diagramZoom * 100)}%`;
+}
+
+async function openDiagramTab() {
+  const tab = window.open("", "_blank");  // opened now, while it's still the click, or the browser blocks it
+  try {
+    const html = await fetchDiagram(state.snapshot, true);
+    tab.location = URL.createObjectURL(new Blob([html], { type: "text/html" }));
+  } catch (error) {
+    tab.close();
+    showMessage(error.message, true);
+  }
+}
+
+$("graph").addEventListener("click", (event) => {
+  const tool = event.target.closest("[data-dz]");
+  if (tool) {
+    const box = $("graph").querySelector(".diagram");
+    const svg = box && box.querySelector("svg");
+    if (tool.dataset.dz === "fit" && svg) zoomDiagram((box.clientWidth - 24) / svg.viewBox.baseVal.width);
+    else if (tool.dataset.dz === "full") (document.fullscreenElement ? document.exitFullscreen() : $("graph").requestFullscreen()).catch(() => {});
+    else if (tool.dataset.dz === "tab") openDiagramTab();
+    else if (tool.dataset.dz === "min") {
+      const view = tool.dataset.minView;
+      const key = MIN_VIEWS[view][0];
+      state[key] = !state[key];
+      const graph = $("graph");  // a height dragged with the corner is inline: set aside while folded
+      if (state[key]) { state.panelHeight = graph.style.height; graph.style.height = ""; } else graph.style.height = state.panelHeight || "";
+      graph.classList.toggle("graph-min", state[key]);
+      const slot = tool.closest(".min-slot, .dg-tools");
+      slot.querySelectorAll(".min-note, [data-dz='min']").forEach((el) => el.remove());
+      slot.insertAdjacentHTML("beforeend", minButton(view));
+    }
+    else if (tool.dataset.dz === "problems") { if (!diagramFocusing.problems()) showMessage("Nothing in this picture is critical or warning."); }
+    else zoomDiagram((state.diagramZoom || 1) + Number(tool.dataset.dz) * 0.1);
+    return;
+  }
+  const hit = event.target.closest(".dg-node[data-id]");
+  if (!hit) return;
+  for (const g of $("graph").querySelectorAll(".dg-node.selected")) g.classList.remove("selected");
+  hit.classList.add("selected");
+  showDetail(hit.dataset.id, "overview", { push: true });
+  $("detail").scrollIntoView({ behavior: "smooth", block: "start" });
+});
+const diagramFocusing = diagramFocus($("graph"));  // static/diagram.js
+
+// Lights the boxes whose name or type names hold every word typed (and what they connect to); `jump` scrolls to the first.
+function filterDiagram(text, jump = true) {
+  state.diagramFilter = text;
+  const found = diagramFocusing.filter(text);
+  const count = $("graph").querySelector(".dg-count");
+  if (count) count.textContent = text.trim() ? `${found} match${found === 1 ? "" : "es"}` : "";
+  const first = jump && found ? diagramFocusing.first() : null;
+  if (first) first.scrollIntoView({ block: "nearest", inline: "nearest", behavior: "smooth" });
+}
+$("graph").addEventListener("input", (event) => {
+  if (event.target.classList.contains("dg-filter")) filterDiagram(event.target.value);
+});
+$("graph").addEventListener("keydown", (event) => {
+  if (event.key === "Enter" && event.target.closest(".dg-node[data-id]")) event.target.closest(".dg-node[data-id]").dispatchEvent(new MouseEvent("click", { bubbles: true }));
+});
 
 function fmt(value) {
   if (value == null || value === "") return "–";
@@ -1862,6 +1991,24 @@ async function renderOverviewAppInsights(node) {
   }
 }
 
+// Roles this resource holds, itself or through the identity only it signs in as: on resources in the picture (the
+// dashed arrows) and on whole groups or subscriptions (core/discovery._add_role_links).
+function rolesHeldHtml(node) {
+  const s = state.snapshot;
+  if (!s || !s.nodes) return "";
+  const byId = new Map(s.nodes.map((n) => [n.id, n]));
+  const via = (s.graph && s.graph.via) || {};
+  const holders = [node.id, ...Object.entries(via).filter(([, user]) => user === node.id).map(([id]) => id)];
+  const heldBy = (id) => (id === node.id ? "itself" : esc((byId.get(id) || {}).name || id));
+  const rows = [
+    ...s.edges.filter((e) => e.kind === "role" && holders.includes(e.source))
+      .map((e) => [esc(e.label), `resource ${esc((byId.get(e.target) || {}).name || e.target)}`, heldBy(e.source)]),
+    ...holders.flatMap((id) => ((byId.get(id) || {}).roles || [])
+      .map((r) => [esc(r.role), `${esc(r.scope_kind)} ${esc(r.scope_name)}`, heldBy(id)])),
+  ];
+  return rows.length ? `<h4>Roles it holds</h4>${table(["Role", "On", "Held by"], rows)}` : "";
+}
+
 function tabOverview(node, body) {
   const signals = node.signals.map((sig) => [
     `${esc(sig.name)}<br><span class="muted">${esc(sig.source)}</span>`, pill(sig.status),
@@ -1888,6 +2035,7 @@ function tabOverview(node, body) {
     ${isVault ? `<div id="vault-expiry">${loading("Reading secret and key expiry dates…")}</div>` : ""}
     ${node.type === AKS_TYPE && node.readable ? `<div class="card aks-one" id="aks-one" data-cluster="${esc(node.id)}">${aksOneHtml(node.id)}</div>` : ""}
     <h4 id="signals">Signals</h4>${table(["Signal", "Status", "Value", "Threshold / detail"], signals)}
+    ${rolesHeldHtml(node)}
     <p class="muted ov-id"><code>${esc(node.id)}</code></p>`;
   if (isVault) renderVaultExpiry(node);
   if ($("ov-ai-now")) renderOverviewAppInsights(node);
@@ -1929,7 +2077,15 @@ async function renderOverviewEvents(node) {
       for (const i of r.raw.issues) open.push({ key: toolKey(r.kind, i), status: i.priority === "critical" ? "critical" : i.priority === "warning" ? "warning" : "info",
         tool: r.name, what: `${r.name} issue`, text: i.title || i.id, url: i.url,
         check: { source: "monitor", ...toolParams(r.kind), account: i.account_id ?? "", condition: i.condition || "", policy: i.policy || "", priority: i.priority_label || "" } });
-      setTabBadge(`tool-${r.kind}`, r.raw.issues.length);
+      // An entity the tool holds in critical/warning with no matched open issue (Triage's card lists it too).
+      // Skipped when an open issue covers it: by guid, or by name (New Relic also lists an issue as an entity).
+      const covered = new Set(r.raw.issues.flatMap((i) => i.entity_ids || []));
+      const titles = new Set(r.raw.issues.map((i) => (i.title || "").toLowerCase()));
+      const alerting = (r.raw.entities || []).filter((e) => PROBLEM.has(e.severity) && !titles.has((e.name || "").toLowerCase())
+        && !(e.ids || [e.id]).some((id) => covered.has(id)));
+      for (const e of alerting) open.push({ key: `${r.kind}:entity:${e.id}`, status: e.severity, tool: r.name,
+        what: `${r.name} entity in ${e.severity}${e.type ? ` · ${e.type}` : ""}`, text: e.name, url: e.url });
+      setTabBadge(`tool-${r.kind}`, r.raw.issues.length + alerting.length);
     }
   }
   // Each item is shown once: what another tool has open and is urgent goes in Needs attention (the page never says
@@ -2088,6 +2244,62 @@ function markdownToHtml(text) {
   return out.join("");
 }
 
+// Microsoft's troubleshooting catalogue (all reads): service → problem type → its self-help guides, shown here, and
+// its solutions and checks, which only the portal opens.
+async function helpGuides(node, box, portalLink) {
+  box.innerHTML = loading("Listing Microsoft's troubleshooting guides…");
+  const { services } = await exploreGet("guides", node);
+  if (!services.length) { box.innerHTML = `<p class="muted">Microsoft lists no troubleshooting guides for this type.</p>`; return; }
+  const serviceSelect = services.length > 1
+    ? `<label class="inline">Service <select id="hg-service"><option value="">Pick one…</option>
+        ${services.map((s) => `<option value="${esc(s.id)}">${esc(s.name)}</option>`).join("")}</select></label>` : "";
+  box.innerHTML = `<h4>Troubleshooting guides</h4>
+    <p class="muted">Microsoft's own guides for ${esc(services.length > 1 ? "this type" : services[0].name)}, by problem type,
+      as the portal's form lists them.</p>
+    ${serviceSelect}<span id="hg-problems"></span><div id="hg-solutions"></div>`;
+  const problemsBox = box.querySelector("#hg-problems");
+  const solutionsBox = box.querySelector("#hg-solutions");
+  const showProblems = async (serviceId) => {
+    solutionsBox.innerHTML = "";
+    if (!serviceId) { problemsBox.innerHTML = ""; return; }
+    problemsBox.innerHTML = loading("Listing problem types…");
+    const { problems } = await exploreGet("guides", node, { service: serviceId });
+    const groups = [...new Set(problems.map((p) => p.group))];
+    problemsBox.innerHTML = `<label class="inline">Problem type <select id="hg-problem"><option value="">Pick one…</option>
+      ${groups.map((g) => `<optgroup label="${esc(g)}">${problems.filter((p) => p.group === g)
+        .map((p) => `<option value="${esc(p.id)}">${esc(p.name)}</option>`).join("")}</optgroup>`).join("")}</select></label>`;
+    problemsBox.querySelector("#hg-problem").addEventListener("change", (event) =>
+      showSolutions(event.target.value).catch((error) => { solutionsBox.innerHTML = errorHtml(error); }));
+  };
+  const showSolutions = async (problemId) => {
+    if (!problemId) { solutionsBox.innerHTML = ""; return; }
+    solutionsBox.innerHTML = loading("Asking Microsoft what it offers…");
+    const { solutions } = await exploreGet("guides", node, { problem: problemId });
+    const guides = solutions.filter((s) => s.kind === "guide");
+    const checks = solutions.filter((s) => s.kind === "portal");
+    solutionsBox.innerHTML = (solutions.length ? "" : `<p class="muted">Microsoft offers nothing for this problem type.</p>`)
+      + guides.map((g) => `<details class="more" data-guide="${esc(g.id)}"><summary>${esc(g.description || g.id)}</summary>
+          <div class="md">${loading("Reading the guide…")}</div></details>`).join("")
+      + (checks.length ? `<h5>Only in the portal</h5>
+          <p class="muted">Microsoft opens these solutions and checks by creating a Help resource (a write), so the console
+            lists them: ${portalLink}.</p>
+          <ul>${checks.map((c) => `<li>${esc(c.description || c.id)}</li>`).join("")}</ul>` : "");
+    solutionsBox.querySelectorAll("details[data-guide]").forEach((item) => item.addEventListener("toggle", async () => {
+      if (!item.open || item.dataset.read) return;
+      item.dataset.read = "1";
+      const text = item.querySelector(".md");
+      try {
+        const guide = await exploreGet("guides", node, { guide: item.dataset.guide });
+        text.innerHTML = guide.text ? azureText(guide.text) : `<p class="muted">This guide has no text; the portal shows it.</p>`;
+      } catch (error) { text.innerHTML = errorHtml(error); delete item.dataset.read; }
+    }));
+  };
+  const serviceBox = box.querySelector("#hg-service");
+  if (serviceBox) serviceBox.addEventListener("change", (event) =>
+    showProblems(event.target.value).catch((error) => { problemsBox.innerHTML = errorHtml(error); }));
+  else await showProblems(services[0].id);
+}
+
 const DETECTORS_AT_ONCE = 6;
 
 // The list first (one read), then each detector on its own, six at a time, drawn as it answers: one can take 25 s.
@@ -2098,12 +2310,14 @@ async function tabDiagnostics(node, body, all = false) {
   const portal = `https://portal.azure.com/#@${state.snapshot.tenant_id}/resource${node.id}/troubleshoot`;
   const portalLink = `<a href="${esc(portal)}" target="_blank" rel="noopener">Diagnose and solve problems in the portal</a>`;
   if (!plan.supported) {
-    body.innerHTML = plan.unavailable
+    body.innerHTML = (plan.unavailable
       ? `<p class="notice">Azure has a detectors API for this resource type, but ${esc(plan.unavailable)}. The console tries
           again in 15 minutes. Meanwhile, ${portalLink} shows them.</p>`
-      : `<p class="muted">Azure's API has no detectors for this resource type, so the console can't run them. The portal's
+      : `<p class="muted">Azure's API has no working detectors for this resource type, so the console can't run them. The portal's
           page can still offer checks: for many types it runs them through Microsoft's Help service, which starts a diagnostic
-          run (a write), and the console only reads. ${portalLink}.</p>`;
+          run (a write), and the console only reads. ${portalLink}.</p>`) + `<div id="help-guides"></div>`;
+    helpGuides(node, body.querySelector("#help-guides"), portalLink)
+      .catch((error) => { body.querySelector("#help-guides").innerHTML = errorHtml(error); });
     return;
   }
   const results = new Map();
@@ -3546,16 +3760,21 @@ $("subs").addEventListener("change", (event) => {
   reloadGroups();
 });
 $("subs-all").addEventListener("click", () => {
-  state.scope.subs = new Set(state.subscriptions.map((s) => s.id));
+  for (const s of shownSubscriptions()) state.scope.subs.add(s.id);
   renderSubscriptions();
   reloadGroups();
 });
 $("subs-none").addEventListener("click", () => {
-  state.scope.subs.clear();
+  for (const s of shownSubscriptions()) state.scope.subs.delete(s.id);
   renderSubscriptions();
   reloadGroups();
 });
 $("sub-filter").addEventListener("input", renderSubscriptions);
+$("graph").addEventListener("change", (event) => {
+  if (event.target.id !== "graph-all" || !state.snapshot) return;
+  state.graphAll = event.target.checked;
+  drawGraph(state.snapshot);
+});
 
 $("rg-picks").addEventListener("change", (event) => {
   const key = event.target.dataset.key;
@@ -3698,6 +3917,8 @@ function openGroup(key) {
   } else renderGroups();
 }
 
+const GS_TYPES = 8;  // resource types the group summary shows as tiles before "other"
+
 // A group picked on the left: what's in it, and Check this group. A check, or opening a resource, replaces it.
 function showGroupSummary(key) {
   state.groupSummary = key;
@@ -3716,22 +3937,38 @@ function renderGroupSummary() {
   const group = appliedGroups().find((g) => groupKey(g) === key);
   if (!group) { hideGroupSummary(); return; }
   const loaded = state.browseGroup === key && !state.resourcesLoading;
+  // The group's workloads first, by role (compute, hosting, data…: the diagram's bands), then by count; plumbing
+  // (network interfaces, private endpoints, system topics…) in one tile at the end.
   const byType = {};
-  if (loaded) for (const r of state.resources) byType[r.display_type] = (byType[r.display_type] || 0) + 1;
-  const types = Object.entries(byType).sort((a, b) => b[1] - a[1]);
-  const shown = types.slice(0, 5);
-  const rest = types.slice(5).reduce((n, [, c]) => n + c, 0);
-  const last = state.snapshot && state.snapshot.kind === "group" && sameId(state.snapshot.root_id, `/subscriptions/${key.split("/")[0]}/resourcegroups/${group.name}`)
-    ? state.snapshot : null;
+  if (loaded) for (const r of state.resources) {
+    const t = byType[r.display_type] || (byType[r.display_type] = { n: 0, rank: r.tier_rank ?? 99, plumbing: !!r.plumbing });
+    t.n += 1;
+  }
+  const main = Object.entries(byType).filter(([, t]) => !t.plumbing)
+    .sort((a, b) => a[1].rank - b[1].rank || b[1].n - a[1].n || byName(a[0], b[0])).map(([name, t]) => [name, t.n]);
+  const plumbing = Object.entries(byType).filter(([, t]) => t.plumbing).sort((a, b) => b[1].n - a[1].n);
+  const shown = main.slice(0, GS_TYPES);
+  const others = main.slice(GS_TYPES);
+  // Each tile opens just its types in the tree on the left.
+  const tile = (n, label, types, title = "", extra = "") => `<button type="button" class="gs-type${extra}" data-show-types="${esc(JSON.stringify(types))}"
+    title="${esc(title ? `${title}. Show them on the left` : "Show them on the left")}"><span class="n">${n}</span><span class="muted">${esc(label)}</span></button>`;
+  const listed = (rows) => rows.map(([name, n]) => `${n} ${name}`).join(", ");
+  const tiles = shown.map(([t, n]) => tile(n, t, [t])).join("")
+    + (others.length ? tile(others.reduce((s, [, n]) => s + n, 0), "other", others.map(([t]) => t), listed(others)) : "")
+    + (plumbing.length ? tile(plumbing.reduce((s, [, t]) => s + t.n, 0), "supporting (network, endpoints, topics…)",
+      plumbing.map(([t]) => t), listed(plumbing.map(([name, t]) => [name, t.n])), " gs-plumbing") : "");
+  const kept = state.groupChecks.get(key.toLowerCase());
+  const last = kept ? kept.snapshot : state.snapshot && state.snapshot.kind === "group"
+    && sameId(state.snapshot.root_id, `/subscriptions/${key.split("/")[0]}/resourcegroups/${group.name}`) ? state.snapshot : null;
   $("group-summary").classList.remove("hidden");
   $("group-summary").innerHTML = `<div class="crumbs"><button type="button" class="link" data-sub-summary="${esc(group.subscription_id)}">${esc(subName(group.subscription_id))}</button> › <strong>${esc(group.name)}</strong></div>
     <div class="gs-head"><h2>${esc(group.name)}</h2>
       <span class="muted">Resource group · ${esc(subName(group.subscription_id))}${loaded ? ` · ${state.resources.length} resources` : ""}${last ? ` · last checked ${escTimes(last.taken_at)}` : " · not checked yet"}</span>
       <span class="spacer"></span>
-      <button type="button" class="primary" data-check-group="${esc(group.subscription_id)}/${esc(group.name)}">Check this group</button>
+      ${kept ? `<button type="button" class="primary" data-show-check="${esc(key)}" title="Back to the check taken ${esc(kept.snapshot.taken_at)}, without checking again">Show last check</button>` : ""}
+      <button type="button" ${kept ? "" : 'class="primary"'} data-check-group="${esc(group.subscription_id)}/${esc(group.name)}">${kept ? "Check again" : "Check this group"}</button>
       ${watchButton(groupWatchItem(group.subscription_id, group.name))}</div>
-    ${loaded ? `<div class="gs-types">${shown.map(([t, n]) => `<div class="gs-type"><span class="n">${n}</span><span class="muted">${esc(t)}</span></div>`).join("")}
-      ${rest ? `<div class="gs-type"><span class="n">${rest}</span><span class="muted">other</span></div>` : ""}</div>` : loading("Loading resources…")}
+    ${loaded ? `<div class="gs-types">${tiles}</div>` : loading("Loading resources…")}
     <div class="gs-cards">${costSlot(`/subscriptions/${group.subscription_id}/resourceGroups/${group.name}`)}${accessHereSlot(`/subscriptions/${group.subscription_id}/resourceGroups/${group.name}`)}
     <div class="card gs-explain"><h3>What "Check this group" does</h3>
       <p class="muted">Reads every resource's health, then lists them worst first, with what changed against last week above
@@ -3761,6 +3998,10 @@ $("group-summary").addEventListener("click", (event) => {
   if (open) { startSnapshot(JSON.parse(open.dataset.open)); return; }
   const sub = event.target.closest("[data-sub-summary]");
   if (sub) { showSubscriptionSummary(sub.dataset.subSummary); return; }
+  const types = event.target.closest("[data-show-types]");
+  if (types && state.groupSummary) { showTypesInTree(`res:${state.groupSummary}`, JSON.parse(types.dataset.showTypes)); return; }
+  const back = event.target.closest("[data-show-check]");
+  if (back && state.groupChecks.has(back.dataset.showCheck.toLowerCase())) { showGroupCheck(back.dataset.showCheck); return; }
   const b = event.target.closest("[data-check-group]");
   if (!b) return;
   const group = b.dataset.checkGroup;
@@ -3783,7 +4024,6 @@ $("group-view").addEventListener("click", (event) => {
     else { $("graph").classList.remove("as-table"); drawGraph(state.snapshot); state.partialDrawn = !state.snapshot.done; }
   }
   updateBrowseControls();
-  stored.set("ahc.groupView", view);
 });
 $("export-md").addEventListener("click", () => exportSnapshot("md"));
 $("export-pdf").addEventListener("click", () => exportSnapshot("pdf"));
@@ -3864,6 +4104,8 @@ function applyContext(context) {
   state.activeScope = null;
   state.configPath = context.config_path;
   state.watchlistPath = context.watchlist_path;
+  state.version = context.version || "";
+  if (!state.updateTimer) { checkUpdate(); state.updateTimer = setInterval(checkUpdate, UPDATE_CHECK_HOURS * 3600 * 1000); }
   $("about-version").textContent = context.version ? `version ${context.version}` : "";
   $("about-config").textContent = context.config_path || "";
   $("about-watchlist").textContent = context.watchlist_path || "";
@@ -3925,7 +4167,6 @@ function showView(view) {
   if (view === "investigate") loadInvestigate();
   if (view === "watchlist") loadWatchlist();
   if (view === "settings") loadSettings();
-  if (view === "browse" && state.cy) state.cy.resize();
   navRecord(true);
   updateUrl();
 }
@@ -5713,7 +5954,8 @@ state.costType = stored.choice("ahc.costType", ["actual", "amortized"], "actual"
 const costParams = (extra = {}) => ({ ...extra, ...(state.costType === "amortized" ? { cost_type: "amortized" } : {}) });
 const costKey = (scope) => JSON.stringify({ ...scope, costType: state.costType });
 const SUBSCRIPTION_LEVEL = "Subscription-level charges";
-const TAG_KEY_CHARS = 32;  // the Cost view's tag picker shows keys this long at most (full key on hover)
+const TAG_KEY_CHARS = 32;  // tag pickers show keys and values this long at most (full text on hover)
+const shortTag = (text) => (text.length > TAG_KEY_CHARS ? `${text.slice(0, TAG_KEY_CHARS - 1)}…` : text);
 const SUBSCRIPTION_LEVEL_HELP = "Billed to the subscription, not to a resource group: reservations, savings plans, Defender plans, support, Marketplace";
 const COST_KIND = { actual: "Actual cost, as invoiced", amortized: "Amortized cost: reservations spread over their days and charged to what uses them" };
 
@@ -5847,8 +6089,7 @@ function renderCost() {
   const keys = Object.keys(tagCounts(state.groups)).sort(byName);
   const kept = $("cost-tag").value;
   // Tag keys can be any length: each shows at most TAG_KEY_CHARS, the full key is its value and its tooltip.
-  const short = (k) => (k.length > TAG_KEY_CHARS ? `${k.slice(0, TAG_KEY_CHARS - 1)}…` : k);
-  $("cost-tag").innerHTML = keys.map((k) => `<option value="${esc(k)}" title="${esc(k)}" ${k === kept ? "selected" : ""}>${esc(short(k))}</option>`).join("");
+  $("cost-tag").innerHTML = keys.map((k) => `<option value="${esc(k)}" title="${esc(k)}" ${k === kept ? "selected" : ""}>${esc(shortTag(k))}</option>`).join("");
   $("cost-tag").title = $("cost-tag").value;
   $("cost-tag").classList.toggle("hidden", state.costGroup !== "tag");
   const amount = (v) => `<span class="unit">${esc(cur)}</span>${esc(moneyText(v))}`;
@@ -6477,7 +6718,7 @@ function readField(field) {
 const SETTING_LABELS = {
   "triage.scope": "When the page opens", "triage.auto_refresh_minutes": "Refresh Triage by itself", "triage.changes_hours": "Changes shown on problems, looking back (hours)",
   "triage.include_system_changes": "Include changes made by Azure itself", "triage.secret_scan_max_vaults": "Scan Key Vaults automatically up to (vaults)",
-  "triage.azure_status_feed": "Read the public Azure status feed",
+  "triage.azure_status_feed": "Read the public Azure status feed", "updates.check": "Tell me when a new version is out",
   "graph.auto": "Draw dependencies on every click", "graph.depth": "Hops to follow", "graph.max_nodes": "Stop drawing at (resources)",
   "graph.inbound": "Also find what points at a resource", "graph.inbound_limit": "At most this many inbound resources",
   "graph.inbound_scope": "Where to look for inbound references",
@@ -6502,7 +6743,7 @@ const OPTION_LABELS = {
   "graph.inbound_scope": { subscription: "The same subscription", tenant: "The whole tenant (slower)" },
   persona: { "": "ask on first run" },
 };
-const PANE_OF = { triage: "general", summary: "general", health: "thresholds", network: "thresholds", alert_check: "thresholds", graph: "graph", aks: "aks", files: "files", persona: "persona" };
+const PANE_OF = { updates: "general", triage: "general", summary: "general", health: "thresholds", network: "thresholds", alert_check: "thresholds", graph: "graph", aks: "aks", files: "files", persona: "persona" };
 
 function settingRows(fields) {
   return fields.map((f) => {
@@ -6606,6 +6847,7 @@ function renderSettings() {
       <div id="settings-scopes">${savedScopeList(s.saved_scopes)}</div>
       <h3>Triage</h3>${settingRows(bySection("general", "triage"))}
       <h3>Summary</h3>${settingRows(bySection("general", "summary"))}
+      <h3>Updates</h3>${settingRows(bySection("general", "updates"))}
     </div>
     <div class="settings-section" data-pane="thresholds">
       <h3>Health</h3>${settingRows(bySection("thresholds", "health"))}
@@ -7915,9 +8157,9 @@ const snTables = () => Object.entries((state.integrations || {}).servicenow_tabl
 const SN_AUTH = [["basic", "Username and password"], ["oauth_browser", "OAuth: sign in with your own ServiceNow login"],
   ["oauth_client", "OAuth: client credentials (service account)"]];
 const SN_SECRETS = { basic: ["password"], oauth_client: ["client_secret"], oauth_browser: ["client_secret"] };
-// Offered when adding or changing a connection; the OAuth ones need an app on the instance, so they stay hidden for
-// now (a connection already saved with one still shows it, and the backend supports all three).
-const SN_AUTH_OFFERED = ["basic"];
+// Offered when adding or changing a connection; oauth_client (service account) stays hidden, but oauth_browser lets a
+// user sign in with their own ServiceNow login — the path for SSO instances where basic auth over REST is blocked.
+const SN_AUTH_OFFERED = ["basic", "oauth_browser"];
 const MONITOR_LABELS = { newrelic: "New Relic", datadog: "Datadog", grafana: "Grafana" };
 const MONITOR_SECRETS = { newrelic: ["api_key"], datadog: ["api_key", "app_key"], grafana: ["token"] };
 const SECRET_LABELS = { password: "Password", client_secret: "Client secret", refresh_token: "ServiceNow sign-in",
@@ -7998,8 +8240,8 @@ function snCard(saved, st) {
   const data = state.integrations;
   const basic = cfg.auth === "basic";
   const signIn = cfg.auth === "oauth_browser" ? `<div class="int-oauth">
-      <p><strong>One-time setup on the instance:</strong> System OAuth → Application Registry → <em>Create an OAuth API endpoint
-        for external clients</em>, with this redirect URL:</p>
+      <p><strong>One-time setup on the instance:</strong> System OAuth → Application Registry → New → <em>Create an OAuth API endpoint
+        for external clients</em> (on newer releases it's under <em>[Deprecated UI]</em> — that one's correct), with this redirect URL:</p>
       <p><code class="command">${esc(data.redirect_uri)}</code> <button type="button" data-copy="${esc(data.redirect_uri)}">Copy</button>
         <span class="muted">It includes this console's port, so start it on the same port each time.</span></p>
       <p><button type="button" data-sn-sign-in>Sign in with ServiceNow</button>
@@ -9014,7 +9256,6 @@ function applyTheme(value) {
   if (value === "light" || value === "dark") document.documentElement.setAttribute("data-theme", value);
   else document.documentElement.removeAttribute("data-theme");
   document.querySelectorAll(".theme-switch button").forEach((b) => b.classList.toggle("active", b.dataset.themeValue === value));
-  if (state.cy) state.cy.style(graphStyle());
   if (state.chart && state.chartArgs) drawChart(...state.chartArgs);
 }
 
@@ -9027,7 +9268,64 @@ window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () 
 applyTheme(currentTheme());
 
 // About is a dialog over whatever is open: Esc, the close link or a click outside it closes it.
-$("about-open").addEventListener("click", () => $("about").showModal());
+$("about-open").addEventListener("click", () => { $("about").showModal(); fillAboutPypi(); });
+
+// A newer release on PyPI (the server checks an installed copy only, at most every 6 hours): a dot on the account
+// button and a menu line until "Not now", kept per version in this browser; About says how to upgrade.
+const UPDATE_CHECK_HOURS = 6;
+async function checkUpdate() {
+  try { state.update = await api("api/update"); } catch { return; }
+  showUpdate();
+}
+
+function showUpdate() {
+  const u = state.update || {};
+  const dismissed = stored.get("ahc.update.dismissed") === u.latest;
+  $("update-dot").classList.toggle("hidden", !u.newer || dismissed);
+  $("update-open").classList.toggle("hidden", !u.newer);
+  if (u.newer) $("update-text").innerHTML = `${esc(u.latest)} is out<small>You have ${esc(u.current)} · how to upgrade</small>`;
+  $("about-update").innerHTML = u.newer ? `<div class="about-update"><strong>${esc(u.latest)} is out</strong> <span class="muted">you have ${esc(u.current)}</span>
+      <p>Upgrade with <code>${esc(u.command)}</code> <button type="button" class="link" data-copy-update>copy</button>, then restart the console.</p>
+      <p class="muted">${u.notes ? `<a href="${esc(u.notes)}" target="_blank" rel="noopener">What's new in ${esc(u.latest)}</a> · ` : ""}
+        ${dismissed ? "Hidden from the menu until the next version." : '<button type="button" class="link" data-update-later>Not now</button> hides the dot until the next version.'}</p></div>` : "";
+}
+
+$("update-open").addEventListener("click", () => { $("about").showModal(); fillAboutPypi(); });
+$("about").addEventListener("click", (event) => {
+  if (event.target.closest("[data-update-later]") && state.update) { stored.set("ahc.update.dismissed", state.update.latest); showUpdate(); }
+  if (event.target.closest("[data-copy-update]") && state.update) navigator.clipboard?.writeText(state.update.command).then(() => showMessage("Copied."), () => {});
+});
+
+// Read when About opens (kept 6 h on the server): the latest release and pypistats' downloads, without mirrors.
+async function fillAboutPypi(refresh = false) {
+  const box = $("about-pypi");
+  box.innerHTML = loading("Reading PyPI…");
+  let d;
+  try { d = await api("api/about/pypi", { params: refresh ? { refresh: "1" } : {} }); } catch (error) { box.innerHTML = noticeHtml(error.message); return; }
+  const links = `<a href="${esc(d.project_page)}" target="_blank" rel="noopener">Project page</a> ·
+    <a href="${esc(d.stats_page)}" target="_blank" rel="noopener">pypistats</a> ·
+    <button type="button" class="link" id="about-pypi-refresh">Read again</button>`;
+  if (d.error) { box.innerHTML = `<p class="muted">${esc(d.error)}</p><p class="muted">${links}</p>`; wireAboutPypi(); return; }
+  const n = (v) => (v == null ? "–" : Number(v).toLocaleString());
+  const parts = (v) => String(v).split(".").map((x) => parseInt(x, 10) || 0);
+  const newer = (a, b) => { const [x, y] = [parts(a), parts(b)]; for (let i = 0; i < 3; i++) if (x[i] !== y[i]) return x[i] > y[i]; return false; };
+  const current = state.version && d.latest && newer(d.latest, state.version)
+    ? ` <span class="min-note">you have ${esc(state.version)}</span>` : "";
+  box.innerHTML = `<div class="about-stats">
+      <div><span class="n">${esc(d.latest || "–")}</span><span class="muted">latest${current}</span></div>
+      <div><span class="n">${n(d.last_day)}</span><span class="muted">downloads, last day</span></div>
+      <div><span class="n">${n(d.last_week)}</span><span class="muted">last week</span></div>
+      <div><span class="n">${n(d.last_month)}</span><span class="muted">last month</span></div>
+      <div><span class="n">${n(d.total)}</span><span class="muted">in all${d.counted_from ? `, since ${esc(d.counted_from)}` : ""}</span></div></div>
+    <p class="muted">${d.releases} release(s)${d.first_release ? `, the first on ${esc(d.first_release)}` : ""}. Downloads from pypistats.org, without
+      mirrors, updated once a day; installs through brew or pipx count too. Read ${esc(ago(d.read_at))}. ${links}</p>`;
+  wireAboutPypi();
+}
+
+function wireAboutPypi() {
+  const again = $("about-pypi-refresh");
+  if (again) again.addEventListener("click", () => fillAboutPypi(true));
+}
 
 // The account menu (header, right): sign-in, Refresh access, Sign in / out, theme and About in one place.
 $("account-button").addEventListener("click", () => {
@@ -9072,7 +9370,7 @@ async function start() {
     await refreshIntegrationTabs();
     await loadPersonas();
     await loadContext();
-    state.groupView = stored.get("ahc.groupView") || (state.graphAuto ? "graph" : "table");
+    state.groupView = state.graphAuto ? "graph" : "table";
     state.watchItems = await api("api/watchlist");
     startSessionWatch();
     startAlerts();

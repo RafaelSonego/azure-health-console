@@ -10,7 +10,6 @@
   (function () { try { var t = localStorage.getItem("ahc.theme"); if (t === "light" || t === "dark") document.documentElement.setAttribute("data-theme", t); } catch (e) {} })();
 </script>
 <link rel="stylesheet" href="{{ asset('style.css') }}">
-<script src="{{ url_for('healthconsole.static', filename='vendor/cytoscape-3.30.2.min.js') }}"></script>
 <script src="{{ url_for('healthconsole.static', filename='vendor/chart-4.4.4.umd.min.js') }}"></script>
 </head>
 <body>
@@ -39,7 +38,7 @@
   <label class="persona-pick" title="How the console is laid out for you: home page, menu, card order and detail. It never changes what you can read: your Azure roles decide that.">View as
     <select id="persona" aria-label="View as persona"></select></label>
   <div class="dropdown account">
-    <button id="account-button" type="button" aria-haspopup="true" title="Your sign-in, Refresh access, Sign in / out, theme and About"><span id="identity"></span><span class="account-word">Account</span></button>
+    <button id="account-button" type="button" aria-haspopup="true" title="Your sign-in, Refresh access, Sign in / out, theme and About"><span id="identity"></span><span class="account-word">Account</span><span id="update-dot" class="update-dot hidden" aria-label="A new version is out"></span></button>
     <div id="account-panel" class="panel account-panel hidden" role="menu" aria-label="Account">
       <div class="account-head"><span id="account-avatar" class="avatar" aria-hidden="true"></span>
         <div><strong id="account-who"></strong><span id="account-tenant" class="muted"></span></div></div>
@@ -54,6 +53,7 @@
           <button type="button" data-theme-value="dark" aria-label="Dark theme" title="Dark"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg><span>Dark</span></button>
         </div></div>
       <div class="menu-sep" role="separator"></div>
+      <button id="update-open" type="button" class="menu-item update-item hidden" role="menuitem" title="How to upgrade, and what's new"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5"/><path d="M5 12l7-7 7 7"/></svg><span id="update-text">A new version is out<small></small></span></button>
       <button id="about-open" type="button" class="menu-item" role="menuitem" title="What this console is, its version and where your files are"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/></svg><span>About<small>Version, and where your files are</small></span></button>
     </div>
   </div>
@@ -633,10 +633,15 @@
       <li><strong>Read-only by construction.</strong> Every request to Azure, Kubernetes, ServiceNow and monitoring tools goes
         through a guard that refuses anything that isn't a read, before it's sent.</li>
       <li><strong>Stays on your machine.</strong> It runs on 127.0.0.1, keeps settings in your config folder and secrets in
-        the operating system's keychain, and sends nothing anywhere else.</li>
+        the operating system's keychain, and sends nothing about you anywhere else. Its only other reads are public pages:
+        Azure's status feed, and PyPI: whether a newer version is out (every 6 hours, <code>updates.check</code>) and the
+        numbers below when About opens.</li>
       <li><strong>Works in any tenant.</strong> No organisation's names or conventions are built in: tags, scopes and rules
         come from what it finds.</li>
     </ul>
+    <div id="about-update"></div>
+    <h3>On PyPI</h3>
+    <div id="about-pypi" class="about-pypi"></div>
     <h3>What's where</h3>
     <ul class="about-files">
       <li>Settings: <code id="about-config"></code></li>
@@ -702,6 +707,7 @@
   </div>
 </section>
 
+<script src="{{ asset('diagram.js') }}"></script>
 <script src="{{ asset('app.js') }}"></script>
 </body>
 </html>

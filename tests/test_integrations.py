@@ -1271,3 +1271,14 @@ def test_every_nerdgraph_query_closes_its_braces():
             depth += {"{": 1, "}": -1}.get(ch, 0)
             assert depth >= 0, text
         assert depth == 0, text
+
+
+def test_a_name_glued_to_more_text_by_an_underscore_still_matches():
+    group = {"id": "/subscriptions/s/resourceGroups/shop-prod-cc-rg", "name": "shop-prod-cc-rg",
+             "type": "microsoft.resources/subscriptions/resourcegroups"}
+    underscored = {"id": "/subscriptions/s/resourceGroups/rg/providers/Microsoft.Web/sites/api_v2", "name": "api_v2",
+                   "type": "microsoft.web/sites"}
+    index, by_id = sn_data.name_index([group, underscored])
+    text = "Operation 5xx errors | shop-prod-cc-rg_prod query result is > 4.0 for 10 minutes on - Operation 5xx errors -"
+    assert [(m["name"], m["confidence"]) for m in sn_data.match([text], [], index, by_id)] == [("shop-prod-cc-rg", "name")]
+    assert [m["name"] for m in sn_data.match(["api_v2 is down"], [], index, by_id)] == ["api_v2"]  # whole word still counts

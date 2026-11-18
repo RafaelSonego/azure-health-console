@@ -1,6 +1,6 @@
 import pytest
 
-from healthconsole.core.arm import (AccessDenied, ArmClient, WriteBlocked,
+from healthconsole.core.arm import (AccessDenied, ArmClient, ArmError, WriteBlocked,
                                     check_read_only, kql_list)
 from healthconsole.core.credentials import Identity, identity_from_token
 from tests.conftest import FakeTokens
@@ -113,6 +113,21 @@ def test_resource_graph_pages_follow_skip_token():
     rows = ArmClient(FakeTokens(), session=session).query("Resources")
     assert rows == [{"a": 1}, {"a": 2}]
     assert all(method == "POST" for method, _ in session.calls)
+
+
+def test_resource_graph_stops_paging_at_the_limit():
+    session = FakeSession([FakeResponse(200, {"data": [{"a": 1}, {"a": 2}], "$skipToken": "next"}),
+                           FakeResponse(200, {"data": [{"a": 3}]})])
+    assert ArmClient(FakeTokens(), session=session).query("Resources", limit=2) == [{"a": 1}, {"a": 2}]
+    assert len(session.calls) == 1
+
+
+def test_a_take_that_stops_paging_is_an_error_not_a_silent_cut(monkeypatch):
+    from healthconsole.core import arm
+    monkeypatch.setattr(arm, "GRAPH_PAGE_SIZE", 2)
+    session = FakeSession([FakeResponse(200, {"data": [{"a": 1}, {"a": 2}], "resultTruncated": "true"})])
+    with pytest.raises(ArmError, match="blocks paging"):
+        ArmClient(FakeTokens(), session=session).query("Resources | take 5000")
 
 
 def test_kql_list_escapes_quotes():

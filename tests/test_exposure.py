@@ -117,3 +117,103 @@ def test_security_and_browse_judge_web_apps_by_their_restrictions():
     browse = FakeClient(query_handlers=[web, ("Resources", lambda kql: [dict(site)])])
     listed = inventory.list_resources(browse, [(SUB, "app")])["resources"]
     assert listed[0]["exposure"]["level"] == "open"
+
+
+SB, EH, SQL = "microsoft.servicebus/namespaces", "microsoft.eventhub/namespaces", "microsoft.sql/servers"
+IP = [{"action": "Allow", "ipMask": "203.0.113.0/24"}]
+
+
+@pytest.mark.parametrize("props,level", [
+    (dict(type="microsoft.search/searchservices", pna="enabled", searchIpRules=0), "open"),
+    (dict(type="microsoft.search/searchservices", pna="enabled", searchIpRules=2), "restricted"),
+    (dict(type="microsoft.search/searchservices", pna="disabled"), None),
+    (dict(type="microsoft.kubernetesconfiguration/privatelinkscopes", pna="enabled"), None),
+    (dict(type="microsoft.recoveryservices/vaults", pna="enabled"), "unchecked"),
+])
+def test_types_judged_from_their_own_properties(props, level):
+    found = exposure.classify(props)
+    assert (found["level"] if found else None) == level
+
+
+def test_a_recovery_vault_says_it_has_no_firewall_instead_of_not_read():
+    found = exposure.classify(dict(type="microsoft.recoveryservices/vaults", pna="enabled"))
+    assert "no IP firewall" in found["what"] and "aren't read" not in found["what"]
+
+
+@pytest.mark.parametrize("rule_set,level,stored", [
+    (dict(defaultAction="Deny", ipRules=IP), "restricted", False),
+    (dict(defaultAction="Deny", ipRules=[], virtualNetworkRules=[{"subnet": {}}]), "restricted", False),
+    (dict(defaultAction="Deny", ipRules=[]), "open", False),  # no rules: Azure treats Deny as Allow
+    (dict(defaultAction="Allow", ipRules=IP), "open", True),  # rules kept but not enforced
+    (dict(defaultAction="Allow"), "open", False),
+])
+def test_a_namespace_rule_set_applies_only_with_deny(rule_set, level, stored):
+    found = exposure.classify({**row(SB, pna="enabled"), "ruleSet": rule_set})
+    assert found["level"] == level and ("stored rule(s) not applied" in found["what"]) == stored
+
+
+def fw(start, end):
+    return {"properties": {"startIpAddress": start, "endIpAddress": end}}
+
+
+@pytest.mark.parametrize("rules,level,what", [
+    ([fw("0.0.0.0", "255.255.255.255")], "open", "every address"),
+    ([fw("0.0.0.0", "0.0.0.0")], "restricted", "every Azure service"),
+    ([fw("203.0.113.1", "203.0.113.9"), fw("0.0.0.0", "0.0.0.0")], "restricted", "1 address range(s) and every Azure"),
+    ([fw("203.0.113.1", "203.0.113.9")], "restricted", "1 address range(s)"),
+    ([], "restricted", "no IP firewall rules"),
+])
+def test_sql_firewall_rules_decide_the_level(rules, level, what):
+    found = exposure.classify({**row(SQL, pna="enabled"), "sqlRules": rules})
+    assert found["level"] == level and what in found["what"]
+
+
+def test_firewall_reads_go_only_to_public_namespaces_and_servers():
+    from healthconsole.core.arm import AccessDenied
+    sb, eh, sql = row(SB, "sb", pna="enabled"), row(EH, "eh", pna="enabled"), row(SQL, "sql", pna="enabled")
+    private, other = row(SB, "private", pna="disabled"), row("microsoft.storage/storageaccounts", "st", pna="enabled")
+
+    def denied(params):
+        raise AccessDenied("/eh", "no")
+    client = FakeClient(gets={"/sb/networkRuleSets/default": {"properties": {"defaultAction": "Deny", "ipRules": IP}},
+                              "/eh/networkRuleSets/default": denied,
+                              "/sql/firewallRules": {"value": [fw("0.0.0.0", "255.255.255.255")]}})
+    count, error = exposure.add_firewall_rules(client, [sb, eh, sql, private, other])
+    assert count == 3 and client.call_count == 3 and error.startswith("1 of 3 not readable")
+    assert [exposure.classify(r)["level"] for r in (sb, eh, sql)] == ["restricted", "unchecked", "open"]
+    assert "ruleSet" not in private and "ruleSet" not in other
+
+
+def test_security_reads_firewalls_and_triage_does_not():
+    from healthconsole.core import security
+    sb = row(SB, "sb", pna="enabled")
+    client = FakeClient(query_handlers=[("isnotempty(properties)", lambda kql: [dict(sb)])],
+                        gets={"networkRuleSets/default": {"properties": {"defaultAction": "Allow"}}})
+    data = security.posture(client, [SUB], history=False)
+    assert [r["severity"] for r in data["rows"] if r["category"] == "exposure"] == ["warning"]
+    assert any(q["label"] == "firewall rules" for q in data["queries"])
+    reads = []
+    quiet = FakeClient(query_handlers=[("isnotempty(properties)", lambda kql: [dict(sb)])],
+                       gets={"networkRuleSets/default": lambda params: reads.append(params) or {"properties": {}}})
+    found, _ = security.exposure_warnings(quiet, [SUB])
+    assert found == [] and reads == []
+
+
+@pytest.mark.parametrize("props,level,what", [
+    (dict(type="microsoft.apimanagement/service", pna="enabled", apimVnet="internal"), "restricted", "internal mode"),
+    (dict(type="microsoft.apimanagement/service", pna="enabled", apimVnet="none"), "open", "API gateway"),
+    (dict(type="microsoft.kusto/clusters", pna="enabled", kustoRanges=0), "open", "all networks"),
+    (dict(type="microsoft.kusto/clusters", pna="enabled", kustoRanges=2), "restricted", "allowed IP ranges"),
+    (dict(type="microsoft.databricks/workspaces", pna="enabled"), "unchecked", "IP access lists"),
+    (dict(type="microsoft.datafactory/factories", pna="enabled"), "unchecked", "no IP firewall"),
+])
+def test_more_types_are_judged_by_what_they_have(props, level, what):
+    found = exposure.classify(props)
+    assert found["level"] == level and what in found["what"] and "aren't read here" not in found["what"]
+
+
+def test_synapse_firewall_rules_are_read_like_sql():
+    syn = row("microsoft.synapse/workspaces", "syn", pna="enabled")
+    client = FakeClient(gets={"/syn/firewallRules": {"value": [fw("0.0.0.0", "0.0.0.0")]}})
+    assert exposure.add_firewall_rules(client, [syn]) == (1, None)
+    assert exposure.classify(syn)["level"] == "restricted" and "every Azure service" in exposure.classify(syn)["what"]

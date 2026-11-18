@@ -136,8 +136,7 @@ def queries(clause=""):
     internet = " or ".join(f"src == '{s}'" for s in INTERNET)
     return {
         "settings": (f"Resources | where isnotempty(properties){clause} | extend {COLUMNS} | where {CANDIDATES}"
-                     f" | project id, name, type=tolower(type), kind, resourceGroup, subscriptionId, location, {COLUMN_NAMES}"
-                     f" | take {MAX_ROWS}"),
+                     f" | project id, name, type=tolower(type), kind, resourceGroup, subscriptionId, location, {COLUMN_NAMES}"),
         "nsg": ("Resources | where type =~ 'microsoft.network/networksecuritygroups'" + clause +
                 " | mv-expand rule = properties.securityRules"
                 " | where tolower(tostring(rule.properties.direction)) == 'inbound'"
@@ -146,14 +145,13 @@ def queries(clause=""):
                 " srcs = tolower(tostring(rule.properties.sourceAddressPrefixes))"
                 f" | where {internet} or srcs contains '0.0.0.0/0' or srcs contains '\"*\"' or srcs contains 'internet'"
                 " | project id, name, type=tolower(type), resourceGroup, subscriptionId, location, rule=tostring(rule.name),"
-                " port=tostring(rule.properties.destinationPortRange), ports=rule.properties.destinationPortRanges"
-                f" | take {MAX_ROWS}"),
+                " port=tostring(rule.properties.destinationPortRange), ports=rule.properties.destinationPortRanges"),
         "public_ips": ("Resources | where type =~ 'microsoft.network/networkinterfaces'" + clause +
                        " | mv-expand ipc = properties.ipConfigurations"
                        " | where isnotempty(tostring(ipc.properties.publicIPAddress.id))"
                        " | project nic=id, nicName=name, resourceGroup, subscriptionId, location,"
                        " vm=tostring(properties.virtualMachine.id) | distinct nic, nicName, resourceGroup, subscriptionId,"
-                       f" location, vm | take {MAX_ROWS}"),
+                       " location, vm"),
         # Joined to the resources with findings on the server: a tenant's 14 days hold hundreds of thousands of creates.
         "changes": ("resourcechanges"
                     " | extend target = tolower(tostring(properties.targetResourceId)),"
@@ -178,10 +176,19 @@ def _web_restrictions(client, rows, scope, errors):
     return [{"label": "web access restrictions", "query": q} for q in sent], error
 
 
-def posture(client, subscriptions, clause="", history=True):
+def _firewall_rules(client, rows, errors):
+    """Service Bus, Event Hubs and SQL firewall rules onto `rows` (one ARM read each); [query entry]."""
+    count, error = exposure.add_firewall_rules(client, rows)
+    if error:
+        errors.append(f"firewall rules: {error}")
+    return [{"label": "firewall rules", "query": f"{count} ARM read(s): <namespace>/networkRuleSets/default"
+             " (Service Bus, Event Hubs), <server>/firewallRules (SQL, Synapse)"}] if count else []
+
+
+def posture(client, subscriptions, clause="", history=True, firewalls=True):
     """Every finding in scope, warnings first, each with who created the resource or changed one of the checked
-    settings in the last CHANGE_DAYS days (unless `history` is off). A read that fails is named in `errors`; the
-    others still stand."""
+    settings in the last CHANGE_DAYS days (unless `history` is off). `firewalls` adds the per-resource firewall
+    reads. A read that fails is named in `errors`; the others still stand."""
     sent, rows, errors, truncated = queries(clause), [], [], False
     if not history:
         sent.pop("changes")
@@ -190,7 +197,7 @@ def posture(client, subscriptions, clause="", history=True):
     def read(name):
         nonlocal truncated
         try:
-            found = client.query(sent[name], subscriptions=scope)
+            found = client.query(sent[name], subscriptions=scope, limit=MAX_ROWS)  # a `take` would stop paging at 1000
         except ArmError as error:
             errors.append(f"{name.replace('_', ' ')}: {str(error)[:300]}")
             return []
@@ -199,6 +206,7 @@ def posture(client, subscriptions, clause="", history=True):
 
     settings = read("settings")
     web_sent, _ = _web_restrictions(client, settings, scope, errors)
+    web_sent += _firewall_rules(client, settings, errors) if firewalls else []
     for row in settings:
         rows += [_resource(row, f) for f in findings(row)]
     rows += nsg_findings(read("nsg")) + ip_findings(read("public_ips"))
@@ -221,7 +229,7 @@ def posture(client, subscriptions, clause="", history=True):
 def exposure_warnings(client, subscriptions, clause=""):
     """(one entry per resource with an exposure warning, its findings joined; errors): Triage's card, the same
     judgement as Security's tab without the change history."""
-    data = posture(client, subscriptions, clause, history=False)
+    data = posture(client, subscriptions, clause, history=False, firewalls=False)  # Triage: no per-resource reads
     grouped = {}
     for row in data["rows"]:
         if row["category"] == "exposure" and row["severity"] == WARNING:
@@ -251,6 +259,7 @@ def for_resource(client, resource_id):
             continue
         if name == "settings":
             web_sent, _ = _web_restrictions(client, rows, scope, errors)
+            web_sent += _firewall_rules(client, rows, errors)
             found += [_resource(row, f) for row in rows for f in findings(row)]
         else:
             found += (nsg_findings if name == "nsg" else ip_findings)(rows)

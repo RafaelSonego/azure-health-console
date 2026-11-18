@@ -343,8 +343,9 @@ class ArmClient(GuardedClient):
                 self._api_versions[key] = versions
         return versions.get(short)
 
-    def query(self, kql, subscriptions=None):
-        """A Resource Graph query, every page. No `subscriptions` means every one the session can see."""
+    def query(self, kql, subscriptions=None, limit=None):
+        """A Resource Graph query, every page up to `limit` rows. No `subscriptions` means every one the session can
+        see. A `take` above GRAPH_PAGE_SIZE stops paging (no skip token), so pass `limit` instead."""
         subscriptions = sorted(set(subscriptions or []))
         batches = ([subscriptions[i:i + GRAPH_SUBSCRIPTION_BATCH]
                     for i in range(0, len(subscriptions), GRAPH_SUBSCRIPTION_BATCH)]
@@ -363,8 +364,13 @@ class ArmClient(GuardedClient):
                     "POST", RESOURCE_GRAPH_PATH,
                     params={"api-version": RESOURCE_GRAPH_API_VERSION}, body=body,
                 )
-                rows.extend(payload.get("data") or [])
+                page = payload.get("data") or []
+                rows.extend(page)
                 skip_token = payload.get("$skipToken")
+                if limit is not None and len(rows) >= limit:
+                    return rows[:limit]
+                if not skip_token and len(page) >= GRAPH_PAGE_SIZE and str(payload.get("resultTruncated")).lower() == "true":
+                    raise ArmError(f"Resource Graph stopped at {len(page)} rows: the query's `take` blocks paging.")
                 if not skip_token:
                     break
         return rows

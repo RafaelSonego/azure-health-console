@@ -6,7 +6,7 @@ import json
 import logging
 from dataclasses import dataclass
 
-from . import ids, taxonomy
+from . import ids, taxonomy, user_access
 from .arm import AccessDenied, ArmError, kql_list
 from .model import UNKNOWN, Edge, Node
 
@@ -33,25 +33,23 @@ class _Graph:
         self.edges = []
         self.warnings = []
         self.max_nodes = max_nodes
+        self.full_note = f"Stopped at {max_nodes} resources. Raise max_nodes or lower the depth to see more."
         self._full_warned = False
 
-    def add(self, node):
+    def add(self, node, capped=True):
         if node.id in self.nodes:
             return True
-        if len(self.nodes) >= self.max_nodes:
+        if capped and len(self.nodes) >= self.max_nodes:
             if not self._full_warned:
-                self.warnings.append(
-                    f"Stopped at {self.max_nodes} resources. Raise max_nodes or "
-                    f"lower the depth to see more."
-                )
+                self.warnings.append(self.full_note)
                 self._full_warned = True
             return False
         self.nodes[node.id] = node
         return True
 
-    def link(self, source, target, label):
+    def link(self, source, target, label, kind=""):
         if source != target and source in self.nodes and target in self.nodes:
-            self.edges.append(Edge(source=source, target=target, label=label))
+            self.edges.append(Edge(source=source, target=target, label=label, kind=kind))
 
 
 def discover(client, root_id, options, progress=None):
@@ -82,6 +80,9 @@ def discover(client, root_id, options, progress=None):
         if not frontier:
             break
 
+    report("Reading role assignments")
+    _add_role_links(client, graph, [n.properties for n in graph.nodes.values() if n.readable and n.properties],
+                    add_targets=True)
     _dedupe(graph)
     return graph
 
@@ -97,16 +98,111 @@ def discover_group(client, subscription_id, resource_group, options, progress=No
         f" | where tolower(type) !in ({kql_list(taxonomy.NOISE_TYPES)})"
         f" | project {RESOURCE_COLUMNS}", subscriptions=[subscription_id])
     rows.sort(key=lambda r: (taxonomy.display_name(r.get("type"), r.get("kind")), r.get("name") or ""))
-    for row in rows:
-        graph.add(_node(row, hop=0, direction="group"))
+    for row in rows:  # the whole group, whatever max_nodes says: it limits only what's added from outside it
+        graph.add(_node(row, hop=0, direction="group"), capped=False)
     if not rows:
         graph.warnings.append("No resources in this resource group are readable with this session.")
         return graph
+    graph.max_nodes = len(graph.nodes) + options.max_nodes
+    graph.full_note = (f"Stopped adding what the group references outside it at {options.max_nodes} resources "
+                       "(max_nodes); every resource in the group is here.")
     report("Linking resources")
     members = [node_id for node_id, node in graph.nodes.items() if node.hop == 0]
     _expand(client, graph, members, hop=1, follow_leaves=True)
+    report("Reading role assignments")
+    _add_role_links(client, graph, rows)
     _dedupe(graph)
     return graph
+
+
+USER_ASSIGNED = "microsoft.managedidentity/userassignedidentities"
+# One query for every identity in the group; role names come from user_access.role_names (built-in ones aren't here).
+ROLE_ASSIGNMENTS = (
+    "authorizationresources | where type =~ 'microsoft.authorization/roleassignments'"
+    " | extend principalId = tolower(tostring(properties.principalId)), scope = tolower(tostring(properties.scope)),"
+    " roleGuid = tolower(extract(@'([0-9a-fA-F-]{{36}})$', 1, tostring(properties.roleDefinitionId)))"
+    " | where principalId in ({principals}) | project principalId, scope, roleGuid")
+PRINCIPAL_BATCH = 400
+
+
+def _principals(rows):
+    """{principal object ID: the resource that signs in as it}. A user-assigned identity is its own principal; a
+    system-assigned identity, or an AKS cluster's kubelet identity, belongs to its resource unless that's an identity here."""
+    owners, identities = {}, {}
+    for row in rows:
+        resource_id, props = ids.normalise(row.get("id")), row.get("properties") or {}
+        if (row.get("type") or "").lower() == USER_ASSIGNED and props.get("principalId"):
+            identities[str(props["principalId"]).lower()] = resource_id
+        kubelet = ((props.get("identityProfile") or {}).get("kubeletidentity") or {}).get("objectId")
+        for principal in ((row.get("identity") or {}).get("principalId"), kubelet):
+            if principal:
+                owners.setdefault(str(principal).lower(), resource_id)
+    return {**owners, **identities}
+
+
+def _add_role_links(client, graph, rows, add_targets=False):
+    """An arrow from each identity in `rows` to every resource it holds a role on, labelled with the role(s); a role on
+    part of a resource (a storage container) counts for the resource. `add_targets` also adds those resources to the
+    graph (a single resource's picture), else only ones already in it are linked (a group). Roles on a whole group,
+    subscription or management group go on the holder's node (`roles`). A failed read is a note, not a failed check."""
+    owners = {p: o for p, o in _principals(rows).items() if o in graph.nodes}
+    if not owners:
+        return
+    subscriptions = sorted({n.subscription_id for n in graph.nodes.values() if n.subscription_id})
+    principals, found = sorted(owners), []
+    try:
+        for start in range(0, len(principals), PRINCIPAL_BATCH):
+            found += client.query(ROLE_ASSIGNMENTS.format(principals=kql_list(principals[start:start + PRINCIPAL_BATCH])),
+                                  subscriptions=subscriptions)
+    except ArmError as error:
+        graph.warnings.append(f"Role assignments not read, so who can reach what isn't drawn: {str(error)[:200]}")
+        return
+    names = user_access.role_names(client, {r.get("roleGuid") for r in found})
+    if add_targets:
+        missing = {ids.top_level(ids.normalise(r.get("scope"))) for r in found
+                   if owners.get(r.get("principalId")) and not _scope_kind(ids.normalise(r.get("scope")))}
+        for row in _fetch(client, missing - set(graph.nodes)).values():
+            graph.add(_node(row, hop=1, direction="outbound"))
+    roles, wide = {}, []
+    for r in found:
+        source, target = owners.get(r.get("principalId")), ids.normalise(r.get("scope"))
+        target = target if _scope_kind(target) else ids.top_level(target)
+        role = names.get(r.get("roleGuid"), "role")
+        if source and target in graph.nodes and source != target:
+            roles.setdefault((source, target), set()).add(role)
+        elif source and _scope_kind(target):
+            wide.append((source, role, target))
+    for (source, target), held in sorted(roles.items()):
+        graph.link(source, target, ", ".join(sorted(held)), kind="role")
+    sub_names = _subscription_names(client, {t.split("/")[2] for _, _, t in wide if _scope_kind(t) == "subscription"})
+    for source, role, target in sorted(set(wide)):
+        kind = _scope_kind(target)
+        name = sub_names.get(target.split("/")[2], target.split("/")[2]) if kind == "subscription" else target.split("/")[-1]
+        graph.nodes[source].roles.append({"role": role, "scope": target, "scope_kind": kind, "scope_name": name})
+
+
+def _scope_kind(scope):
+    """"group", "subscription" or "management group" for a scope wider than one resource; "" otherwise."""
+    parts = (scope or "").lower().strip("/").split("/")
+    if len(parts) == 2 and parts[0] == "subscriptions":
+        return "subscription"
+    if len(parts) == 4 and parts[0] == "subscriptions" and parts[2] == "resourcegroups":
+        return "group"
+    if "managementgroups" in parts and parts[-2] == "managementgroups":
+        return "management group"
+    return ""
+
+
+def _subscription_names(client, subscription_ids):
+    if not subscription_ids:
+        return {}
+    try:
+        rows = client.query("resourcecontainers | where type =~ 'microsoft.resources/subscriptions'"
+                            f" | where subscriptionId in ({kql_list(sorted(subscription_ids))}) | project subscriptionId, name",
+                            subscriptions=sorted(subscription_ids))
+    except ArmError:
+        return {}
+    return {r["subscriptionId"].lower(): r["name"] for r in rows if r.get("subscriptionId")}
 
 
 def _expand(client, graph, frontier, hop, follow_leaves=False):
@@ -143,13 +239,13 @@ def _expand(client, graph, frontier, hop, follow_leaves=False):
             graph.link(source_id, node.id, _label(graph.nodes[source_id], node))
 
     for source_id in frontier:
-        for row, label in _extra_relations(client, graph.nodes[source_id]):
+        for row, label, kind in _extra_relations(client, graph.nodes[source_id]):
             node = _node(row, hop=hop, direction="outbound")
             is_new = node.id not in graph.nodes
             if graph.add(node):
                 if is_new:
                     added.append(node.id)
-                graph.link(source_id, node.id, label)
+                graph.link(source_id, node.id, label, kind)
     return added
 
 
@@ -159,6 +255,7 @@ def _add_inbound(client, graph, root, options):
     try:
         rows = client.query(
             f"Resources | where tostring(properties) contains {json.dumps(root.id)}"
+            f" or tolower(id) startswith {json.dumps(root.id + '/')}"
             f" | where tolower(type) !in ({kql_list(taxonomy.NOISE_TYPES)})"
             f" | project {RESOURCE_COLUMNS} | take {options.inbound_limit + 1}",
             subscriptions=scope,
@@ -188,7 +285,8 @@ def _add_inbound(client, graph, root, options):
 
 
 def _extra_relations(client, node):
-    """Links that aren't a resource ID in properties. Add new type rules here."""
+    """Links that aren't a resource ID in properties, as (row, label, kind); kind "part" means the row is part of
+    the node (an AKS cluster's node pools), so the graph can fold it in. Add new type rules here."""
     if not node.readable:
         return []
     if node.type == "microsoft.containerservice/managedclusters":
@@ -207,7 +305,7 @@ def _extra_relations(client, node):
             return []
         labels = {"microsoft.compute/virtualmachinescalesets": "node pool",
                   "microsoft.network/loadbalancers": "load balancer"}
-        return [(row, labels.get(row.get("type"), "uses")) for row in rows]
+        return [(row, labels.get(row.get("type"), "uses"), "part") for row in rows]
     return []
 
 
@@ -272,7 +370,8 @@ def _referenced_ids(row):
     for key in ("properties", "identity", "managedBy"):
         _walk(row.get(key), found)
     own = ids.normalise(row.get("id"))
-    return {ids.normalise(candidate) for candidate in found} - {own}
+    parent = ids.parent_of(own)  # a nested resource (SQL database, Service Bus queue) is linked to its parent by its ID
+    return {ids.normalise(candidate) for candidate in found | ({parent} if parent else set())} - {own}
 
 
 # --------------------------------------------------------------------- nodes
@@ -314,6 +413,8 @@ def _unreadable(resource_id, hop, direction):
 
 def _label(source, target):
     source_type, target_type = source.type, target.type
+    if source.id.startswith(target.id + "/"):
+        return "part of"
     if source_type == "microsoft.web/sites" and target_type == "microsoft.web/serverfarms":
         return "runs on"
     if source_type == "microsoft.network/privateendpoints":
@@ -337,7 +438,7 @@ def _dedupe(graph):
     seen = set()
     kept = []
     for edge in graph.edges:
-        key = (edge.source, edge.target)
+        key = (edge.source, edge.target, edge.kind)
         if key in seen:
             continue
         seen.add(key)

@@ -1,6 +1,8 @@
 """What a snapshot is made of. Plain dataclasses, so any front end or report can render them."""
 from dataclasses import asdict, dataclass, field, fields
 
+from . import diagram
+
 CRITICAL = "critical"
 WARNING = "warning"
 HEALTHY = "healthy"
@@ -53,6 +55,7 @@ class Node:
     signals: list = field(default_factory=list)
     alerts: list = field(default_factory=list)
     changes: list = field(default_factory=list)
+    roles: list = field(default_factory=list)  # roles held on whole groups or subscriptions: {role, scope, scope_kind, scope_name}
     properties: dict = field(default_factory=dict, repr=False)
 
     def to_dict(self):
@@ -69,6 +72,7 @@ class Edge:
     source: str
     target: str
     label: str
+    kind: str = ""  # "role": a role assignment (who can reach what); "part": the target is part of the source
 
 
 @dataclass
@@ -104,6 +108,7 @@ class Snapshot:
         return totals
 
     def to_dict(self):
+        nodes, edges = [node.to_dict() for node in self.nodes], [asdict(edge) for edge in self.edges]
         return {
             "root_id": self.root_id,
             "tenant_id": self.tenant_id,
@@ -112,8 +117,9 @@ class Snapshot:
             "depth": self.depth,
             "status": self.status,
             "counts": self.counts(),
-            "nodes": [node.to_dict() for node in self.nodes],
-            "edges": [asdict(edge) for edge in self.edges],
+            "nodes": nodes,
+            "edges": edges,
+            "graph": diagram.fold(nodes, edges, self.root_id),
             "warnings": self.warnings,
             "service_health": self.service_health,
             "arm_calls": self.arm_calls,

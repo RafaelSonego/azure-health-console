@@ -44,7 +44,9 @@ What changed in each version is in [`CHANGELOG.md`](CHANGELOG.md). MIT licensed 
   [Prerequisites](#prerequisites) for the commands on macOS, Windows and Linux.
 - An Azure account with **Reader** on what you want to look at (see [Permissions](#permissions)). PIM roles work:
   activate them, then click **Refresh access** (in your account menu, top right).
-- A browser. The console runs on `127.0.0.1` and sends nothing anywhere else.
+- A browser. The console runs on `127.0.0.1` and sends nothing about you anywhere else; besides Azure and the tools
+  you connect, it reads only public pages: Azure's status feed, and this app's PyPI page (whether a newer version is
+  out, every 6 hours, `updates.check`; download numbers when About opens).
 
 That's enough for Triage, Browse, a resource's health, metrics and timeline, Readiness, Search, Secrets, Network, the
 Watchlist, Alerts and the Vulnerabilities tab's platform checks. **Everything else is optional**: when something
@@ -55,7 +57,7 @@ isn't there, the page says what's missing and how to get it, instead of showing 
 | **Vulnerabilities: findings** | **Microsoft Defender for Cloud** paid plans: *Defender for Servers* (VMs, with its vulnerability assessment) and *Defender for Containers* (registry images and running AKS containers) | The tab says Defender's plans are off (or don't answer) and shows only the platform checks: AKS versions and node images, runtimes, TLS |
 | **Recommendations: Defender findings** | Defender for Cloud (the free tier gives some; the plans above give more) | Azure Advisor's recommendations still show |
 | **Resource Health** | the `Microsoft.ResourceHealth` provider registered in the subscription | that signal is reported as not registered (registering is a write, so the console never does it) |
-| **Diagnostics** | a resource type with detectors in Azure's read API: App Service, AKS, Redis, Logic Apps, Batch | the tab says the type has none, or that Azure didn't answer, and links to the portal |
+| **Diagnostics** | a resource type with detectors in Azure's read API: App Service, AKS, Redis, Logic Apps, Batch | the tab says the type has none (or that Azure refused the request), links to the portal and shows Microsoft's troubleshooting guides for the type |
 | **AKS workloads and logs** | *AKS Cluster User Role*, a Kubernetes read role, and a network path to the API server; **Container Insights** for logs and pod history | the parts that can't be read are named with the role or setting they need |
 | **Vulnerabilities: find tags** (registry images) | **AcrPull** on the registry (or *Container Registry Repository Reader* where it uses repository permissions), and a network its firewall allows (often VPN) | the image's digest still shows; the page says whether the registry's firewall or a missing role refused it |
 | **Vulnerabilities: running image** (AKS) | the same as AKS workloads below: *AKS Cluster User Role*, a Kubernetes read role, a network path to the API server | the page names the role or network path that's missing |
@@ -322,7 +324,7 @@ Tenant menu, or opened from a link with `?tenant=`, stays put instead.
 ### The tabs
 
 **Summary · Triage · Browse · Investigate · Readiness · Security · Cost · Sweeps ▾** (Secrets & certificates, Network) **· Tools ▾** (ServiceNow and each
-monitoring tool, when connected) **· Watchlist · Access**, and **Settings** on the right; your account menu (your name, top right) holds **Refresh access**, **Sign in / out**, the ☀ ◐ ☾ theme switch (light, system, the default, or dark) and **About** (what it is, its version and where your files are). A menu shows which of its
+monitoring tool, when connected) **· Watchlist · Access**, and **Settings** on the right; your account menu (your name, top right) holds **Refresh access**, **Sign in / out**, the ☀ ◐ ☾ theme switch (light, system, the default, or dark) and **About** (what it is, its version, its PyPI numbers: latest release and downloads from pypistats.org without mirrors, read when it opens and kept 6 hours, and where your files are). A menu shows which of its
 pages is open ("Tools: New Relic"); Sweeps carries the Secrets badge, and Access shows how many PIM roles are
 active. Which views lead the band depends on your persona (below); the rest are under **More ▾**.
 
@@ -450,10 +452,17 @@ than by resource type, so a new type that has the setting is covered too:
 
 | Area | Warning | Info |
 |---|---|---|
-| Exposure | public network access with no firewall; AKS API server with no authorized ranges; anonymous blob access; NSG inbound rules from the internet to SSH, RDP, WinRM or database ports (or all ports); public IPs on network interfaces | public access whose firewall sits in child resources (SQL, PostgreSQL, Service Bus, Web Apps…); other ports open to the internet; disks exportable by SAS from any network |
+| Exposure | public network access with no firewall; AKS API server with no authorized ranges; anonymous blob access; NSG inbound rules from the internet to SSH, RDP, WinRM or database ports (or all ports); public IPs on network interfaces | public access whose firewall sits in child resources the console doesn't read (PostgreSQL, Redis…); Recovery Services vaults and Data Factories with public access (they have no IP firewall); Databricks workspaces with public access (their IP access lists are a workspace setting, not in ARM); other ports open to the internet; disks exportable by SAS from any network |
 | Keys & local auth | | local (key or SAS) auth, storage shared keys, admin users, SQL logins |
 | Transport | | minimum TLS below 1.2, HTTP allowed, Redis's non-TLS port |
 | Deletion protection | | Key Vault purge protection or soft delete off |
+
+Web Apps are judged by their access restrictions (site and SCM), AI Search by its IP rules, Data Explorer (Kusto)
+by its allowed IP ranges, API Management by its virtual network mode (internal is restricted). Service Bus and Event
+Hubs namespaces, SQL servers and Synapse workspaces with public access get one extra ARM read each for their firewall
+rules, in parallel, only when this tab or a resource's Overview opens (Triage's card doesn't wait for them): a
+namespace's rules count only when its default action is Deny, and a SQL or Synapse rule from 0.0.0.0 to
+255.255.255.255 is a warning.
 
 A public endpoint behind a firewall or authorized ranges is listed as *restricted* (hidden unless ticked). Each row
 says what to do and who created the resource, or last changed one of those settings, in the last 14 days (all
@@ -579,16 +588,40 @@ row.
 
 **A resource group's summary** shows what's in it and when it was last checked. Once a group is checked, going back
 to it (in the tree or the breadcrumb) shows that check again, kept for the last 10 groups until each is checked anew;
-**group summary** beside its results returns to this page. **Check this group** reads the
-health of every resource in it, as a table, worst first (**Table | Graph** switches view). Above the table,
+**group summary** beside its results returns to this page, where **Show last check** goes back to it without
+checking again (**Check again** reads it anew). **Check this group** reads the
+health of every resource in it, as a table, worst first (**Table | Graph** switches view for that check; the next
+check opens on Table again, or on Graph when `graph.auto` is on). A group check reads every
+resource in the group; `graph.max_nodes` limits only what's added from outside it. The graph draws the group in bands
+by role (Ingress, Compute, Hosting, Data & messaging, Identity & secrets, Observability, Network), each box near what
+it links to. Dashed amber arrows are role assignments: an identity, or the resource that signs in as it, to a
+resource it holds a role on (an AKS kubelet identity's AcrPull on its registry), read in one Resource Graph query;
+roles on a whole group or subscription are listed in the box's hover text and the resource's Overview (**Roles it
+holds**), not drawn. Plumbing is left out unless it joins two other resources (network
+interfaces, private endpoints, Event Grid system topics, API connections, autoscale settings, registry replications;
+links to the Network band don't count): a private endpoint shows as 🔒 on what it serves, and what runs inside a
+resource as +N on it (an AKS cluster's node pools and load balancer). Anything critical or warning is always drawn, a
+line names what was left out, and **Show everything** draws it all; the Table lists every resource either way. The
+diagram is drawn at 100% with right-angle connectors that run along the gaps between boxes (none passes behind one),
+Azure's icons, a health dot and colour per box, a critical or warning box's worst signal on its third line (the hover
+text lists up to three), and names cut in the middle so names that share a prefix stay apart. Hovering a box lights
+its connectors and what they reach and fades the rest; a click keeps that and opens its details. An identity only one
+resource signs in as is drawn as 🔑 on that resource, its roles starting there ("AcrPull (via …)"); identities nothing
+in the group uses sit in a small row at the bottom. A legend under the title explains the marks. Its bar's
+**Problems** lights every critical or warning box and what it connects to (press again to clear); its filter box
+lights the boxes whose name or type matches every word typed (the same type names as search, so "k8s" finds an AKS
+cluster) and scrolls to the first; it also zooms,
+fits the width, goes full screen, or **Opens in new tab** (the same picture, view-only, no Azure call). The printable
+report draws the same diagram. Above the table,
 **Against last week** lists the metrics that doubled or halved against the same window seven days earlier, and a
 column shows each resource's biggest moves. It costs no extra calls, and it shows what's *different*, not what's
 wrong: more traffic isn't bad.
 
 **A resource** opens in a few seconds. The toolbar above it:
 - **Check again** reads it again.
-- **Dependencies ▾ → Show dependencies** draws what it uses and what points at it, coloured by health (**Hops**
-  and **also what points at it** are in the same menu). `graph.auto` in Settings draws it on every click.
+- **Dependencies ▾ → Show dependencies** draws what it uses and what points at it, plus what its identities hold a
+  role on, as the same kind of diagram with the resource outlined (**Hops** and **also what points at it** are in the
+  same menu). `graph.auto` in Settings draws it on every click.
 - **Export ▾:** Markdown, PDF, a printable page, and **Copy link** (a URL that reopens this exact view).
 - **Watch** adds it to the Watchlist.
 
@@ -646,8 +679,11 @@ Its tabs, in order (a red count means something is open there):
   the portal. A detector alone only turns a resource yellow. Azure's read API has detectors for App Service, AKS,
   Redis, Logic Apps and Batch; for other types (API Management among them) the portal runs its checks through
   Microsoft's Help service, which starts a diagnostic run, a write the console doesn't make, so the tab links to the
-  portal's page. When a type has the API but it doesn't answer (Event Hubs, Service Bus and Storage often answer
-  500/503), the tab says that, with Azure's reason, instead of "not offered".
+  portal's page. A type whose detectors API never answers (Event Hubs, Service Bus, Storage and Container Registry
+  answer 503 after ~41 s on every API version) counts as having none; only a refusal (401) is named, with Azure's
+  reason. Either way the tab then offers
+  Microsoft's **troubleshooting guides** for the type: pick a service and a problem type, as in the portal's form, and
+  read its self-help guides there; its solutions and checks are listed with the portal link, since opening one is a write.
 - **Recommendations:** Azure Advisor and Defender for Cloud, for the resource and the resources inside it (an API
   Management service's APIs, a SQL server's databases): the resource's own first, then one row per finding with how
   many it's on and a few examples.
@@ -902,17 +938,42 @@ signed in to, under `tenants.<domain or ID>.integrations`. Switching tenant swit
 connection pickers and the Triage cards. If two tenants use the same instance, add it in each.
 
 **ServiceNow:** one card per connection (e.g. *SN Prod* and *SN NonProd*), each with:
-- the instance URL and its sign-in: **Username and password** (e.g. a service account with read access to the
-  tables below). The console also supports OAuth (your own login through single sign-on, or client credentials),
-  which needs an OAuth app created on the instance; the page doesn't offer it for now, though a connection already
-  saved with OAuth keeps working. The account sees only what ServiceNow's read rules allow it: when it can't read a
-  table's records, the tab says so;
+- the instance URL and its sign-in, one of:
+  - **Username and password** — e.g. a service account with read access to the tables below. Simple, but many
+    SSO instances block basic auth over the REST API (the browser login works, yet the API returns 401), so use
+    OAuth there.
+  - **OAuth: sign in with your own ServiceNow login** — you authenticate in the browser (single sign-on and MFA
+    included) and the console keeps a refresh token; reads run as you. An admin registers one OAuth app on the
+    instance once, then every user self-serves — see [the setup below](#servicenow-oauth-setup).
+
+  The account sees only what ServiceNow's read rules allow it: when it can't read a table's records, the tab says so;
 - the tables to read (`incident`, `change_request`, `task_ci` (a change's affected CIs), `change_task`, `em_alert`,
   `em_event`; one the instance doesn't have, or you can't read, is reported and skipped), the **incident filter**
   (default `active=true^state!=6`), the fields where Azure names are looked for, how many **days back and ahead**
   changes are listed (30 and 14), **how many at most** (incidents 2,000, highest priority first; changes 5,000 each for
   open and closed; read a page at a time, and the tab says when a cap is reached or ServiceNow hid some), and a change's extra fields to look in (`justification`, `implementation_plan`,
   `backout_plan`, `test_plan`, `business_service`).
+
+<a id="servicenow-oauth-setup"></a>
+**Setting up ServiceNow OAuth (one-time, by an admin).** Use this when basic auth is blocked, which is common on
+SSO instances. One app registration covers every user; nobody needs a per-user key.
+
+1. In ServiceNow: **System OAuth → Application Registry → New → Create an OAuth API endpoint for external
+   clients**. On newer releases it's listed under **[Deprecated UI]** — that one is correct; the "New Inbound
+   Integration Experience" wizard doesn't produce the right record.
+2. **Name** it, and set the **Redirect URL** to the exact value the console shows on the ServiceNow card (use its
+   Copy button). It includes the console's host and port, so start the console on a fixed port
+   (`--port 8765`) and open it the same way each time — a mismatch gives `Invalid redirect_uri` at sign-in.
+3. Set **Scope Restriction** to **Broadly scoped**. The default **Securely scoped** issues a token that can't read
+   the tables, so every read returns **403 even as admin** — this is the easiest step to miss.
+4. Turn on **PKCE** if the option is there (the console uses it).
+5. **Submit**, then reopen the app and copy the **Client ID** and **Client Secret**.
+
+Then in the console's ServiceNow card: choose **OAuth: sign in with your own ServiceNow login**, enter the
+instance, Client ID and Client Secret, **Save** (stores the secret), then **Sign in with ServiceNow** and approve
+in the browser. **Test connection** should now read. What's readable still depends on the signed-in user's roles
+(e.g. `itil` for incidents and changes; the Event Management plugin and `evt_mgmt_operator` for `em_alert`/
+`em_event`) — a table the account can't read, or the instance doesn't have, is reported and skipped.
 
 **Monitoring tools:** one card per connection (e.g. *NR Prod* and *NR NonProd*). **New Relic** connects today:
 region, account IDs and a **User API key** (`NRAK-…`; it sees what its user sees). Datadog and Grafana can be
@@ -1005,6 +1066,7 @@ All settings are optional; most are also editable in **Settings**. The annotated
 | `triage.include_system_changes` | `false` | include changes made by Azure itself (noisy) |
 | `triage.secret_scan_max_vaults` | `200` | Secrets scans automatically up to this many vaults |
 | `triage.azure_status_feed` | `true` | the service status card reads the public Azure status feed (`azure.status.microsoft`, no token, nothing about you sent) |
+| `updates.check` | `true` | an installed copy (pip, pipx, brew) asks PyPI every 6 hours whether a newer version is out: a dot on the account button, a menu line, and About gives the upgrade command for how it was installed. Never from a checkout; nothing about you sent |
 | `graph.auto` | `false` | draw dependencies on every click |
 | `graph.depth` / `graph.max_nodes` | `2` / `60` | hops followed; stop drawing at this many resources |
 | `graph.inbound` / `inbound_limit` / `inbound_scope` | `true` / `25` / `subscription` | also find what points at a resource, how many, and where to look |

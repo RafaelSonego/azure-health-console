@@ -130,13 +130,18 @@ ALSO_CALLED = {
 }
 
 
+def names_for(resource_type):
+    """Every name a type goes by, lower case: its type ID, its label and what people also call it ("k8s")."""
+    lowered = (resource_type or "").lower()
+    return f"{lowered} {DISPLAY_NAMES.get(lowered, '')} {ALSO_CALLED.get(lowered, '')}".lower()
+
+
 def types_called(text):
     """The resource types whose label, Azure name or type ID mentions `text` (any case)."""
     text = (text or "").strip().lower()
     if not text:
         return []
-    return sorted(t for t in set(DISPLAY_NAMES) | set(ALSO_CALLED)
-                  if text in f"{t} {DISPLAY_NAMES.get(t, '')} {ALSO_CALLED.get(t, '')}".lower())
+    return sorted(t for t in set(DISPLAY_NAMES) | set(ALSO_CALLED) if text in names_for(t))
 
 
 # Shared containers whose properties list every consumer (a VNet names each NIC
@@ -157,6 +162,79 @@ LEAF_TYPES = {
 
 def is_noise(resource_type):
     return (resource_type or "").lower() in NOISE_TYPES
+
+
+# Plumbing the graph leaves out unless it joins two other resources (app.js graphElements); the Table still lists it.
+GRAPH_PLUMBING = {"microsoft.network/networkinterfaces", "microsoft.network/privateendpoints",
+                  "microsoft.eventgrid/systemtopics", "microsoft.web/connections",
+                  "microsoft.insights/autoscalesettings", "microsoft.containerregistry/registries/replications"}
+
+
+# A group's graph is drawn in bands by role, top to bottom in this order (app.js bandLayout).
+TIERS = [
+    ("ingress", "Ingress"),
+    ("compute", "Compute"),
+    ("platform", "Hosting"),
+    ("data", "Data & messaging"),
+    ("security", "Identity & secrets"),
+    ("observability", "Observability"),
+    ("network", "Network"),
+    ("other", "Other"),
+]
+TIER_RANK = {key: index for index, (key, _label) in enumerate(TIERS)}
+_TIER_BY_TYPE = {
+    "microsoft.cdn/profiles": "ingress",
+    "microsoft.network/frontdoors": "ingress",
+    "microsoft.network/applicationgateways": "ingress",
+    "microsoft.network/publicipaddresses": "ingress",
+    "microsoft.network/dnszones": "ingress",
+    "microsoft.network/trafficmanagerprofiles": "ingress",
+    "microsoft.network/frontdoorwebapplicationfirewallpolicies": "ingress",
+    "microsoft.apimanagement/service": "ingress",
+    "microsoft.web/serverfarms": "platform",
+    "microsoft.containerregistry/registries": "platform",  # where workloads pull their images from
+    "microsoft.compute/disks": "platform",
+    "microsoft.app/managedenvironments": "platform",
+    "microsoft.network/networksecuritygroups": "network",  # "security" in the name, but a network control
+    "microsoft.keyvault/vaults": "security",
+    "microsoft.managedidentity/userassignedidentities": "security",
+    "microsoft.web/certificates": "security",
+    "microsoft.cognitiveservices/accounts": "compute",
+    "microsoft.botservice/botservices": "compute",
+    "microsoft.machinelearningservices/workspaces": "compute",
+    "microsoft.automation/automationaccounts": "compute",
+    "microsoft.search/searchservices": "data",
+    "microsoft.synapse/workspaces": "data",
+    "microsoft.kusto/clusters": "data",
+    "microsoft.streamanalytics/streamingjobs": "data",
+    "microsoft.appconfiguration/configurationstores": "data",
+    "microsoft.signalrservice/signalr": "data",
+    "microsoft.signalrservice/webpubsub": "data",
+    "microsoft.recoveryservices/vaults": "data",
+    "microsoft.dataprotection/backupvaults": "data",
+    "microsoft.dashboard/grafana": "observability",
+}
+_TIER_BY_KEYWORD = [
+    ("observability", ("insights", "operationalinsights", "alertsmanagement", "monitor", "portal/dashboards")),
+    ("security", ("keyvault", "managedidentity", "security", "authorization")),
+    ("network", ("microsoft.network/", "privatednszones")),
+    ("data", ("storage", "sql", "documentdb", "cache/redis", "eventhub", "servicebus", "eventgrid",
+              "datafactory", "databricks")),
+    ("compute", ("microsoft.web/", "microsoft.compute/", "container", "microsoft.app/", "logic/workflows", "batch")),
+]
+
+
+def tier(resource_type):
+    """The band a type is drawn in: an exact type first, then a keyword in it, else "other"."""
+    lowered = (resource_type or "").lower()
+    if lowered in _TIER_BY_TYPE:
+        return _TIER_BY_TYPE[lowered]
+    return next((name for name, words in _TIER_BY_KEYWORD if any(w in lowered for w in words)), "other")
+
+
+def graph_role(resource_type):
+    """"plumbing" or "": how the page's graph treats a type (app.js graphElements)."""
+    return "plumbing" if (resource_type or "").lower() in GRAPH_PLUMBING else ""
 
 
 def is_leaf(resource_type):

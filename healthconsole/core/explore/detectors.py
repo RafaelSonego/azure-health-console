@@ -19,7 +19,7 @@ MARKDOWN_TYPES = {9}         # free-standing markdown blocks
 LIST_TIMEOUT_SECONDS = 10
 NO_DETECTORS_TTL_SECONDS = 3600
 UNAVAILABLE_TTL_SECONDS = 900
-NOT_OFFERED = (400, 404, 405)  # no detectors route for the type; 5xx, timeouts and 401 mean "didn't answer" instead
+NOT_OFFERED = (400, 404, 405)  # no detectors route for the type
 # Resource type -> why its detectors couldn't be listed (None: not offered); kept per entry for its own lifetime.
 _without_detectors = TtlCache("types without detectors", NO_DETECTORS_TTL_SECONDS)
 _NOT_OFFERED = "not offered"
@@ -40,9 +40,13 @@ def _wanted(category, words=_HEALTH_WORDS):
     return any(word in lowered for word in words) or not lowered
 
 
+def _not_offered(error):
+    """No route, or a route that never works: Storage, Event Hubs, Service Bus and Container Registry answer 503 after
+    ~41 s on every API version (checked 2026-11-18), so a timeout or 5xx counts as none, not as "try later"."""
+    return isinstance(error, ArmTimeout) or error.status in NOT_OFFERED or (error.status or 0) >= 500
+
+
 def _why(error):
-    if isinstance(error, ArmTimeout):
-        return f"it didn't answer within {LIST_TIMEOUT_SECONDS} seconds"
     if error.status == 401:
         return "it refused the request (401) for this resource type, although your sign-in works elsewhere"
     text = str(error).split(": ", 1)[-1].strip()
@@ -51,8 +55,7 @@ def _why(error):
 
 def available(client, resource_id):
     """(detectors, api version, access error or None, why they couldn't be listed or None). Checked live across 123
-    types (2026-11-09): App Service, AKS, Redis, Logic Apps and Batch list them; Event Hubs, Service Bus, Storage,
-    Container Registry answer 5xx on every API version, which is "unavailable", not "not offered"."""
+    types (2026-11-09): App Service, AKS, Redis, Logic Apps and Batch list them."""
     version = client.api_version(resource_id)
     if not version:
         return [], None, None, None
@@ -66,9 +69,9 @@ def available(client, resource_id):
     except AccessDenied as error:
         return [], version, str(error), None
     except ArmError as error:
-        payload, why = None, None if error.status in NOT_OFFERED else _why(error)
+        payload, why = None, None if _not_offered(error) else _why(error)
     if not (payload or {}).get("value"):
-        # Remembered, since some providers (Storage) take ~40 s to fail; "unavailable" is retried sooner.
+        # Remembered, since some providers (Storage) take ~40 s to fail; a 401 or throttling is retried sooner.
         _without_detectors.put(resource_type, why or _NOT_OFFERED,
                                NO_DETECTORS_TTL_SECONDS if why is None else UNAVAILABLE_TTL_SECONDS)
         return [], version, None, why

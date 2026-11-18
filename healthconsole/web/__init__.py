@@ -4,6 +4,7 @@ import hmac
 import io
 import json
 import logging
+import re
 import secrets
 import subprocess
 import threading
@@ -14,7 +15,7 @@ from werkzeug.exceptions import HTTPException
 
 from ..core import (acr, alerts, cache, checks, config, cost, graph, personas, inventory, jobs, network, pim, profiles, readiness, report,
                     search, security, settings_file, snapshot, tables, triage, user_access, vulnerabilities)
-from ..core import alert_check, azure_alerts, cost_store, integrations, investigate, summary_history
+from ..core import alert_check, azure_alerts, cost_store, diagram, integrations, investigate, pypi_stats, summary_history
 from ..core.guarded import ServiceError
 from ..core.integrations.provider import ALERT_HISTORY
 from ..core.investigate import gateway as inv_gateway, pod as inv_pod
@@ -28,7 +29,7 @@ from ..core.cache import TtlCache
 from ..core.arm import AccessDenied, ArmClient, ArmError, Throttled, WriteBlocked, rg_clause
 from ..core.credentials import AzureCliTokenProvider, CredentialError
 from ..core.discovery import DiscoveryOptions
-from ..core.explore import activity, advice, aks, appinsights, details, detectors, kube, metrics, scaling
+from ..core.explore import activity, advice, aks, appinsights, details, detectors, help_guides, kube, metrics, scaling
 from ..core.health import HealthOptions
 from ..core.localfiles import private_dir, write_private_text
 from ..signin import AzLogin, SignInError, accounts as signin_accounts_read, logout as signin_logout
@@ -153,6 +154,14 @@ def create_blueprint(client_for, settings, url_prefix="", config_file=None, star
             watchlist_path=str(live["watchlist"].path),
             version=__version__,
         )
+
+    @blueprint.get("/api/about/pypi")
+    def about_pypi():  # public download counts, read when About opens; nothing about the viewer is sent
+        return jsonify(pypi_stats.read(refresh=request.args.get("refresh") == "1"))
+
+    @blueprint.get("/api/update")
+    def update_check():  # a newer release on PyPI? Nothing about the viewer is sent
+        return jsonify(pypi_stats.update(__version__, settings["updates"]["check"], refresh=request.args.get("refresh") == "1"))
 
     def scope_args(source):
         """Subscriptions and optional tag-filtered resource groups ("sub/rg") from a request."""
@@ -863,6 +872,23 @@ def create_blueprint(client_for, settings, url_prefix="", config_file=None, star
         return send_file(io.BytesIO(content), as_attachment=True,
                          download_name=report.filename(job["result"], fmt),
                          mimetype="application/pdf" if fmt == "pdf" else "text/markdown")
+
+    @blueprint.post("/api/diagram")
+    def diagram_svg():
+        """The diagram of the snapshot the page holds (a kept check can outlive its job); `page` makes it a page of its
+        own for a new tab. Rendering only: no Azure call."""
+        body = request.get_json(silent=True) or {}
+        snap = body.get("snapshot")
+        if not isinstance(snap, dict) or not isinstance(snap.get("nodes"), list) or not isinstance(snap.get("edges"), list):
+            abort(400, "A snapshot with nodes and edges is required.")
+        title = str(body.get("title") or snap.get("title") or "Diagram")[:200]
+        try:
+            svg = diagram.render_svg(snap, bool(body.get("show_all")), title)
+        except (KeyError, TypeError, AttributeError):
+            abort(400, "The snapshot isn't one this console made.")
+        if body.get("page"):
+            return diagram.page(svg, title, str(body.get("note") or "")[:600]), 200, {"Content-Type": "text/html; charset=utf-8"}
+        return svg, 200, {"Content-Type": "image/svg+xml; charset=utf-8"}
 
     @blueprint.get("/api/snapshots/<job_id>/print")
     def printable(job_id):
@@ -1652,6 +1678,17 @@ def create_blueprint(client_for, settings, url_prefix="", config_file=None, star
             if args.get("plan") == "1":
                 return jsonify(detectors.plan(arm_client, resource_id, only_health=args.get("all") != "1"))
             return jsonify(detectors.run(arm_client, resource_id, only_health=args.get("all") != "1"))
+        if view == "guides":  # Microsoft's troubleshooting catalogue, one step per call: services, problems, solutions, guide
+            for key in ("service", "problem", "guide"):
+                if args.get(key) and not re.fullmatch(r"[A-Za-z0-9_.-]{1,100}", args[key]):
+                    abort(400, f"{key} is not an ID")
+            if args.get("guide"):
+                return jsonify(help_guides.guide(arm_client, args["guide"]))
+            if args.get("problem"):
+                return jsonify({"solutions": help_guides.solutions(arm_client, args["problem"])})
+            if args.get("service"):
+                return jsonify({"problems": help_guides.problems(arm_client, args["service"])})
+            return jsonify({"services": help_guides.services(arm_client, resource_id)})
         if view == "details":
             return jsonify(details.details(arm_client, resource_id, settings["health"]["expiry_warning_days"],
                                            settings["health"]["expiry_critical_days"]))

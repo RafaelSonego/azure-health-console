@@ -178,7 +178,7 @@ def test_types_without_detectors_are_remembered(monkeypatch):
     assert client.call_count == calls  # second account skipped the listing
 
 
-def test_detectors_that_fail_are_unavailable_not_missing(monkeypatch):
+def test_detectors_that_never_work_count_as_none_and_401_as_unavailable(monkeypatch):
     from healthconsole.core.arm import ArmError, ArmTimeout
     from healthconsole.core.explore import detectors
     detectors._without_detectors.clear()
@@ -191,14 +191,17 @@ def test_detectors_that_fail_are_unavailable_not_missing(monkeypatch):
         def get(self, path, api_version, params=None, tolerate=(), timeout=None):
             raise self.error
 
-    bus = rid("rg", "Microsoft.ServiceBus/namespaces", "bus")
-    out = detectors.run(Client(ArmError("Azure returned 500: The insight request encountered an error.", 500)), bus)
-    assert out["supported"] is False and out["unavailable"] == "it answered 500: The insight request encountered an error."
+    none = {"supported": False, "results": []}
+    refused = rid("rg", "Microsoft.Cache/redis", "r")
+    out = detectors.run(Client(ArmError("Azure returned 401: Unauthorized.", 401)), refused)
+    assert out["supported"] is False and "refused the request (401)" in out["unavailable"]
     apim = rid("rg", "Microsoft.ApiManagement/service", "gw")
-    assert detectors.run(Client(ArmError("Azure returned 404: ", 404)), apim) == {"supported": False, "results": []}
+    assert detectors.run(Client(ArmError("Azure returned 404: ", 404)), apim) == none
+    bus = rid("rg", "Microsoft.ServiceBus/namespaces", "bus")
+    assert detectors.run(Client(ArmError("Azure returned 503: unavailable", 503)), bus) == none  # never works: none
     slow = rid("rg", "Microsoft.Storage/storageAccounts", "slow")
-    assert "within 10 seconds" in detectors.run(Client(ArmTimeout("timed out")), slow)["unavailable"]
-    assert "within 10 seconds" in detectors.run(Client(None), slow)["unavailable"]  # remembered, not asked again
+    assert detectors.run(Client(ArmTimeout("timed out")), slow) == none
+    assert detectors.run(Client(None), slow) == none  # remembered, not asked again
 
 
 def _impact(service, *regions):

@@ -269,3 +269,4 @@ def test_browse_lists_alert_rules_and_similar_apart_not_dropped():
     listed = inventory.list_resources(client, [(SUB, "rg")])
     assert [r["name"] for r in listed["resources"]] == ["api"]
     assert listed["hidden"] == 1 and [(r["name"], r["display_type"]) for r in listed["hidden_resources"]] == [("cpu-high", "Metric Alert")]
+
