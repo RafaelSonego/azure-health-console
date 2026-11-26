@@ -31,7 +31,7 @@ class MemoryKeyring:
 def keychain(monkeypatch):
     store = MemoryKeyring()
     monkeypatch.setattr(secrets, "_keyring", lambda: store)
-    for name in ("AHC_SERVICENOW_PASSWORD", "AHC_MONITOR_NEW_RELIC_API_KEY"):
+    for name in ("AHC_SERVICENOW_PASSWORD", "AHC_SERVICENOW_INSTANCE", "AHC_MONITOR_NEW_RELIC_API_KEY"):
         monkeypatch.delenv(name, raising=False)
     return store
 
@@ -168,7 +168,21 @@ def test_secrets_go_to_the_keychain_per_instance(keychain, monkeypatch):
     assert secrets.get("servicenow", "dev1.service-now.com", "password") == "pw1"
     assert secrets.get("servicenow", "work.service-now.com", "password") is None
     monkeypatch.setenv("AHC_SERVICENOW_PASSWORD", "from-env")
+    assert secrets.get("servicenow", "work.service-now.com", "password") is None  # no instance named: not sent
+    monkeypatch.setenv("AHC_SERVICENOW_INSTANCE", "work")
     assert secrets.source("servicenow", "work.service-now.com", "password") == "environment"
+    assert secrets.get("servicenow", "dev1.service-now.com", "password") == "pw1"  # another instance: its own
+
+
+def test_an_environment_secret_goes_only_to_the_instance_it_names(keychain, monkeypatch):
+    monkeypatch.setenv("AHC_SERVICENOW_PASSWORD", "env-pw")
+    monkeypatch.setenv("AHC_SERVICENOW_INSTANCE", "https://dev1.service-now.com/nav_to.do")
+    assert servicenow.ServiceNowClient(sn_cfg(instance="https://dev1.service-now.com")).secret("password") == "env-pw"
+    for elsewhere in ("https://attacker.example", "https://dev1.service-now.com.attacker.example", "dev2"):
+        assert servicenow.ServiceNowClient(sn_cfg(instance=elsewhere)).secret("password") is None
+    moved = integrations.servicenow_status(sn_cfg(instance="https://attacker.example"))
+    assert not moved["ready"] and any("AHC_SERVICENOW_INSTANCE=attacker.example" in p for p in moved["problems"])
+    assert "env-pw" not in str(moved)
 
 
 def test_status_says_what_is_missing(keychain):
@@ -303,7 +317,7 @@ def tenant_app(tmp_path, settings=None):
                                                      "defaultDomain": "contoso.example"}]}})
     settings = settings or config.load(tmp_path / "none.yaml")
     app = Flask("test")
-    app.register_blueprint(create_blueprint(lambda tenant: fake, settings, config_file=tmp_path / "c.yaml"))
+    app.register_blueprint(create_blueprint(lambda tenant: fake, settings, config_file=tmp_path / "c.yaml", authorize=lambda: None))
     return app.test_client(), settings
 
 
@@ -318,8 +332,9 @@ def test_integration_endpoints_never_return_secrets(tmp_path, keychain):
     assert no_host.status_code == 400 and "instance URL first" in no_host.get_json()["error"]
     saved = web.post("/api/integrations/servicenow", json={"connections": [
         {"name": "SN", "enabled": True, "instance": "dev1", "username": "me"}]})
-    assert saved.get_json()["servicenow"][0]["problems"] == ["No password yet: type it and Save, or set the "
-                                                             "AHC_SERVICENOW_PASSWORD environment variable."]
+    assert saved.get_json()["servicenow"][0]["problems"] == [
+        "No password yet: type it and Save, or set the AHC_SERVICENOW_PASSWORD environment variable with "
+        "AHC_SERVICENOW_INSTANCE=dev1.service-now.com."]
     stored = web.post("/api/integrations/secret", json={"target": "servicenow:SN", "field": "password", "value": "pw-123"})
     assert "pw-123" not in stored.get_data(as_text=True)
     assert stored.get_json()["servicenow"][0]["secrets"]["password"] == "keychain"
@@ -381,6 +396,7 @@ def test_a_saved_or_environment_secret_is_never_sent_to_another_instance(keychai
     integ = {"servicenow": [{**config.SERVICENOW_DEFAULTS, "instance": "https://dev1.service-now.com", "username": "admin"}],
              "monitors": []}
     monkeypatch.setenv(secrets.env_name("servicenow", "password"), "env-pw")
+    monkeypatch.setenv(secrets.SERVICENOW_INSTANCE_ENV, "dev1")
     sent = []
     monkeypatch.setattr(servicenow.ServiceNowClient, "test", lambda self: sent.append((self.instance, self.secret("password")))
                         or {"ok": True, "who": "", "tables": [{"name": "incident", "ok": True, "detail": ""}]})
@@ -672,7 +688,12 @@ def test_log_errors_are_reported(nr_session, monkeypatch):
 
 def test_settings_know_what_each_tool_answers():
     caps = monitors.capabilities()
-    assert caps["newrelic"] == {"connected": True, "capabilities": ["alerts", "entities", "logs", "alert history"]}
+    assert caps["newrelic"] == {"connected": True, "capabilities": ["alerts", "entities", "logs", "alert history",
+                                                                        "Kubernetes OOM kills", "Kubernetes warning events",
+                                                                        "Kubernetes workloads by namespace",
+                                                                        "an app's requests per minute", "a workload's pod restarts",
+                                                                        "a workload's CPU and memory over 30 days",
+                                                                        "an app's heap and process memory"]}
     assert caps["grafana"]["connected"] is False
 
 

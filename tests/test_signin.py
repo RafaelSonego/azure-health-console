@@ -123,20 +123,51 @@ def test_failure_and_cancel(monkeypatch):
     assert login.cancel()["status"] == "cancelled" and waiting.terminated
 
 
+SKIPPED_LINE = ("WARNING: Authentication failed against tenant 485f5c0c-7ef2-40a3-8039-708bd1035907 'Home': AADSTS50076: "
+                "Due to a configuration change made by your administrator, you must use multi-factor authentication.")
+
+
+def test_a_tenant_az_login_skips_is_named_and_an_empty_sign_in_is_a_failure(monkeypatch):
+    monkeypatch.setattr(signin.shutil, "which", lambda name: "/usr/bin/az")
+    process = FakeProcess(["WARNING: A web browser has been opened", SKIPPED_LINE, SKIPPED_LINE], code=0)
+    refreshed = []
+    login = signin.AzLogin(on_success=lambda: refreshed.append(True), popen=lambda argv, **kw: process,
+                           list_accounts=lambda: [])
+    login.start()
+    process.release.set()
+    assert until(lambda: login.state()["status"] == "failed")
+    state = login.state()
+    assert state["skipped"] == [{"id": "485f5c0c-7ef2-40a3-8039-708bd1035907", "name": "Home",
+                                 "reason": SKIPPED_LINE.split("'Home': ")[1], "mfa": True}]
+    assert "no account was saved: Home" in state["message"] and refreshed == []
+
+
+def test_a_sign_in_that_saved_an_account_still_lists_the_skipped_tenant(monkeypatch):
+    monkeypatch.setattr(signin.shutil, "which", lambda name: "/usr/bin/az")
+    process = FakeProcess([SKIPPED_LINE.replace("AADSTS50076", "AADSTS53003").replace("multi-factor", "a compliant")])
+    refreshed = []
+    login = signin.AzLogin(on_success=lambda: refreshed.append(True), popen=lambda argv, **kw: process,
+                           list_accounts=lambda: [{"id": "t-work"}])
+    login.start()
+    process.release.set()
+    assert until(lambda: login.state()["status"] == "done") and until(lambda: refreshed == [True])
+    assert [(t["name"], t["mfa"]) for t in login.state()["skipped"]] == [("Home", False)]
+
+
 def test_only_the_local_app_has_sign_in(monkeypatch):
     from healthconsole.web import create_blueprint, create_local_app
     from tests.conftest import FakeClient
 
     hosted = Flask("hosted")
-    hosted.register_blueprint(create_blueprint(lambda tenant: FakeClient(), config.load("/nonexistent")))
+    hosted.register_blueprint(create_blueprint(lambda tenant: FakeClient(), config.load("/nonexistent"), authorize=lambda: None))
     assert hosted.test_client().get("/api/signin").status_code == 404
 
     app = create_local_app(config.load("/nonexistent"), port=8765)
     local = app.test_client()
     headers = {"Host": "127.0.0.1:8765"}
     assert local.get("/api/signin", headers=headers).status_code == 401  # no launch key yet
-    local.get(f"/?key={app.config['AHC_LAUNCH_KEY']}", headers=headers)
-    assert local.get("/api/signin", headers=headers).get_json() == {"available": True, "status": "idle", "output": []}
+    headers = {**headers, "X-AHC-Key": app.config["AHC_LAUNCH_KEY"]}
+    assert local.get("/api/signin", headers=headers).get_json() == {"available": True, "status": "idle", "output": [], "skipped": []}
     bad = local.post("/api/signin", json={"tenant": "a; b"}, headers=headers)
     assert bad.status_code == 400 and "tenant" in bad.get_json()["error"]
     assert local.post("/api/signin", data="tenant=x", headers=headers).status_code == 415  # JSON only

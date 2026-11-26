@@ -8,6 +8,8 @@ RANGES = {  # label -> (window, grain)
     "6h": (timedelta(hours=6), "PT5M"),
     "24h": (timedelta(hours=24), "PT15M"),
     "7d": (timedelta(days=7), "PT1H"),
+    "30d": (timedelta(days=30), "PT6H"),
+    "90d": (timedelta(days=90), "P1D"),  # Azure keeps platform metrics 93 days
 }
 MAX_SERIES = 8
 

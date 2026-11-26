@@ -8,7 +8,7 @@ from . import network, triage
 from .cache import TtlCache
 from .arm import ArmError, kql_list, rg_clause
 from .checks import keyvault_scan, summarise_errors
-from .explore import aks, aks_checks
+from .explore import aks, aks_checks, keyvault
 from .explore.scaling import NEAR_MAX, _status
 from .model import CRITICAL, HEALTHY, INFO, UNKNOWN, WARNING, red_or_yellow
 
@@ -18,7 +18,7 @@ SKU_CACHE_SECONDS = 24 * 3600
 MAX_ITEMS = 500
 MAX_PARALLEL = 8
 LONG_EXPIRED_DAYS = 90
-_ORDER = {CRITICAL: 0, WARNING: 1, UNKNOWN: 2, INFO: 3, HEALTHY: 4}
+_ORDER = {CRITICAL: 0, WARNING: 1, INFO: 2, HEALTHY: 3, UNKNOWN: 4}
 _SEVERITY = {"HIGH": CRITICAL, "MEDIUM": WARNING, "LOW": INFO, "INFO": INFO}
 # Plans Azure scales on its own (consumption, elastic premium, Logic Apps Standard) or that can't scale out.
 _ELASTIC_TIERS = ("dynamic", "elasticpremium", "flexconsumption", "workflowstandard", "free", "shared")
@@ -384,11 +384,14 @@ def kubernetes_sections(client, pools, kube_settings, progress):
 
 # ------------------------------------------------------------------ 6. certificates
 
-def certificate_section(client, subscriptions, group_keys, peak_end, warn_days, include_secrets, progress, today=None):
-    """Judged against the end of the peak: anything that expires before it is red."""
+def certificate_section(client, subscriptions, group_keys, peak_end, warn_days, include_secrets, progress, today=None,
+                        max_vaults=None):
+    """Judged against the end of the peak: anything that expires before it is red. Reads at most `max_vaults` vaults
+    and `keyvault.PAGE_MAX_PAGES` pages of each list; keys only when `include_secrets` (the note says what was left)."""
     today = today or datetime.now(timezone.utc).date()
     to_end = (peak_end - today).days
-    scan = keyvault_scan(client, subscriptions, warn_days, group_keys, progress)
+    scan = keyvault_scan(client, subscriptions, warn_days, group_keys, progress, max_vaults=max_vaults,
+                         max_pages=keyvault.PAGE_MAX_PAGES, lists=keyvault.LISTS if include_secrets else ("secrets",))
     items, counts = [], {"healthy": 0, "no_expiry": 0, "long_expired": 0}
     for row in scan["rows"]:
         if (row["kind"] != "certificate" and not include_secrets) or row.get("enabled") is False:
@@ -414,6 +417,11 @@ def certificate_section(client, subscriptions, group_keys, peak_end, warn_days, 
                       "status": status, "detail": detail + (f"; {row['note']}" if "Key Vault" in row["note"] else ""),
                       "fix": "Renew it and roll it out before the peak (a change freeze may block it later)."})
     notes = [f"Key Vault: {e}" for e in summarise_errors(scan["errors"])]
+    if scan.get("skipped"):
+        skipped = scan["skipped"]
+        notes.append(f"Key Vault: {len(skipped)} of {scan['vaults_found']} vaults not read, over the limit of "
+                     f"{scan['vaults']} (Settings → General → Scan Key Vaults automatically up to; or narrow the scope): "
+                     f"{', '.join(skipped[:3])}{'…' if len(skipped) > 3 else ''}")
     summary = (f"{scan['vaults']} vault(s) and App Service certificates read; {counts['healthy']} fine past the peak, "
                f"{counts['no_expiry']} without an expiry date, {counts['long_expired']} expired over "
                f"{LONG_EXPIRED_DAYS} days ago (left out as unused).")
@@ -486,7 +494,8 @@ def run(client, subscriptions, options, peak_end, group_keys=None, deep=True, in
         sections["hpas"]["items"], sections["hpas"]["unchecked"] = hpas, notes
         report("Reading Key Vaults")
         found = guarded("certificates", lambda: certificate_section(
-            client, subscriptions, group_keys, peak_end, options["expiry_warning_days"], include_secrets, report, today))
+            client, subscriptions, group_keys, peak_end, options["expiry_warning_days"], include_secrets, report, today,
+            options.get("secret_scan_max_vaults")))
         if found:
             sections["certificates"]["items"], sections["certificates"]["unchecked"], sections["certificates"]["summary"] = found
     else:

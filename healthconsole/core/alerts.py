@@ -17,7 +17,7 @@ from .model import CRITICAL, HEALTHY, INFO, WARNING
 logger = logging.getLogger(__name__)
 
 PROBLEM_CARDS = ("alerts", "failed", "aks", "autoscale", "private_endpoints", "subnets")
-HISTORY_SECONDS = 24 * 3600
+HISTORY_HOURS = 24  # default for `alerts.history_hours`
 MAX_EVENTS = 500
 TICK_SECONDS = 15
 UNTAGGED = "__untagged__"  # the page's "(untagged)" tag filter value
@@ -291,9 +291,10 @@ class AlertRunner:
     """One per server. Sessions are keyed by identity (tenant/object ID), each with its own rules, baselines and
     history. `session_ttl` (hosted) drops a viewer who stopped polling, since their delegated token goes with them."""
 
-    def __init__(self, clock=time.time, session_ttl=None):
+    def __init__(self, clock=time.time, session_ttl=None, history_hours=lambda: HISTORY_HOURS):
         self.clock = clock
         self.session_ttl = session_ttl
+        self.history_hours = history_hours  # read on every call, so a saved setting applies without a restart
         self._sessions = {}
         self._lock = threading.Lock()
         self._seq = itertools.count(1)
@@ -592,11 +593,17 @@ class AlertRunner:
                         event["snoozed_until"] = 0
         return True
 
+    def _prune(self, session, now):
+        keep = self.history_hours() * 3600
+        while session.events and now - session.events[0]["epoch"] > keep:
+            session.events.popleft()
+
     def history(self, owner):
         session = self._sessions.get(owner)
         if not session:
             return []
         with session.lock:
+            self._prune(session, self.clock())
             return list(reversed(session.events))
 
     def dismiss(self, owner, seq):
@@ -605,15 +612,15 @@ class AlertRunner:
             session.dismissed = max(session.dismissed, int(seq))
 
     def state(self, owner):
-        """Rules with their heartbeat and why they can't run, plus the last 24 h of alerts, newest first."""
+        """Rules with their heartbeat and why they can't run, plus the last `history_hours` of alerts, newest first."""
         now = self.clock()
         session = self._sessions.get(owner)
         if session is None:
-            return {"rules": [], "events": [], "dismissed": 0, "unseen": 0, "now": now, "runner_id": self.runner_id}
+            return {"rules": [], "events": [], "dismissed": 0, "unseen": 0, "now": now, "runner_id": self.runner_id,
+                    "history_hours": self.history_hours()}
         session.last_seen = now
         with session.lock:
-            while session.events and now - session.events[0]["epoch"] > HISTORY_SECONDS:
-                session.events.popleft()
+            self._prune(session, now)
             events = list(reversed(session.events))
         try:
             rules = session.source.rules()
@@ -638,4 +645,4 @@ class AlertRunner:
             out.append(entry)
         return {"rules": out, "events": events, "dismissed": session.dismissed,
                 "unseen": sum(1 for e in events if counts(e, session.dismissed, now)), "now": now,
-                "runner_id": self.runner_id, "error": session_error}
+                "runner_id": self.runner_id, "error": session_error, "history_hours": self.history_hours()}

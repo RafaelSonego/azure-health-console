@@ -2,7 +2,7 @@
 Two Resource Graph queries cover every VNet in scope; opening one adds Azure's own `usages` list."""
 import ipaddress
 
-from .arm import ArmError, rg_clause
+from .arm import ArmError, kql_string, rg_clause
 from .model import CRITICAL, HEALTHY, INFO, UNKNOWN, WARNING, red_or_yellow
 
 NETWORK_API_VERSION = "2024-05-01"
@@ -10,7 +10,7 @@ NETWORK_API_VERSION = "2024-05-01"
 AZURE_RESERVED_V4 = 5
 MIN_SUBNET_PREFIX_V4 = 29
 IPV6_SUBNET_PREFIX = 64
-_ORDER = {CRITICAL: 0, WARNING: 1, UNKNOWN: 2, INFO: 3, HEALTHY: 4}
+_ORDER = {CRITICAL: 0, WARNING: 1, HEALTHY: 2, UNKNOWN: 3, INFO: 4}  # INFO: a VNet without subnets, nothing to act on
 
 _VNETS = ("Resources | where type =~ 'microsoft.network/virtualnetworks'{clause}"
           " | project id, name, resourceGroup, subscriptionId, location,"
@@ -162,7 +162,7 @@ def available_sizes(spaces):
 def vnet_detail(client, vnet_id, warn_pct, crit_pct):
     """One VNet: address spaces, every subnet with its IP usage, free ranges and the sizes that still fit."""
     vnet_id = vnet_id.rstrip("/")
-    clause = f" | where tolower(id) == '{vnet_id.lower().replace(chr(39), '')}'"
+    clause = f" | where tolower(id) == {kql_string(vnet_id.lower())}"
     vnets = client.query(_VNETS.format(clause=clause))
     if not vnets:
         raise ArmError("That VNet wasn't found, or your session can't read it.", 404)

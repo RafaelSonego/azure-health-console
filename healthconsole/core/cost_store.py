@@ -21,7 +21,7 @@ from pathlib import Path
 from .arm import AccessDenied, ArmError, Cancelled
 from .cache import on_forget_access
 from .credentials import CredentialError
-from .localfiles import private_dir
+from .localfiles import check_file, private_dir
 
 FORMAT = 2                   # 2: days also keep their booked part (ChargeType); older files are read again
 BOOKED_CHARGES = ("purchase", "refund")  # ChargeType values that are payments, not usage
@@ -101,6 +101,7 @@ class Store:
 
     def _load(self):
         try:
+            check_file(self.path, "Cost cache")  # one another account could swap isn't read
             with gzip.open(self.path, "rt", encoding="utf-8") as handle:
                 data = json.load(handle)
             if data.get("format") == FORMAT:

@@ -75,7 +75,7 @@ def test_refresh_route_clears_integration_and_pim_caches_but_not_built_in_roles(
     pim._cache.put("me", {"eligible": [], "held": [], "error": None})
     user_access._built_in.put("tenant-1", {"r": "Reader"})
     app = Flask("test")
-    app.register_blueprint(create_blueprint(lambda tenant: Client(), config.load(tmp_path / "none.yaml")))
+    app.register_blueprint(create_blueprint(lambda tenant: Client(), config.load(tmp_path / "none.yaml"), authorize=lambda: None))
     assert app.test_client().post("/api/refresh", json={}).get_json()["ok"]
     assert matching._cache.get("inventory-key") is None and pim._cache.get("me") is None
     assert user_access._built_in.get("tenant-1") == {"r": "Reader"}

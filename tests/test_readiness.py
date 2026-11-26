@@ -1,3 +1,5 @@
+import os
+import stat
 from datetime import date
 
 import pytest
@@ -203,7 +205,7 @@ def test_web_job_and_export():
     settings = config.load("/nonexistent")
     fake = client([pool("p", nodes=10)], [plan("one", 1)])
     app = Flask("test")
-    app.register_blueprint(create_blueprint(lambda tenant: fake, settings))
+    app.register_blueprint(create_blueprint(lambda tenant: fake, settings, authorize=lambda: None))
     web = app.test_client()
     assert web.post("/api/readiness", json={"subscriptions": [SUB], "peak_end": "2001-01-01"}).status_code == 400
     started = web.post("/api/readiness", json={"subscriptions": [SUB], "peak_end": "2999-01-01", "deep": False})
@@ -232,10 +234,15 @@ def test_cli_writes_the_report(tmp_path, monkeypatch, capsys):
     fake = Client(query_handlers=[("mv-expand pool", lambda q: [pool("p", nodes=10)])],
                   gets={"/tenants": {"value": []}, "Compute/locations": USAGES, "Compute/skus": SKUS})
     monkeypatch.setattr(cli, "_client", lambda args, settings: fake)
-    cli.main(["--config", str(tmp_path / "none.yaml"), "readiness", "--peak-end", "2999-01-01",
-              "--subscription", "prod-*", "--no-deep", "--out", str(tmp_path)])
+    old = os.umask(0o022)
+    try:
+        cli.main(["--config", str(tmp_path / "none.yaml"), "readiness", "--peak-end", "2999-01-01",
+                  "--subscription", "prod-*", "--no-deep", "--out", str(tmp_path)])
+    finally:
+        os.umask(old)
     written = list(tmp_path.glob("Pre-peak-readiness-*.md"))
     assert len(written) == 1 and "prod-one / rg-aks" in written[0].read_text()
+    assert stat.S_IMODE(written[0].stat().st_mode) == 0o600  # reports name tenants and resources: yours only
     with pytest.raises(SystemExit, match="no subscriptions"):
         cli.main(["--config", str(tmp_path / "none.yaml"), "readiness", "--peak-end", "2999-01-01", "--no-deep"])
 

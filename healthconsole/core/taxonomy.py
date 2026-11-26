@@ -164,13 +164,13 @@ def is_noise(resource_type):
     return (resource_type or "").lower() in NOISE_TYPES
 
 
-# Plumbing the graph leaves out unless it joins two other resources (app.js graphElements); the Table still lists it.
+# Plumbing the graph leaves out unless it joins two other resources (core/diagram.py); the Table still lists it.
 GRAPH_PLUMBING = {"microsoft.network/networkinterfaces", "microsoft.network/privateendpoints",
                   "microsoft.eventgrid/systemtopics", "microsoft.web/connections",
                   "microsoft.insights/autoscalesettings", "microsoft.containerregistry/registries/replications"}
 
 
-# A group's graph is drawn in bands by role, top to bottom in this order (app.js bandLayout).
+# A group's graph is drawn in bands by role, top to bottom in this order (core/diagram.py).
 TIERS = [
     ("ingress", "Ingress"),
     ("compute", "Compute"),
@@ -233,7 +233,7 @@ def tier(resource_type):
 
 
 def graph_role(resource_type):
-    """"plumbing" or "": how the page's graph treats a type (app.js graphElements)."""
+    """"plumbing" or "": how the page's graph treats a type (core/diagram.py)."""
     return "plumbing" if (resource_type or "").lower() in GRAPH_PLUMBING else ""
 
 

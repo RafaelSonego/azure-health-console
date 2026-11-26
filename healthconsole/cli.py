@@ -1,5 +1,6 @@
 """`azure-health-console serve | export | readiness | bench | config | profile-draft | alert-check | whoami`."""
 import argparse
+import atexit
 import json
 import logging
 import socket
@@ -9,7 +10,7 @@ import webbrowser
 from . import __version__
 from pathlib import Path
 
-from .core import config, health, profiles, readiness, report, snapshot, tables, yamlio
+from .core import config, health, localfiles, profiles, readiness, report, snapshot, tables, yamlio
 from .core.arm import ArmClient, ArmError
 from .core.credentials import AzureCliTokenProvider, CredentialError
 from .core.guarded import ServiceError
@@ -34,12 +35,25 @@ def _free_port(preferred):
     raise SystemExit("No free port on 127.0.0.1.")
 
 
+def start_event_log(settings):
+    """The local console keeps its log (Settings → Logs); a folder it can't write only costs the log."""
+    from .core import eventlog
+    try:
+        eventlog.configure(settings["logs"]["dir"], settings["logs"]["keep_days"])
+    except OSError as error:
+        print(f"The log can't be kept in {settings['logs']['dir']} ({error}); the console runs without it.")
+        return
+    logging.getLogger("healthconsole").addHandler(eventlog.ErrorHandler())
+    atexit.register(eventlog.flush)
+
+
 def cmd_serve(args, settings):
     from .web import create_local_app, launch_url
 
     port = _free_port(args.port)
     if port != args.port:
         print(f"Port {args.port} is busy, using {port}.")
+    start_event_log(settings)
     app = create_local_app(settings, port, args.config, start_alerts=True)
     url = launch_url(app, port)
     print(f"Azure Health Console on {url}  (read-only; open this address once per browser, then http://127.0.0.1:{port} works)")
@@ -57,17 +71,17 @@ def cmd_export(args, settings):
     if args.no_inbound:
         graph["inbound"] = False
     result = snapshot.build(
-        client, args.resource_id, DiscoveryOptions(**graph), HealthOptions(**settings["health"]),
+        client, args.resource_id, DiscoveryOptions(**graph), HealthOptions(**settings["health"], aks_leftover_hours=settings["aks"]["leftover_hours"]),
         profiles.load(settings.get("profiles_dir")),
         progress=lambda message: print(f"  {message}…", file=sys.stderr),
     )
     out_dir = Path(args.out or settings["exports_dir"]).expanduser()
-    out_dir.mkdir(parents=True, exist_ok=True)
+    out_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     formats = report.FORMATS if args.format == "both" else (args.format,)
     for fmt in formats:
         content = report.render(result, fmt, settings.get("pdf_font"))
         target = out_dir / report.filename(result, fmt)
-        target.write_bytes(content)
+        localfiles.write_private_bytes(target, content)
         print(target)
     counts = result.counts()
     print(f"{result.status}: {len(result.nodes)} resources, {counts['critical']} critical, "
@@ -97,16 +111,17 @@ def cmd_readiness(args, settings):
         sys.exit("error: no subscriptions: pass --subscription (name, ID or pattern) or --scope (a saved scope), "
                  "or set Open with to a saved scope (Settings → General).")
     print(f"Readiness for {len(chosen)} subscription(s) as {identity.name} (read-only)…", file=sys.stderr)
-    options = {**settings["health"], **settings["network"]}
+    options = {**settings["health"], **settings["network"],
+               "secret_scan_max_vaults": settings["triage"]["secret_scan_max_vaults"]}
     result = readiness.run(client, chosen, options, peak_end, deep=not args.no_deep,
                            include_secrets=args.include_secrets, kube_settings=settings["aks"],
                            progress=lambda message: print(f"  {message}…", file=sys.stderr))
     doc = readiness.to_doc(result, {s["id"]: s["name"] for s in subscriptions}, include_healthy=not args.problems_only)
     out_dir = Path(args.out or settings["exports_dir"]).expanduser()
-    out_dir.mkdir(parents=True, exist_ok=True)
+    out_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     for fmt in (("md", "pdf") if args.format == "both" else (args.format,)):
         target = out_dir / tables.filename(doc, fmt)
-        target.write_bytes(tables.render(doc, fmt, settings.get("pdf_font")))
+        localfiles.write_private_bytes(target, tables.render(doc, fmt, settings.get("pdf_font")))
         print(target)
     c = result["counts"]
     print(f"{c['critical']} critical, {c['warning']} warning, {c['healthy']} healthy", file=sys.stderr)
@@ -181,9 +196,9 @@ def cmd_bench(args, settings):
                        say=lambda message: print(message, file=sys.stderr))
     text = bench.to_markdown(result)
     out_dir = Path(args.out or settings["exports_dir"]).expanduser()
-    out_dir.mkdir(parents=True, exist_ok=True)
+    out_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     target = out_dir / f"bench-{result['taken_at'][:16].replace(' ', '-').replace(':', '')}.md"
-    target.write_text(text)
+    localfiles.write_private_text(target, text)
     print(text)
     print(target, file=sys.stderr)
 
@@ -231,6 +246,18 @@ def cmd_alert_check(args, settings):
         print(f"\n  {query['label']}:\n    {query['query']}")
 
 
+def cmd_verify(args):
+    from . import release
+    try:
+        results = release.verify(args.folder)
+    except release.VerifyError as error:
+        sys.exit(f"NOT VERIFIED: {error}")
+    for name, status in results:
+        print(f"  {status:<15} {name}")
+    print(f"Verified: signed by the release pipeline (the key in azure-health-console {__version__}); "
+          "the files marked ok are the released ones.")
+
+
 def cmd_whoami(args, settings):
     identity = _client(args, settings).identity
     print(f"{identity.name}  tenant {identity.tenant_id}")
@@ -246,7 +273,19 @@ def _setup_logging(verbose, log_calls):
         logging.getLogger().setLevel(min(logging.getLogger().level, logging.INFO))
 
 
+def use_system_certificates():
+    """HTTPS checked against the OS's trusted certificates, as the browser does: behind a company proxy that inspects
+    HTTPS, Python's own list doesn't hold the company's root certificate, so public pages like pypistats fail."""
+    try:
+        import truststore
+    except ImportError:
+        return False
+    truststore.inject_into_ssl()
+    return True
+
+
 def main(argv=None):
+    use_system_certificates()
     parser = argparse.ArgumentParser(prog="azure-health-console",
                                      description="Read-only Azure health view from your az login session.")
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
@@ -313,6 +352,10 @@ def main(argv=None):
     whoami = commands.add_parser("whoami", help="Show which identity and tenant the session uses")
     whoami.set_defaults(handler=cmd_whoami)
 
+    verify = commands.add_parser("verify", help="Check a downloaded release (SHA256SUMS.txt, its signature and the "
+                                                "files) before upgrading to it")
+    verify.add_argument("folder", nargs="?", default=".", help="The folder you downloaded the release into")
+
     if argv is None:
         argv = sys.argv[1:]
     if not argv:
@@ -320,6 +363,9 @@ def main(argv=None):
         argv = ["serve", "--open"]
     args = parser.parse_args(argv)
     _setup_logging(args.verbose, args.log_calls)
+    if args.command == "verify":  # needs no settings: a broken config.yaml mustn't stop it
+        cmd_verify(args)
+        return
     try:
         settings = config.load(args.config)
         args.handler(args, settings)

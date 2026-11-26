@@ -62,6 +62,32 @@ def test_one_snapshot_per_hour_and_the_baseline_is_the_newest_old_enough(tmp_pat
     assert [i["key"] for i in found["areas"]["problems"]["resolved"]] == ["z"]
 
 
+def test_areas_sent_one_at_a_time_compare_alone_and_make_one_snapshot(tmp_path):
+    """Summary sends each card as it answers, so a slow Cost doesn't hold up Problems' comparison."""
+    path = tmp_path / "s.json"
+    record(path, ITEMS, NOW)
+    later = NOW + timedelta(hours=25)
+    problems = record(path, {"problems": {"a": ITEMS["problems"]["a"]}}, later)
+    assert problems["since"] == NOW.isoformat() and set(problems["areas"]) == {"problems"}
+    assert [i["key"] for i in problems["areas"]["problems"]["resolved"]] == ["b"]
+    cost_now = record(path, {"cost": {}}, later + timedelta(minutes=7))
+    assert cost_now["since"] == NOW.isoformat() and set(cost_now["areas"]) == {"cost"}
+    shots = summary_history._load(path)["scopes"]["scope"]
+    assert len(shots) == 2 and set(shots[-1]["items"]) == {"problems", "cost"}
+
+
+def test_the_baseline_is_known_before_any_card_answers_and_reading_it_keeps_nothing(tmp_path):
+    path = tmp_path / "s.json"
+    none_yet = summary_history.baseline(path, "scope", 24, 8, now=NOW)
+    assert none_yet["since"] is None and none_yet["ready_at"] == (NOW + timedelta(hours=24)).isoformat()
+    assert not path.exists()
+    record(path, ITEMS, NOW)
+    too_soon = summary_history.baseline(path, "scope", 24, 8, now=NOW + timedelta(hours=3))
+    assert too_soon["since"] is None and too_soon["first"] == NOW.isoformat()
+    assert summary_history.baseline(path, "scope", 24, 8, now=NOW + timedelta(hours=25)) == {"since": NOW.isoformat()}
+    assert len(summary_history._load(path)["scopes"]["scope"]) == 1
+
+
 def test_old_snapshots_are_dropped_after_keep_days(tmp_path):
     path = tmp_path / "s.json"
     record(path, ITEMS, NOW, keep=2)
@@ -159,20 +185,24 @@ def test_summary_settings_have_defaults_and_are_type_checked():
 def app_for(tmp_path, fake):
     app = Flask("test", static_folder=None)
     settings = config.load(tmp_path / "none.yaml")
-    app.register_blueprint(create_blueprint(lambda tenant: fake, settings, config_file=tmp_path / "c.yaml"))
+    app.register_blueprint(create_blueprint(lambda tenant: fake, settings, config_file=tmp_path / "c.yaml", authorize=lambda: None))
     return app.test_client()
 
 
 def test_routes(tmp_path):
     web = app_for(tmp_path, FakeClient(gets={"budgets": {"value": []}}))
     assert web.post("/api/summary/changes", json={"subscriptions": [SUB]}).status_code == 400
+    assert web.get("/api/summary/baseline").status_code == 400
+    assert web.get(f"/api/summary/baseline?subscription={SUB}").get_json()["since"] is None
+    assert not list((tmp_path / "cache").glob("summary-*.json"))  # reading the baseline keeps nothing
     first = web.post("/api/summary/changes", json={"subscriptions": [SUB], "items": ITEMS}).get_json()
     assert first["since"] is None
+    assert web.get(f"/api/summary/baseline?subscription={SUB}").get_json()["first"] == first["first"]
     assert list((tmp_path / "cache").glob("summary-*.json"))
     assert web.get(f"/api/cost/budgets?subscription={SUB}").get_json() == {"budgets": [], "notes": []}
     assert web.post("/api/readiness", json={"subscriptions": [SUB], "peak_end": "2099-01-01", "purpose": "x"}).status_code == 400
     assert "summary_cards" in web.get("/api/personas").get_json()
-    web.post("/api/cache/clear")
+    web.post("/api/cache/clear", json={})
     assert not list((tmp_path / "cache").glob("summary-*.json"))
 
 

@@ -84,7 +84,7 @@ def test_a_snapshot_dict_carries_the_fold():
 
 def http():
     app = Flask("test")
-    app.register_blueprint(create_blueprint(lambda tenant: FakeClient(), config.load("/nonexistent")))
+    app.register_blueprint(create_blueprint(lambda tenant: FakeClient(), config.load("/nonexistent"), authorize=lambda: None))
     return app.test_client()
 
 

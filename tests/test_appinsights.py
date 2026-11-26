@@ -147,3 +147,23 @@ def test_spikes_card_reads_last_and_week_buckets_and_counts_what_it_could_not_re
     card = appinsights.spikes(GraphClient(rows, metrics, fail=("secret-appi",)), ["s"])
     assert [(i["name"], i["status"]) for i in card["items"]] == [("shop-appi", "critical")]
     assert card["status"] == "critical" and card["checked"] == 3 and "1 component(s) couldn't be read" in card["error"]
+
+
+def counts_of(total, total_wk, failed, failed_wk, exc=0, exc_wk=0):
+    return {"requests/count": (total, total_wk), "requests/failed": (failed, failed_wk), "exceptions/count": (exc, exc_wk)}
+
+
+def test_a_component_failing_a_lot_as_last_week_is_amber_with_its_reason():
+    same = counts_of(2_000, 2_000, 1_500, 1_520, 900, 900)  # 75.0% now, 76.0% last week
+    assert appinsights.assess(same) is None  # the spike rule sees no change
+    found = appinsights.summary(same)
+    assert (found["status"], found["causes"]) == ("warning", ["steady"])
+    assert found["why"].startswith("failing a lot, as last week: 75.0% of requests (1,500 of 2,000 failed)")
+    assert appinsights.summary(counts_of(1000, 1000, 100, 100))["status"] is None  # 10% stays under the critical rate
+
+
+def test_the_reason_says_what_moved_against_last_week():
+    more = appinsights.summary(counts_of(100, 50, 60, 10))
+    assert more["status"] == "critical" and more["why"] == "failing more: 60.0% of requests vs 20.0% last week (60 of 100 failed)"
+    throwing = appinsights.summary(counts_of(1_000, 1_000, 50, 300, 300, 100))
+    assert throwing["status"] == "warning" and throwing["why"] == "exceptions 3.0× last week (300 vs 100)"

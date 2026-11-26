@@ -139,6 +139,34 @@ def test_unreadable_kubernetes_lists_are_reported(monkeypatch):
     assert "NotReady" in notes["nodes"]["effect"] and "HTTP 403" in notes["nodes"]["reason"]
 
 
+def test_kubernetes_lists_workload_names_for_the_dependencies_picker(monkeypatch):
+    from healthconsole.core.explore import aks
+
+    def obj(ns, name):
+        return {"metadata": {"namespace": ns, "name": name}}
+
+    lists = {"/apis/apps/v1/deployments": [obj("shop", "web"), obj("kube-system", "coredns")],
+             "/apis/apps/v1/statefulsets": [obj("shop", "db")], "/apis/apps/v1/daemonsets": [obj("shop", "agent")]}
+
+    class Lists:
+        server, source = "https://api", "kubeconfig"
+
+        def get(self, path, params=None, raw=False):
+            return {"gitVersion": "v1.30"}
+
+        def items(self, path, params=None):
+            return lists.get(path, [])
+
+    monkeypatch.setattr(kube, "client_for", lambda *a, **k: Lists())
+    monkeypatch.setattr(aks.aks_checks, "analyze", lambda *a, **k: {})
+    result = aks.kubernetes(None, "/subscriptions/s/resourceGroups/r/providers/Microsoft.ContainerService/managedClusters/c")
+    assert result["workloads"] == [
+        {"namespace": "kube-system", "kind": "Deployment", "name": "coredns"},
+        {"namespace": "shop", "kind": "DaemonSet", "name": "agent"},
+        {"namespace": "shop", "kind": "Deployment", "name": "web"},
+        {"namespace": "shop", "kind": "StatefulSet", "name": "db"}]
+
+
 def test_kubernetes_with_nothing_readable_is_unavailable(monkeypatch):
     from healthconsole.core.explore import aks
 
@@ -173,6 +201,22 @@ def test_failed_and_pending_pods_are_listed_with_their_reason():
     rows = aks_checks.analyze({}, [pod("ok", "web-rs"), crashing, evicted, system], [], [], [], [], [], [], [])["not_running"]
     assert [(r["pod"], r["phase"], r["reason"]) for r in rows] == [("web-1", "Failed", "Evicted"), ("web-2", "Pending", "ImagePullBackOff")]
     assert rows[0]["owner"] == "ReplicaSet/web-rs" and "low on resource" in rows[0]["message"]
+
+
+def test_a_failed_pod_is_dated_by_when_it_stopped_not_when_it_started():
+    done = pod("job-1", "job-rs", phase="Failed")
+    done["metadata"]["creationTimestamp"] = "2026-11-01T00:00:00Z"
+    done["status"]["startTime"] = "2026-11-01T00:00:05Z"
+    done["status"]["containerStatuses"][0]["state"] = {"terminated": {"reason": "Error", "finishedAt": "2026-11-03T10:00:00Z"}}
+    evicted = pod("web-1", "web-rs", phase="Failed")
+    evicted["status"].update(reason="Evicted", startTime="2026-11-02T00:00:00Z",
+                             conditions=[{"type": "Ready", "status": "False", "lastTransitionTime": "2026-11-04T08:00:00Z"}])
+    waiting = pod("web-2", "web-rs", phase="Pending")
+    waiting["metadata"]["creationTimestamp"] = "2026-11-05T00:00:00Z"
+    rows = {r["pod"]: r for r in aks_checks.not_running([done, evicted, waiting], lambda ns: True)}
+    assert rows["job-1"]["since"] == "2026-11-03T10:00:00Z" and rows["job-1"]["started"] == "2026-11-01T00:00:05Z"
+    assert rows["web-1"]["since"] == "2026-11-04T08:00:00Z"
+    assert rows["web-2"]["since"] == "2026-11-05T00:00:00Z"
 
 
 def test_quantities():
@@ -439,6 +483,30 @@ def test_recommendations_include_what_is_inside_the_resource():
                                                             ("securityresources", lambda kql: [])]), service)
     assert [(r["on"], r["count"]) for r in out["advisor"]] == [("", 1), (["apis/a", "apis/b"], 288)]
     assert f'startswith "{service.lower()}/"' in queries[0] and "summarize n = count()" in queries[0]
+
+
+def test_advisor_text_and_links_from_either_format():
+    from healthconsole.core.explore import advice
+    from tests.conftest import FakeClient
+
+    site = "/subscriptions/s/resourceGroups/rg/providers/Microsoft.Web/sites/fn"
+    queries = []
+
+    def advisor(kql):
+        queries.append(kql)
+        own = {"own": True, "n": 1, "parts": [""]}
+        return [{**own, "category": "Security", "impact": "High", "problem": "Enable auth", "solution": "Enable auth", "link": ""},
+                {**own, "category": "HighAvailability", "impact": "Medium", "problem": "Separate web apps from web APIs",
+                 "solution": "Separate web apps from web APIs", "link": "https://learn.microsoft.com/x"},
+                {**own, "category": "Cost", "impact": "Low", "problem": "Right-size", "solution": "Use a smaller plan", "link": ""}]
+
+    out = advice.recommendations(FakeClient(query_handlers=[("AdvisorResources", advisor),
+                                                            ("securityresources", lambda kql: [])]), site)
+    by = {r["category"]: r for r in out["advisor"]}
+    assert "coalesce(tostring(properties.shortDescription.problem), tostring(properties.label))" in queries[0]
+    assert by["Security"]["solution"] == "" and by["Cost"]["solution"] == "Use a smaller plan"  # said once, not twice
+    assert by["HighAvailability"]["guide"] == "" and by["HighAvailability"]["link"].startswith("https://")
+    assert by["Cost"]["guide"] == advice.ADVISOR_GUIDES["Cost"] and by["Security"]["guide"] == advice.ADVISOR_GUIDES["Security"]
 
 
 def test_diagnostics_lists_detectors_then_runs_one_at_a_time(monkeypatch):

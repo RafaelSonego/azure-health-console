@@ -14,6 +14,8 @@ exports/
 config.yaml
 .env
 *.pem
+# The release key's public half: published on purpose.
+!healthconsole/release-signing.pem
 *.key
 
 # OS / editor

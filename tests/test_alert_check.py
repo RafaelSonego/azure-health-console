@@ -194,6 +194,13 @@ def test_new_relic_refuses_to_guess_between_conditions_with_one_name():
         nr([])[0].alert_rule(ISSUE)
 
 
+def test_new_relic_reads_a_rule_only_in_the_connections_own_accounts():
+    provider, graph = nr([CONDITION])
+    graph.nrql_conditions = lambda account, name: pytest.fail(f"read account {account}")
+    with pytest.raises(ProviderError, match="isn't one of NR's accounts"):
+        provider.alert_rule({**ISSUE, "account_id": 99})
+
+
 def test_new_relic_facets_take_the_worst_and_percentiles_are_read():
     provider, _ = nr([CONDITION])
     base = 1_762_000_000
@@ -257,7 +264,7 @@ def test_the_route_checks_once_and_keeps_the_answer(tmp_path):
     from healthconsole.web import create_blueprint
     client, seen = azure_client({"": [25] * 2400})
     app = Flask("t", static_folder=None)
-    app.register_blueprint(create_blueprint(lambda tenant: client, config.load(tmp_path / "none.yaml"), config_file=tmp_path / "c.yaml"))
+    app.register_blueprint(create_blueprint(lambda tenant: client, config.load(tmp_path / "none.yaml"), config_file=tmp_path / "c.yaml", authorize=lambda: None))
     web = app.test_client()
     first = web.get(f"/api/alert-check?source=azure&id={ALERT}").get_json()
     assert first["available"] and first["numbers"]["breaching_percent"] == 100.0
@@ -267,7 +274,7 @@ def test_the_route_checks_once_and_keeps_the_answer(tmp_path):
     assert web.get("/api/alert-check?source=other").status_code == 400
     refused = FakeClient(query_handlers=[("AlertsManagementResources", lambda q: [])])
     app2 = Flask("t2", static_folder=None)
-    app2.register_blueprint(create_blueprint(lambda tenant: refused, config.load(tmp_path / "none.yaml"), config_file=tmp_path / "c.yaml"))
+    app2.register_blueprint(create_blueprint(lambda tenant: refused, config.load(tmp_path / "none.yaml"), config_file=tmp_path / "c.yaml", authorize=lambda: None))
     gone = app2.test_client().get(f"/api/alert-check?source=azure&id={ALERT}").get_json()
     assert gone == {"available": False, "reason": "That alert isn't in Azure's alert history any more."}
 

@@ -11,8 +11,11 @@ CATEGORIES = (("exposure", "Exposure"), ("keys", "Keys & local auth"), ("transpo
 MAX_ROWS = 10000
 CHANGE_DAYS = 14  # how long Resource Graph keeps change history
 STORAGE, KEY_VAULT, SQL_SERVER = exposure.STORAGE_TYPE, "microsoft.keyvault/vaults", "microsoft.sql/servers"
-RISKY_PORTS = {22: "SSH", 3389: "RDP", 1433: "SQL Server", 3306: "MySQL", 5432: "PostgreSQL", 6379: "Redis",
-               27017: "MongoDB", 5985: "WinRM", 5986: "WinRM"}
+# Names for well-known ports (a label only); which ports are a finding is the setting security.risky_ports.
+PORT_NAMES = {21: "FTP", 22: "SSH", 23: "Telnet", 445: "SMB", 1433: "SQL Server", 1521: "Oracle", 2375: "Docker",
+              2379: "etcd", 3306: "MySQL", 3389: "RDP", 5432: "PostgreSQL", 5672: "RabbitMQ", 5985: "WinRM", 5986: "WinRM",
+              6379: "Redis", 9042: "Cassandra", 9200: "Elasticsearch", 10250: "kubelet", 11211: "Memcached", 27017: "MongoDB"}
+RISKY_PORTS = (22, 3389, 1433, 3306, 5432, 6379, 27017, 5985, 5986)  # the setting's default
 INTERNET = ("*", "internet", "0.0.0.0/0", "any")
 CHANGED_FIELDS = ("publicNetworkAccess", "networkAcls", "apiServerAccessProfile", "ipRules", "securityRules",
                   "ipConfigurations", "disableLocalAuth", "allowSharedKeyAccess", "adminUserEnabled",
@@ -80,7 +83,7 @@ def findings(row):
     return out
 
 
-def _ports(rule):
+def _ports(rule, risky=None):
     """(label, risky) for a rule's destination ports: "all ports", or the named risky ones first."""
     ranges = [p for p in [rule.get("port"), *(rule.get("ports") or [])] if p]
     if any(p == "*" for p in ranges):
@@ -92,15 +95,15 @@ def _ports(rule):
             low, high = int(low), int(high or low)
         except ValueError:
             continue
-        named += [f"{name} ({port})" for port, name in RISKY_PORTS.items() if low <= port <= high]
+        named += [f"{PORT_NAMES.get(port, 'port')} ({port})" for port in (risky or RISKY_PORTS) if low <= port <= high]
     return (", ".join(dict.fromkeys(named)), True) if named else (f"port(s) {', '.join(map(str, ranges))}", False)
 
 
-def nsg_findings(rows):
+def nsg_findings(rows, ports=None):
     """Findings from NSG inbound Allow rules whose source is the internet (one per rule)."""
     out = []
     for row in rows:
-        label, risky = _ports(row)
+        label, risky = _ports(row, ports)
         out.append(_resource(row, _finding(
             "exposure", WARNING if risky else INFO, f"rule {row.get('rule')}: {label} open to the internet",
             "Limit the source to known addresses, or use Bastion or a VPN for management ports." if risky
@@ -185,7 +188,7 @@ def _firewall_rules(client, rows, errors):
              " (Service Bus, Event Hubs), <server>/firewallRules (SQL, Synapse)"}] if count else []
 
 
-def posture(client, subscriptions, clause="", history=True, firewalls=True):
+def posture(client, subscriptions, clause="", history=True, firewalls=True, risky_ports=None):
     """Every finding in scope, warnings first, each with who created the resource or changed one of the checked
     settings in the last CHANGE_DAYS days (unless `history` is off). `firewalls` adds the per-resource firewall
     reads. A read that fails is named in `errors`; the others still stand."""
@@ -209,7 +212,7 @@ def posture(client, subscriptions, clause="", history=True, firewalls=True):
     web_sent += _firewall_rules(client, settings, errors) if firewalls else []
     for row in settings:
         rows += [_resource(row, f) for f in findings(row)]
-    rows += nsg_findings(read("nsg")) + ip_findings(read("public_ips"))
+    rows += nsg_findings(read("nsg"), risky_ports) + ip_findings(read("public_ips"))
     changed = {}
     for change in read("changes") if history else []:
         entry = changed.setdefault(change["target"], {})
@@ -222,14 +225,15 @@ def posture(client, subscriptions, clause="", history=True, firewalls=True):
     counts = {key: {s: sum(1 for r in rows if r["category"] == key and r["severity"] == s) for s in order}
               for key, _ in CATEGORIES}
     return {"rows": rows, "counts": counts, "categories": [{"key": k, "label": label} for k, label in CATEGORIES],
+            "risky_ports": list(risky_ports or RISKY_PORTS),
             "truncated": truncated, "max_rows": MAX_ROWS, "change_days": CHANGE_DAYS, "errors": errors,
             "queries": [{"label": name.replace("_", " "), "query": q} for name, q in sent.items()] + web_sent}
 
 
-def exposure_warnings(client, subscriptions, clause=""):
+def exposure_warnings(client, subscriptions, clause="", risky_ports=None):
     """(one entry per resource with an exposure warning, its findings joined; errors): Triage's card, the same
     judgement as Security's tab without the change history."""
-    data = posture(client, subscriptions, clause, history=False, firewalls=False)  # Triage: no per-resource reads
+    data = posture(client, subscriptions, clause, history=False, firewalls=False, risky_ports=risky_ports)  # Triage: no per-resource reads
     grouped = {}
     for row in data["rows"]:
         if row["category"] == "exposure" and row["severity"] == WARNING:
@@ -238,7 +242,7 @@ def exposure_warnings(client, subscriptions, clause=""):
     return list(grouped.values()), data["errors"]
 
 
-def for_resource(client, resource_id):
+def for_resource(client, resource_id, risky_ports=None):
     """One resource's findings (a Browse Overview block): its settings, and its rules for an NSG or its network
     interfaces' public IPs for a VM. Restricted exposure is included, so the block can say "behind a firewall"."""
     literal = kql_list([resource_id.lower()])
@@ -262,7 +266,7 @@ def for_resource(client, resource_id):
             web_sent += _firewall_rules(client, rows, errors)
             found += [_resource(row, f) for row in rows for f in findings(row)]
         else:
-            found += (nsg_findings if name == "nsg" else ip_findings)(rows)
+            found += nsg_findings(rows, risky_ports) if name == "nsg" else ip_findings(rows)
     order = (WARNING, INFO, RESTRICTED)
     found.sort(key=lambda r: (order.index(r["severity"]), r["category"]))
     return {"findings": found, "errors": errors, "categories": dict(CATEGORIES),

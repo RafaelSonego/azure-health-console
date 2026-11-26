@@ -109,7 +109,7 @@ def to_markdown(snapshot):
         b = snapshot.baseline
         out += [f"## Against last week (same {b['window_minutes']} minutes, a week earlier)", "",
                 "| Resource | Metric | Now | Last week | Change |", "|---|---|---|---|---|"]
-        out += [f"| {_cell(m['name'])} | {_cell(m['signal'])} | {_fmt(m['value'])} {m['unit']} | {_fmt(m['baseline'])} | "
+        out += [f"| {_cell(m['name'])} | {_cell(m.get('label') or m['signal'])} | {_fmt(m['value'])} {m['unit']} | {_fmt(m['baseline'])} | "
                 f"{baseline.describe(m)} |" for m in b["movers"]]
         out.append("")
     out += ["## Dependency graph", "", _mermaid(snapshot), "",

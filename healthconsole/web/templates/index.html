@@ -43,8 +43,9 @@
       <div class="account-head"><span id="account-avatar" class="avatar" aria-hidden="true"></span>
         <div><strong id="account-who"></strong><span id="account-tenant" class="muted"></span></div></div>
       <button id="refresh" type="button" class="menu-item" role="menuitem" title="Drop cached tokens and results, e.g. after activating PIM or a new az login"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg><span>Refresh access<small>After activating PIM, or a new az login</small></span></button>
-      <button id="clear-cache" type="button" class="menu-item" role="menuitem" title="Forget the costs kept on this machine and every answer kept in memory"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M6 6l1 14h10l1-14"/></svg><span>Clear cached data<small>Costs kept on this machine, answers in memory</small></span></button>
-      <button id="signin-again" type="button" class="menu-item hidden" role="menuitem" title="Run az login or az logout from here: switch account or tenant, add another account's tenant, or sign out"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/><path d="M10 17l5-5-5-5"/><path d="M15 12H3"/></svg><span>Sign in or out<small>Switch account or tenant, or sign out</small></span></button>
+      <button id="clear-cache" type="button" class="menu-item" role="menuitem" title="Forget the costs, summaries and access audits kept on this machine and every answer kept in memory"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M6 6l1 14h10l1-14"/></svg><span>Clear cached data<small>Costs, summaries and access audits kept on this machine, answers in memory</small></span></button>
+      <button id="signin-again" type="button" class="menu-item hidden" role="menuitem" title="Runs az login for you: switch account or tenant, add another account's tenant, or sign in again after a PIM group"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/><path d="M10 17l5-5-5-5"/><path d="M15 12H3"/></svg><span>Switch account or tenant<small>Sign in to another account or tenant</small></span></button>
+      <button id="signout-menu" type="button" class="menu-item hidden" role="menuitem" title="Runs az logout for this account: terminals on this machine are signed out too"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="M16 17l5-5-5-5"/><path d="M21 12H9"/></svg><span>Sign out<small id="signout-account"></small></span></button>
       <div class="menu-sep" role="separator"></div>
       <div class="account-theme"><span class="muted">Theme</span>
         <div class="theme-switch" role="group" aria-label="Theme">
@@ -52,13 +53,18 @@
           <button type="button" data-theme-value="system" aria-label="Match system theme" title="Follow your system's setting"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="2" y="4" width="20" height="13" rx="2"/><path d="M8 21h8M12 17v4"/></svg><span>Auto</span></button>
           <button type="button" data-theme-value="dark" aria-label="Dark theme" title="Dark"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg><span>Dark</span></button>
         </div></div>
+      <div class="account-theme"><span class="muted">Layout</span>
+        <div class="theme-switch layout-switch" role="group" aria-label="Layout">
+          <button type="button" data-layout-value="classic" aria-label="Classic layout" title="Classic: the whole page scrolls"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="3" width="16" height="18" rx="2"/><path d="M8 8h8M8 12h8M8 16h5"/></svg><span>Classic</span></button>
+          <button type="button" data-layout-value="panes" aria-label="Panes layout" title="Panes: the bars stay put, and each part of the window has one scrollbar with nothing scrolling inside it"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 8h18M9 8v13"/></svg><span>Panes</span></button>
+        </div></div>
       <div class="menu-sep" role="separator"></div>
       <button id="update-open" type="button" class="menu-item update-item hidden" role="menuitem" title="How to upgrade, and what's new"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5"/><path d="M5 12l7-7 7 7"/></svg><span id="update-text">A new version is out<small></small></span></button>
       <button id="about-open" type="button" class="menu-item" role="menuitem" title="What this console is, its version and where your files are"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/></svg><span>About<small>Version, and where your files are</small></span></button>
     </div>
   </div>
 </header>
-<section id="signin-panel" class="signin-panel hidden" aria-label="Sign in again"></section>
+<section id="signin-panel" class="signin-panel hidden" aria-label="Switch account or tenant"></section>
 
 <section id="signin" class="signin hidden" aria-live="assertive"></section>
 
@@ -66,11 +72,11 @@
   <div class="views" role="tablist">
     <button data-view="summary" role="tab" title="Problems now, costs, security and readiness in a few lines">Summary</button>
     <button data-view="triage" role="tab">Triage</button>
-    <button data-view="browse" role="tab">Browse</button>
     <button data-view="investigate" role="tab" title="One failing request end to end, down to its pod">Investigate</button>
     <button data-view="readiness" role="tab">Readiness</button>
     <button data-view="security" role="tab" title="Exposure, keys, transport and deletion protection across the scope, and Defender's vulnerabilities">Security</button>
     <button data-view="cost" role="tab" title="What the scope costs, what moved and spiked, and resources billed while doing nothing">Cost</button>
+    <button data-view="browse" role="tab">Browse</button>
     <span class="nav-menu">
       <button type="button" class="nav-menu-btn" data-menu="menu-sweeps" aria-haspopup="true"
         title="Sweeps across the scope: Secrets and certificates, Network">Sweeps<span class="nav-current"></span> <span id="secrets-badge" class="badge hidden"></span></button>
@@ -208,27 +214,42 @@
     <span class="muted">Start with the app that's failing, then follow one request down to the pod that served it. Each
       step is one read, and nothing runs until you click.</span>
     <span class="spacer"></span>
-    <label title="How far back steps 2 to 4 look">Look back <select id="inv-window"></select></label>
     <button id="inv-refresh" type="button" title="Read every step that's open again, from Azure">Refresh</button>
   </div>
   <div id="inv-current" class="inv-current hidden"></div>
   <div id="inv-tools" class="table-tools inv-tools hidden">
     <span id="inv-gateways" class="inv-gateways"></span>
   </div>
+  <div class="tab-tools inv-window-bar">
+    <label class="inline" title="How far back steps 2 to 4 and Search logs look. Application Insights keeps 30 days by default (some components 90 days or more); changes go back 14 days">Look back <select id="inv-window"></select></label>
+    <span class="showing muted" id="inv-showing"></span>
+    <nav id="inv-trail" class="inv-trail hidden" aria-label="Where you are in this investigation"></nav>
+  </div>
   <nav class="subtabs" id="inv-subtabs" aria-label="Investigate views">
     <button type="button" data-inv-sub="flow" class="active">Failing requests</button>
     <button type="button" data-inv-sub="search">Search logs</button>
   </nav>
   <div id="inv-flow" class="inv-flow">
-    <div class="inv-step" id="inv-apps"><h3><span class="q-num">1</span> Which app is failing?</h3>
-      <p class="muted">Every Application Insights component in scope (where an app sends its requests and errors), with its
-        last hour against the same hour last week, worst first. Pick one.</p>
+    <div class="inv-step" id="inv-apps"><h3><span class="q-num">1</span> Pick the app <span class="muted inv-span">· last hour, always</span></h3>
+      <p class="muted">Application Insights components (where an app sends its requests and errors), worst first: a red or amber
+        status (failing or throwing more than the same hour last week, or failing a lot) comes first, then the most server errors (5xx) in the last hour.
+        Click a column header to sort by it instead. Know the app already? Type its name.</p>
+      <div class="inv-apps-tools"><input id="inv-app-find" type="search" autocomplete="off" placeholder="Go to a component or app by name"
+          aria-label="Find a component or an app that reports to it">
+        <span id="inv-apps-shown" class="muted"></span>
+        <button type="button" id="inv-apps-all" class="link"></button></div>
       <div id="inv-apps-out"></div>
       <div class="inv-trace-row"><span class="muted">Already have an operation ID (trace ID) from a log or an alert?</span>
         <input id="inv-trace" type="search" autocomplete="off" placeholder="Paste it here" aria-label="Operation ID">
         <button type="button" id="inv-trace-go">Follow</button></div></div>
-    <div class="inv-step hidden" id="inv-ops"><h3><span class="q-num">2</span> What's failing in it<span class="inv-what muted"></span></h3>
-      <div class="inv-parts"><div id="inv-ops-part"><h4>Failing endpoints</h4>
+    <div class="inv-step hidden" id="inv-ops"><h3><span class="q-num">2</span> What's failing in it<span class="inv-what muted"></span> <span class="muted inv-span" data-inv-span></span>
+      <span class="inv-picked hidden"></span><button type="button" class="link inv-unfold hidden" data-inv-unfold>Show all again</button></h3>
+      <div class="inv-parts"><div id="inv-codes-part"><h4>By HTTP code</h4>
+        <p class="muted">Every failed request in the look-back window by its HTTP code: server errors (5xx) first, then
+        responses not sent in full and failed runs with no HTTP status (code 0, a function or job not called over HTTP),
+        each with why, then the caller's (4xx). Open a code for the endpoints that return it; <strong>Samples</strong>
+        lists that code's latest failures there.</p><div id="inv-codes-out"></div></div>
+      <div id="inv-ops-part"><h4>Failing endpoints</h4>
         <p class="muted">Requests that failed in the look-back window, by endpoint and the service that answered. <strong>Samples</strong>
         lists the latest failures of one.</p><div id="inv-ops-out"></div></div>
       <div id="inv-exc-part"><h4>Exceptions</h4>
@@ -240,8 +261,10 @@
       <div id="inv-chg-part"><h4>Recent changes</h4>
         <p class="muted">Changes to the component, the apps that report to it and its gateways, from Azure's change history
         (settings, configuration, scale). Code deployments don't appear here.</p><div id="inv-chg-out"></div></div></div></div>
-    <div class="inv-step hidden" id="inv-samples"><h3><span class="q-num">3</span> Its latest failures<span class="inv-what muted"></span></h3><div class="inv-body"></div></div>
-    <div class="inv-step hidden" id="inv-request"><h3><span class="q-num">4</span> One request end to end<span class="inv-what muted"></span></h3><div class="inv-body"></div></div>
+    <div class="inv-step hidden" id="inv-samples"><h3><span class="q-num">3</span> Its latest failures<span class="inv-what muted"></span> <span class="muted inv-span" data-inv-span></span>
+      <span class="inv-picked hidden"></span><button type="button" class="link inv-unfold hidden" data-inv-back-samples>Back to the samples</button></h3><div class="inv-body"></div></div>
+    <div class="inv-step hidden" id="inv-request"><h3><span class="q-num">4</span> One request end to end<span class="inv-what muted"></span>
+      <span class="spacer"></span><button type="button" class="link inv-back hidden" data-inv-back-samples>← Back to the samples</button></h3><div class="inv-body"></div></div>
     <div class="inv-step hidden" id="inv-pod"><h3><span class="q-num">5</span> The pod that served it<span class="inv-what muted"></span></h3><div class="inv-body"></div></div>
   </div>
   <div id="inv-search" class="hidden">
@@ -251,7 +274,7 @@
       <select id="inv-severity" aria-label="Level"></select>
       <button type="button" id="inv-search-run" class="primary">Search</button>
     </div>
-    <p class="muted">Log lines and exceptions the app sent to that component, over the Look back window above. The list
+    <p class="muted">Log lines and exceptions the app sent to that component, over the Look back at the top. The list
       is the components in scope, worst first, as on Failing requests.</p>
     <div id="inv-search-out"></div>
   </div>
@@ -314,6 +337,7 @@
   <nav class="subtabs" id="sec-subtabs" aria-label="Security views">
     <button type="button" data-sec-sub="config" class="active">Exposure &amp; configuration</button>
     <button type="button" data-sec-sub="vulnerabilities">Vulnerabilities</button>
+    <button type="button" data-sec-sub="audit">Access audit</button>
   </nav>
   <div id="sec-config">
     <div class="table-tools">
@@ -340,6 +364,7 @@
   <div id="sec-vulns" class="hidden">
   <div class="view-head">
     <span id="vuln-meta" class="muted"></span>
+    <a id="vuln-defender" data-portal="https://portal.azure.com/#view/Microsoft_Azure_Security/SecurityMenuBlade/~/0" href="https://portal.azure.com/#view/Microsoft_Azure_Security/SecurityMenuBlade/~/0" target="_blank" rel="noopener" title="Defender for Cloud, where these findings come from">Open Defender for Cloud ↗</a>
     <span class="spacer"></span>
     <span class="head-actions"><span class="muted">Export</span>
     <button id="vuln-export-md" type="button">Markdown</button><button id="vuln-export-csv" type="button">CSV</button><button id="vuln-export-pdf" type="button">PDF</button>
@@ -351,16 +376,17 @@
   <div class="table-tools vuln-filters">
     <input id="vuln-search" type="search" placeholder="CVE-2026-1234, package, resource, image or version" autocomplete="off"
            aria-label="Search findings by CVE, package, resource, container or image, or version" title="Several words: all must match. A full CVE ID matches exactly.">
-    <label class="inline" title="VMs and containers running in AKS, not images only stored in a registry"><input type="checkbox" id="vuln-running"> only running</label>
+    <label class="inline" title="VMs and containers running in AKS, not images only stored in a registry"><input type="checkbox" id="vuln-running" checked> only running</label>
     <span class="muted">Severity</span>
     <label class="inline"><input type="checkbox" data-vuln-sev value="High" checked> High</label>
-    <label class="inline"><input type="checkbox" data-vuln-sev value="Medium" checked> Medium</label>
-    <label class="inline"><input type="checkbox" data-vuln-sev value="Low" checked> Low</label>
-    <label class="inline"><input type="checkbox" id="vuln-fixable"> has a fix</label>
+    <label class="inline"><input type="checkbox" data-vuln-sev value="Medium"> Medium</label>
+    <label class="inline"><input type="checkbox" data-vuln-sev value="Low"> Low</label>
+    <label class="inline"><input type="checkbox" id="vuln-fixable" checked> has a fix</label>
     <label class="inline">CVSS at least <select id="vuln-cvss"><option value="0">any</option><option value="7">7</option><option value="9">9</option></select></label>
     <label class="inline"><select id="vuln-type"><option value="">all types</option></select></label>
+    <button type="button" class="link" id="vuln-all" title="Clear every filter: all severities, images only stored in a registry, with or without a fix">Show everything</button>
     <span class="spacer"></span>
-    <span class="seg"><button type="button" data-vuln-view="resources" class="active">By resource</button><button type="button" data-vuln-view="software">By software</button></span>
+    <span class="seg"><button type="button" data-vuln-view="resources" class="active">By resource</button><button type="button" data-vuln-view="software">By software</button><button type="button" data-vuln-view="cves" title="One row per CVE, however many packages, images and image versions have it">By CVE</button></span>
   </div>
   <div id="vuln-search-note"></div>
   <div id="vuln-body"></div>
@@ -368,6 +394,37 @@
   <div id="vuln-platform" class="cards"></div>
   <h3>Not scanned</h3>
   <div id="vuln-coverage"></div>
+  </div>
+  <div id="sec-audit" class="hidden">
+    <div class="view-head">
+      <span id="audit-meta" class="muted"></span>
+      <span class="spacer"></span>
+      <span class="head-actions"><span class="muted">Export</span>
+      <button id="audit-export-md" type="button">Markdown</button><button id="audit-export-csv" type="button">CSV</button><button id="audit-export-pdf" type="button">PDF</button>
+      <button id="audit-refresh" type="button">Refresh</button></span>
+    </div>
+    <details class="how-it-works"><summary>How this works</summary><p class="muted">The people (not apps or managed identities)
+      who can do more than read <strong>without PIM</strong> in the scope's subscriptions: role assignments that are
+      standing, or made through PIM as active with no end, assigned to the person or to a group they're in. A PIM
+      activation, which ends by itself, doesn't count. What a role can do is worked out from its permissions, so custom
+      roles count too; the actions in Settings' <code>audit.ignore_actions</code> don't (support requests, reads named as
+      actions, retired classic alert rules). One read of assignments and one of PIM-eligible roles per subscription,
+      plus Microsoft Graph for group members. Read-only, with your own access. The last result per scope is kept on this
+      machine, readable only by you, for <code>audit.keep_days</code> (7 by default) and opens at once with its age;
+      <strong>Refresh</strong> reads it again. Clear cached data removes it.</p></details>
+    <div id="audit-saved"></div>
+    <div id="audit-counters" class="counters"></div>
+    <div class="table-tools">
+      <input id="audit-filter" type="search" placeholder="Name or sign-in name" aria-label="Filter by the person's name or sign-in name">
+      <label class="inline">Role <select id="audit-role" aria-label="Only this role"><option value="">all roles</option></select></label>
+      <label class="inline">Group <select id="audit-group" aria-label="Only access through this group"><option value="">all groups</option></select></label>
+      <label class="inline" title="What the role is assigned on. A role on a subscription or resource group also covers every resource in it">Type <select id="audit-type" aria-label="Only roles assigned on this type"><option value="">all types</option></select></label>
+      <label class="inline" title="Assigned to the person, not through a group"><input type="checkbox" id="audit-direct"> only assigned directly</label>
+      <label class="inline" title="They hold this role standing and can also activate the same role through PIM, so the standing assignment can be removed"><input type="checkbox" id="audit-eligible"> only roles they could use PIM for instead</label>
+      <label class="inline"><input type="checkbox" id="audit-guests"> only guests</label>
+    </div>
+    <div id="audit-body"></div>
+    <div id="audit-notes"></div>
   </div>
 </section>
 
@@ -414,10 +471,14 @@
 </section>
 
 <div id="view-browse" class="view layout hidden">
+  <button type="button" id="pane-unfold" class="pane-unfold" title="Show the list of groups and resources" aria-label="Show the list">
+    <span class="pane-unfold-arrow" aria-hidden="true">»</span><span class="pane-unfold-label">In scope <span id="pane-unfold-count"></span></span>
+    <span id="pane-unfold-filter" class="pane-unfold-filter hidden"></span></button>
   <aside class="pickers">
     <div id="browse-outside" class="outside-bar hidden"></div>
     <section>
-      <h2>In scope <span id="rg-count" class="muted"></span></h2>
+      <h2>In scope <span id="rg-count" class="muted"></span>
+        <button type="button" id="pane-fold" class="pane-fold" title="Hide this list for more room (it's kept in this browser)" aria-expanded="true">«</button></h2>
       <input id="rg-filter" type="search" placeholder="Filter by name or type, e.g. kubernetes"
              title="Groups by name; resources by name or type across every group in scope (2 characters or more)">
       <div id="rgs" class="list tree" role="tree"></div>
@@ -427,8 +488,9 @@
   </aside>
 
   <main>
-    <nav id="crumbs" class="crumbs hidden" aria-label="Where this is"></nav>
     <div id="group-summary" class="group-summary hidden"></div>
+    <div class="pane-head">
+    <nav id="crumbs" class="crumbs hidden" aria-label="Where this is"></nav>
     <div class="controls">
       <button id="rerun" disabled title="Run this check again, reading Azure afresh">Check again</button>
       <span class="dropdown" id="deps-controls">
@@ -458,6 +520,7 @@
     <div id="message" class="message hidden"></div>
     <div id="summary" class="summary hidden"></div>
     <div id="service-health" class="banner hidden"></div>
+    </div>
     <div class="workspace">
       <div id="graph" class="graph"><p class="empty">Pick a resource, or click "check" next to a resource group, to see its health.
         Or search at the top.</p></div>
@@ -575,10 +638,14 @@
 </section>
 
 <section id="view-settings" class="view hidden">
-  <div class="view-head">
+  <div class="view-head settings-head">
     <h2>Settings</h2>
+    <span id="settings-changes" role="status"></span>
     <span class="spacer"></span>
+    <span id="settings-autosave" class="muted hidden">Changes on this page save as you make them.</span>
     <button id="settings-reload" type="button" title="Re-read the file, e.g. after editing it by hand">Reload from file</button>
+    <button id="settings-discard" type="button" disabled>Discard</button>
+    <button id="settings-save" type="button" class="primary" disabled>Save</button>
   </div>
   <div id="settings-message"></div>
   <div class="settings-layout">
@@ -590,6 +657,7 @@
       <button type="button" data-pane="files">Files and Watchlist</button>
       <button type="button" data-pane="integrations">Integrations</button>
       <button type="button" data-pane="alerts">Alerts</button>
+      <button type="button" data-pane="logs">Logs</button>
       <p class="muted settings-file">Saved in <span id="settings-path"></span></p>
     </nav>
     <div class="settings-main">
@@ -608,13 +676,14 @@
           Alerts stay on this machine: nothing is sent anywhere.</p>
         <div id="alerts-body"></div>
       </div>
+      <div class="settings-section" id="logs" data-pane="logs">
+        <h3>Logs</h3>
+        <p class="muted">What happened in this console, on this machine: errors, what was done here, and every request it sent
+          to Azure and the tools it reads from. Use it to find an error ID the page showed, or to see that only reads left.</p>
+        <div id="logs-tools" class="list-tools"></div>
+        <div id="logs-out"></div>
+      </div>
     </div>
-  </div>
-  <div id="settings-bar" class="save-bar hidden" role="status">
-    <span id="settings-changes"></span>
-    <span class="spacer"></span>
-    <button id="settings-discard" type="button">Discard</button>
-    <button id="settings-save" type="button" class="primary" disabled>Save</button>
   </div>
 </section>
 
@@ -660,7 +729,18 @@
   <nav class="subtabs" id="access-subtabs" aria-label="Access views">
     <button type="button" data-access-sub="mine" class="active">My access</button>
     <button type="button" data-access-sub="someone">Check someone's access</button>
+    <button type="button" data-access-sub="needs">What the console needs</button>
   </nav>
+  <div id="access-needs" class="hidden">
+    <div class="table-tools">
+      <span class="muted">What each part of the console needs, checked against your own roles in the scope: by what they allow,
+        so custom roles count. ✓ you have it, <em>activate</em>: a PIM-eligible role would give it, ✗ neither.</span>
+      <span class="spacer"></span>
+      <button id="needs-role" type="button" title="A custom role with everything the console reads (it changes nothing): set AssignableScopes, then az role definition create">Download the custom role</button>
+      <button id="needs-refresh" type="button">Check again</button>
+    </div>
+    <div id="needs-body"></div>
+  </div>
   <div id="access-someone" class="hidden">
   <div class="table-tools">
     <span class="muted">Another user's roles and groups in the subscriptions in scope, read with your own access. Nothing
@@ -707,7 +787,9 @@
   </div>
 </section>
 
+<button type="button" id="to-top" class="to-top hidden" title="Back to the top of the page">↑ Top</button>
 <script src="{{ asset('diagram.js') }}"></script>
-<script src="{{ asset('app.js') }}"></script>
+{% for script in scripts %}<script src="{{ asset(script) }}"></script>
+{% endfor %}
 </body>
 </html>

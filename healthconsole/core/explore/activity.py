@@ -16,6 +16,10 @@ FOLD_AT = 3  # identical rows (same operation or alert, caller and outcome) this
 ALERT_ROWS = 500
 
 
+HOURS = (6, 24, 72, 168, 336, 720)  # up to 30 days: alerts keep 30, the Activity Log 90
+CHANGES_MAX_HOURS = 14 * 24  # Resource Graph keeps 14 days of change history
+
+
 def activity(client, resource_id, hours=24):
     out = {"alerts": [], "changes": [], "operations": [], "health_history": [], "errors": []}
     target = json.dumps(resource_id.lower())
@@ -41,11 +45,13 @@ def activity(client, resource_id, hours=24):
         out["changes"] = client.query(
             "resourcechanges"
             f" | where tolower(tostring(properties.targetResourceId)) == {target}"
-            f" | extend at = todatetime(properties.changeAttributes.timestamp) | where at > ago({int(hours)}h)"
+            f" | extend at = todatetime(properties.changeAttributes.timestamp) | where at > ago({min(int(hours), CHANGES_MAX_HOURS)}h)"
             " | project at, type=tostring(properties.changeType),"
             " by=tostring(properties.changeAttributes.changedBy),"
             " client=tostring(properties.changeAttributes.clientType), changes=properties.changes"
             " | order by at desc | take 50")
+        if hours > CHANGES_MAX_HOURS:
+            out["errors"].append("Changes go back 14 days at most: Azure keeps no older change history.")
     except ArmError as error:
         out["errors"].append(f"changes: {error}")
 
@@ -64,7 +70,7 @@ def activity(client, resource_id, hours=24):
     try:
         payload = client.get(f"{resource_id}/providers/Microsoft.ResourceHealth/availabilityStatuses",
                              RESOURCE_HEALTH_API_VERSION, tolerate=(400, 404, 409, 422)) or {}
-        for status in payload.get("value", [])[:30]:
+        for status in payload.get("value", [])[:100]:
             props = status.get("properties") or {}
             if _before(props.get("occuredTime") or props.get("occurredTime") or props.get("reportedTime"), cutoff):
                 continue

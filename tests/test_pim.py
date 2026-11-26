@@ -136,7 +136,7 @@ def test_endpoints():
             pass
     fake = Client(gets={"roleEligibilityScheduleInstances": {"value": ELIGIBLE}, "roleAssignmentScheduleRequests": {"value": []}})
     app = Flask("test")
-    app.register_blueprint(create_blueprint(lambda tenant: fake, config.load("/nonexistent")))
+    app.register_blueprint(create_blueprint(lambda tenant: fake, config.load("/nonexistent"), authorize=lambda: None))
     web = app.test_client()
     assert web.get("/api/pim/hints?id=nope").status_code == 400
     assert len(web.get(f"/api/pim/hints?id={VAULT}").get_json()["hints"]) == 4
@@ -219,6 +219,6 @@ def test_groups_endpoint_without_a_cli_sign_in():
         def refresh(self):
             pass
     app = Flask("test")
-    app.register_blueprint(create_blueprint(lambda tenant: Client(), config.load("/nonexistent")))
+    app.register_blueprint(create_blueprint(lambda tenant: Client(), config.load("/nonexistent"), authorize=lambda: None))
     body = app.test_client().get("/api/access/groups").get_json()
     assert body["groups"] == [] and "no Azure CLI sign-in" in body["error"]

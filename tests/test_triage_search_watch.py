@@ -154,7 +154,7 @@ def test_triage_secrets_respects_the_vault_limit(tmp_path):
     client = WebClient(query_handlers=[("summarize n=count()", lambda q: [{"n": 3}]),
                                        ("microsoft.keyvault/vaults", lambda q: [])])
     app = Flask("test")
-    app.register_blueprint(create_blueprint(lambda tenant: client, settings, config_file=tmp_path / "c.yaml"))
+    app.register_blueprint(create_blueprint(lambda tenant: client, settings, config_file=tmp_path / "c.yaml", authorize=lambda: None))
     test = app.test_client()
     assert test.post("/api/secrets", json={"subscriptions": [SUB]}).get_json() == {"too_many": 3, "limit": 1}
     forced = test.post("/api/secrets", json={"subscriptions": [SUB], "force": True}).get_json()
@@ -270,3 +270,12 @@ def test_browse_lists_alert_rules_and_similar_apart_not_dropped():
     assert [r["name"] for r in listed["resources"]] == ["api"]
     assert listed["hidden"] == 1 and [(r["name"], r["display_type"]) for r in listed["hidden_resources"]] == [("cpu-high", "Metric Alert")]
 
+
+
+def test_watchlist_check_of_a_resource_group_reads_its_baseline():
+    from healthconsole.core import profiles, watchlist
+    from healthconsole.core.health import HealthOptions
+    item = {"id": f"/subscriptions/{SUB}/resourceGroups/app-rg", "name": "app-rg", "kind": "resource group"}
+    rows = watchlist.check(FakeClient(estate()), [item], DiscoveryOptions(depth=0, inbound=False),
+                           HealthOptions(detectors=False), profiles.load())
+    assert rows[0]["checked_at"] and rows[0]["movers"] == []  # the baseline call raised before, ending the whole check

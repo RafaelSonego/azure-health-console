@@ -46,6 +46,8 @@ class HealthOptions:
     detectors: bool = True
     expiry_warning_days: int = 30
     expiry_critical_days: int = 7
+    baseline_change_percent: int = 200
+    aks_leftover_hours: int = 24
 
 
 @dataclass
@@ -141,7 +143,7 @@ def _assess_node(client, node, options, profiles, alerts, changes, rules, autosc
     signals += _layer("metrics", lambda: _metric_signals(client, node, options, profile, rules))
     signals += _layer("scaling", lambda: _scaling_signals(node, autoscale))
     if node.type == "microsoft.containerservice/managedclusters":
-        signals += _layer("pods", lambda: _aks_signals(client, node))
+        signals += _layer("pods", lambda: _aks_signals(client, node, options.aks_leftover_hours))
     if node.type == "microsoft.keyvault/vaults":
         signals += _layer("key vault", lambda: _key_vault_signals(client, node, options))
     if options.detectors and detectors_too:
@@ -259,7 +261,7 @@ def _scaling_signals(node, autoscale):
     return signals
 
 
-def _aks_signals(client, node):
+def _aks_signals(client, node, leftover_hours=24):
     from .explore import aks  # imported here: explore.aks reads this module's constants
 
     try:
@@ -271,16 +273,26 @@ def _aks_signals(client, node):
     totals = {}
     for row in phases:
         totals.setdefault(row["phase"], []).append(row)
+    totals["Failed"] = aks.failed_split(client, node.id, phases, leftover_hours)
+    where = lambda rows, n: ", ".join(f"{r['namespace']} ({r[n]})" for r in sorted(rows, key=lambda r: -r[n])[:3] if r[n])  # noqa: E731
     signals = []
     for phase in ("Pending", "Failed", "Unknown"):
         rows = totals.get(phase)
-        if rows:
-            count = sum(r["pods"] for r in rows)
-            where = ", ".join(f"{r['namespace']} ({r['pods']})" for r in sorted(rows, key=lambda r: -r["pods"])[:3])
-            signals.append(Signal("pods", f"{phase} pods", WARNING, f"{count} {phase.lower()}: {where}", value=count))
-    if not signals and phases:
+        if not rows:
+            continue
+        count = sum(r["pods"] for r in rows)
+        if phase != "Failed":
+            signals.append(Signal("pods", f"{phase} pods", WARNING, f"{count} {phase.lower()}: {where(rows, 'pods')}", value=count))
+            continue
+        new = sum(r["new"] for r in rows)
+        signals.append(Signal("pods", "Failed pods", WARNING, f"{count} failed, {new} in the last {leftover_hours} h: "
+                              f"{where(rows, 'new')}", value=new) if new else
+                       Signal("pods", "Failed pods", INFO, f"{count} failed, none in the last {leftover_hours} h: left over, "
+                              f"usually already replaced (AKS → Workloads lists each with its age): {where(rows, 'pods')}",
+                              value=count))
+    if not any(s.status == WARNING for s in signals) and phases:
         running = sum(r["pods"] for r in phases if r["phase"] == "Running")
-        signals.append(Signal("pods", "pods", HEALTHY, f"{running} running, none pending or failed", value=running))
+        signals.append(Signal("pods", "pods", HEALTHY, f"{running} running, none pending or {'newly ' if signals else ''}failed", value=running))
     return signals
 
 
@@ -511,8 +523,10 @@ def _metric_signals(client, node, options, profile, rules):
 
     for check in available:
         key = (check.spec.name, check.spec.aggregation)
-        signals.append(_evaluate(check, current.get(key), baseline.get(key),
-                                 definitions[check.spec.name.lower()]["unit"], options))
+        definition = definitions[check.spec.name.lower()]
+        signal = _evaluate(check, current.get(key), baseline.get(key), definition["unit"], options)
+        signal.label = definition.get("label") or ""
+        signals.append(signal)
     return signals
 
 
@@ -532,6 +546,7 @@ def _metric_definitions(client, resource_id):
                 "name": name,
                 "unit": item.get("unit") or "",
                 "primary": item.get("primaryAggregationType") or "Average",
+                "label": (item.get("name") or {}).get("localizedValue") or "",
             }
     return definitions
 
@@ -635,7 +650,7 @@ def _evaluate(check, value, baseline, unit, options):
         else:
             signal.status = HEALTHY
 
-    if baseline is not None and baseline > 0 and value > 2 * baseline:
+    if baseline is not None and baseline > 0 and value >= options.baseline_change_percent / 100 * baseline:
         note = f"{value / baseline:.1f}x last week"
         signal.detail = f"{signal.detail}; {note}" if signal.detail else note
     return signal

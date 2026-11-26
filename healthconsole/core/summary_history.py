@@ -9,7 +9,7 @@ import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from .localfiles import private_dir
+from .localfiles import check_file, private_dir
 
 FORMAT = 1
 AREAS = ("problems", "security", "cost", "readiness")
@@ -29,7 +29,7 @@ def path_for(directory, tenant_id, object_id):
 
 def _load(path):
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(check_file(path, "Summary history").read_text(encoding="utf-8"))
         if data.get("format") == FORMAT:
             return data
     except (OSError, ValueError):
@@ -75,17 +75,41 @@ def _diff(base, now):
     return out
 
 
+def _kept(data, key, now, keep_days):
+    return [s for s in data["scopes"].get(key, []) if datetime.fromisoformat(s["at"]) >= now - timedelta(days=max(keep_days, 1))]
+
+
+def _base(shots, now, compare_hours):
+    """The newest snapshot at least `compare_hours` old, or None."""
+    cutoff = now - timedelta(hours=max(compare_hours, 1))
+    older = [s for s in shots if datetime.fromisoformat(s["at"]) <= cutoff]
+    return older[-1] if older else None
+
+
+def _first(shots, now, compare_hours):
+    first = shots[0]["at"] if shots else now.isoformat()
+    return {"since": None, "first": first,
+            "ready_at": (datetime.fromisoformat(first) + timedelta(hours=max(compare_hours, 1))).isoformat()}
+
+
+def baseline(path, key, compare_hours, keep_days, now=None):
+    """What a comparison would be against, without keeping anything: {since} or {since: None, first, ready_at}."""
+    now = now or datetime.now(timezone.utc)
+    with _lock:
+        shots = _kept(_load(path), key, now, keep_days)
+    base = _base(shots, now, compare_hours)
+    return {"since": base["at"]} if base else _first(shots, now, compare_hours)
+
+
 def record(path, key, items, compare_hours, keep_days, now=None):
-    """Keeps this summary and answers what changed since the baseline: {since, areas} or {since: None, first}."""
+    """Keeps this summary and answers what changed since the baseline: {since, areas} or {since: None, first}.
+    Areas may arrive one call each: within the hour they merge into one snapshot."""
     now = now or datetime.now(timezone.utc)
     items = _clean(items)
     with _lock:
         data = _load(path)
-        shots = [s for s in data["scopes"].get(key, [])
-                 if datetime.fromisoformat(s["at"]) >= now - timedelta(days=max(keep_days, 1))]
-        cutoff = now - timedelta(hours=max(compare_hours, 1))
-        older = [s for s in shots if datetime.fromisoformat(s["at"]) <= cutoff]
-        base = older[-1] if older else None
+        shots = _kept(data, key, now, keep_days)
+        base = _base(shots, now, compare_hours)
         if shots and datetime.fromisoformat(shots[-1]["at"]) > now - timedelta(hours=1):
             shots[-1] = {"at": now.isoformat(), "items": {**shots[-1]["items"], **items}}  # within the hour: one snapshot
         else:
@@ -93,9 +117,7 @@ def record(path, key, items, compare_hours, keep_days, now=None):
         data["scopes"][key] = shots
         _save(path, data)
     if base is None:
-        first = shots[0]["at"]
-        return {"since": None, "first": first,
-                "ready_at": (datetime.fromisoformat(first) + timedelta(hours=max(compare_hours, 1))).isoformat()}
+        return _first(shots, now, compare_hours)
     return {"since": base["at"], "areas": _diff(base["items"], items)}
 
 

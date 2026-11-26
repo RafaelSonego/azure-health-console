@@ -1,3 +1,4 @@
+from healthconsole.core.health import HealthOptions
 from datetime import datetime, timedelta, timezone
 
 from flask import Flask
@@ -63,7 +64,7 @@ def test_activity_endpoint_window_and_alert_status():
 
     fake = Client(query_handlers=[("AlertsManagementResources", alerts)])
     app = Flask("test")
-    app.register_blueprint(create_blueprint(lambda tenant: fake, config.load("/nonexistent")))
+    app.register_blueprint(create_blueprint(lambda tenant: fake, config.load("/nonexistent"), authorize=lambda: None))
     web = app.test_client()
     assert web.get(f"/api/explore/activity?id={APP}&hours=5").status_code == 400
     body = web.get(f"/api/explore/activity?id={APP}&hours=168").get_json()
@@ -123,3 +124,19 @@ def test_the_activity_log_is_read_in_slices_at_once_and_merged_newest_first():
     times = [e["eventTimestamp"] for e in events]
     assert times == sorted(times, reverse=True) and len(events) == activity.ACTIVITY_LOG_SLICES + 1  # "edge" once
     assert more  # one slice had more pages
+
+
+def test_the_baseline_change_setting_decides_what_moved():
+    nodes = [node("a", sig("Requests (Total)", 300, 100)), node("b", sig("Requests (Total)", 150, 100))]
+    assert [m["name"] for m in baseline.compare(nodes, 15)["movers"]] == ["a"]  # default 200%: tripled moved, +50% didn't
+    wide = baseline.compare_with(nodes, HealthOptions(baseline_change_percent=400))
+    assert wide["movers"] == [] and wide["factor"] == 4  # 300% is under 400%
+    narrow = baseline.compare_with(nodes, HealthOptions(baseline_change_percent=150))
+    assert [m["name"] for m in narrow["movers"]] == ["a", "b"]
+
+
+def test_a_mover_carries_azures_display_name():
+    shoebox = Signal("profile", "SaturationShoebox (Average)", "info", value=0.4, baseline=0, unit="Percent",
+                     label="Overall Vault Saturation")
+    movers = baseline.compare([node("kv", shoebox), node("x", sig("Requests (Total)", 9, 0))], 15)["movers"]
+    assert {m["name"]: m["label"] for m in movers} == {"kv": "Overall Vault Saturation", "x": "Requests"}

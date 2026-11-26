@@ -68,7 +68,7 @@ def test_catalogue_is_read_once():
 def test_guides_route_steps_and_rejects_odd_ids():
     fake = client()
     app = Flask("test")
-    app.register_blueprint(create_blueprint(lambda tenant: fake, config.load("/nonexistent")))
+    app.register_blueprint(create_blueprint(lambda tenant: fake, config.load("/nonexistent"), authorize=lambda: None))
     web = app.test_client()
     assert web.get(f"/api/explore/guides?id={DB}").get_json()["services"][0]["name"] == "SQL Database"
     assert len(web.get(f"/api/explore/guides?id={DB}&service=svc-sql").get_json()["problems"]) == 2

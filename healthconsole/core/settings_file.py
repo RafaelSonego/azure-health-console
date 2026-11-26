@@ -9,7 +9,7 @@ from ruamel.yaml import YAML
 from ruamel.yaml.comments import CommentedMap, CommentedSeq
 
 from . import config
-from .localfiles import write_private_text
+from .localfiles import UnsafePath, read_trusted, write_private_text
 
 RESET = "__default__"
 _lock = threading.Lock()
@@ -25,7 +25,11 @@ def _yaml():
 def _load(file):
     if not file.is_file():
         return CommentedMap()
-    data = _yaml().load(file.read_text()) or CommentedMap()
+    try:
+        text = read_trusted(file, "Settings").decode("utf-8")
+    except UnsafePath as error:
+        raise config.ConfigError(str(error)) from error
+    data = _yaml().load(text) or CommentedMap()
     if not isinstance(data, dict):
         raise config.ConfigError(f"{file}: expected a mapping of settings.")
     return data
@@ -39,7 +43,7 @@ def _write(file, data):
     settings = config.from_data(_plain(data), str(file))
     if file.is_file():
         backup = file.with_name(file.name + ".bak")
-        write_private_text(backup, file.read_text())
+        write_private_text(backup, read_trusted(file, "Settings").decode("utf-8"))
     out = io.StringIO()
     _yaml().dump(data, out)
     write_private_text(file, out.getvalue())
@@ -114,6 +118,26 @@ def move_legacy_scope(file, tenant_key, legacy):
         entry["open_with"] = legacy["open_with"]
         for key in config.LEGACY_TENANT_KEYS:
             entry.pop(key, None)
+        return _write(file, data)
+
+
+def apply_workload_link(file, tenant_key, link):
+    """Saves one workload's link, replacing the one with the same key; a link with no front door, app or component
+    removes it. Validated before anything is written."""
+    file = Path(file).expanduser()
+    keep = {k: v for k, v in link.items() if v not in (None, "", [], {})}
+    with _lock:
+        data = _load(file)
+        entry = _tenant_entry(data, tenant_key)
+        current = [dict(x) for x in entry.get("workload_links") or [] if str(x.get("key", "")).lower() != link["key"].lower()]
+        if any(keep.get(k) for k in ("apim", "agw", "app", "component")):
+            current.append(keep)
+        if current:
+            entry["workload_links"] = CommentedSeq(CommentedMap(
+                (k, CommentedSeq(CommentedMap(i.items()) for i in v) if isinstance(v, list) else v) for k, v in x.items())
+                for x in current)
+        else:
+            entry.pop("workload_links", None)
         return _write(file, data)
 
 

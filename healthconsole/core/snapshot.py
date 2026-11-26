@@ -48,7 +48,7 @@ def _finish(client, graph, nodes, root_id, kind, title, depth, health_options, p
     snap.warnings += health_warnings
     snap.service_health = service_health
     if kind == "group" and health_options.compare_last_week:
-        snap.baseline = baseline.compare(nodes, health_options.window_minutes)
+        snap.baseline = baseline.compare_with(nodes, health_options)
     snap.arm_calls = client.call_count - calls_before
     snap.done = True
     return snap

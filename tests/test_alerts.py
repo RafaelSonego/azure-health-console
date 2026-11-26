@@ -266,7 +266,7 @@ def test_alerts_api(tmp_path):
     fake = client_with(state)
     fake.gets["/tenants"] = {"value": [{"tenantId": "tenant-1", "displayName": "Tenant", "defaultDomain": ""}]}
     app = Flask(__name__)
-    app.register_blueprint(create_blueprint(lambda tenant: fake, settings, config_file=file))
+    app.register_blueprint(create_blueprint(lambda tenant: fake, settings, config_file=file, authorize=lambda: None))
     http = app.test_client()
 
     empty = http.get("/api/alerts").get_json()
@@ -413,7 +413,7 @@ def test_alert_actions_and_export_api(tmp_path):
     fake = client_with(state)
     fake.gets["/tenants"] = {"value": [{"tenantId": "tenant-1", "displayName": "Tenant", "defaultDomain": ""}]}
     app = Flask(__name__)
-    app.register_blueprint(create_blueprint(lambda tenant: fake, config.load(file), config_file=file))
+    app.register_blueprint(create_blueprint(lambda tenant: fake, config.load(file), config_file=file, authorize=lambda: None))
     http = app.test_client()
     http.post("/api/alerts/run", json={"name": "Shop alerts"})
     state["alerts"] = [alert_row(APP, 0)]
@@ -458,7 +458,7 @@ def test_servicenow_reader_filters_by_priority_and_strong_matches(tmp_path, monk
     fake = client_with({})
     fake.gets["/tenants"] = {"value": [{"tenantId": "tenant-1", "displayName": "Tenant", "defaultDomain": ""}]}
     app = Flask(__name__)
-    app.register_blueprint(create_blueprint(lambda tenant: fake, config.load(file), config_file=file))
+    app.register_blueprint(create_blueprint(lambda tenant: fake, config.load(file), config_file=file, authorize=lambda: None))
     http = app.test_client()
     first = http.post("/api/alerts/run", json={"name": "Bare alerts"}).get_json()
     bare = next(r for r in first["rules"] if r["name"] == "Bare alerts")
@@ -486,3 +486,36 @@ def test_resolved_events_and_advisories_never_raise_a_service_health_alert():
     items, events, failed = alerts.observe_triage(triage.triage(client, [SUB], options, cards={"service_health"}))
     fired, _ = alerts.diff_triage(baseline, items, events, failed, ["service_health"])
     assert [f["title"] for f in fired] == ["Service Health: Storage down"]
+
+
+def test_alert_history_keeps_what_the_setting_says_read_live():
+    state, clock = {"alerts": [alert_row(APP, 2)]}, Clock()
+    keep = {"hours": 24}
+    runner = alerts.AlertRunner(clock=clock, history_hours=lambda: keep["hours"])
+    runner.register("t/o", source(client_with(state), [scope_rule()]))
+    runner.tick()
+    state["alerts"] = [alert_row(APP, 0)]
+    clock.now += 300
+    runner.tick()
+    assert runner.state("t/o")["events"] and runner.state("t/o")["history_hours"] == 24
+
+    clock.now += 30 * 3600
+    keep["hours"] = 48  # longer than its age: kept
+    assert runner.history("t/o") and runner.state("t/o")["events"]
+    keep["hours"] = 24  # shorter: gone from the bar and the export
+    assert runner.history("t/o") == [] and runner.state("t/o")["events"] == []
+
+
+def test_alert_history_hours_is_validated(tmp_path):
+    file = tmp_path / "c.yaml"
+    for value in (0, 169):
+        file.write_text(f"alerts:\n  history_hours: {value}\n")
+        with pytest.raises(config.ConfigError, match="alerts.history_hours"):
+            config.load(file)
+    file.write_text("alerts:\n  history_hours: 72\n")
+    assert config.load(file)["alerts"]["history_hours"] == 72
+    settings_file.apply(file, {"alerts.history_hours": 48})  # what the Settings page sends
+    assert config.load(file)["alerts"]["history_hours"] == 48
+    with pytest.raises(config.ConfigError):
+        settings_file.apply(file, {"alerts.history_hours": 500})
+    assert config.load(file)["alerts"]["history_hours"] == 48  # nothing written when invalid

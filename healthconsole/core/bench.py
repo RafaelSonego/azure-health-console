@@ -80,7 +80,7 @@ def run(client, settings, tenant, scenarios=DEFAULT_SCENARIOS, resource_id=None,
         target = _pick(client, scope, resource_id)
         say(f"Scope: {len(scope)} subscription(s), {label}; "
             f"resource: {target['name'] if target else 'none found'}")
-        health_options = HealthOptions(**settings["health"])
+        health_options = HealthOptions(**settings["health"], aks_leftover_hours=settings["aks"]["leftover_hours"])
         graph = settings["graph"]
         net = settings["network"]
         work = {

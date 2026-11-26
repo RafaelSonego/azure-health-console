@@ -17,19 +17,31 @@ KINDS = ("certificates", "secrets", "keys")
 CERTIFICATE_CONTENT_TYPES = ("application/x-pkcs12", "application/x-pem-file")
 
 
+def _moment(expires):
+    """`exp` (seconds since 1970; 0 is a real date) as a UTC datetime; None when it's missing or not a usable number."""
+    if expires is None or isinstance(expires, bool) or not isinstance(expires, (int, float)):
+        return None
+    try:
+        return datetime.fromtimestamp(expires, timezone.utc)
+    except (OverflowError, OSError, ValueError):
+        return None
+
+
 def _item(entry, warn_days, now, critical_days=0):
     attributes = (entry.get("properties") or {}).get("attributes") or {}
     expires = attributes.get("exp")
     enabled = attributes.get("enabled", True)
     item = {"name": entry.get("name"), "enabled": enabled, "expires": None, "days_left": None}
-    if expires:
-        moment = datetime.fromtimestamp(expires, timezone.utc)
+    moment = _moment(expires)
+    if moment:
         item["expires"] = moment.date().isoformat()
         item["days_left"] = (moment - now).days
     if not enabled:
         item["status"], item["note"] = INFO, "disabled"
     elif expires is None:
         item["status"], item["note"] = INFO, "no expiry date set"
+    elif moment is None:
+        item["status"], item["note"] = INFO, "the expiry date Azure returned isn't a date"
     elif item["days_left"] < 0:
         item["status"], item["note"] = CRITICAL, f"expired {-item['days_left']} day(s) ago"
     elif item["days_left"] <= critical_days:
@@ -48,9 +60,10 @@ def _sorted(items):
     return sorted(items, key=lambda i: (_ORDER[i["status"]], i["days_left"] if i["days_left"] is not None else 10**6))
 
 
-def expiry(client, vault_id, warn_days=30, critical_days=7, max_pages=None):
+def expiry(client, vault_id, warn_days=30, critical_days=7, max_pages=None, lists=LISTS):
     """{"certificates": [...], "secrets": [...], "keys": [...], "errors": [...]}, most urgent first. `max_pages` caps
-    each list (a vault with thousands of secrets took minutes to page through); a capped list says so in `errors`."""
+    each list (a vault with thousands of secrets took minutes to page through); a capped list says so in `errors`.
+    `lists`: ("secrets",) when keys aren't wanted (certificates are found through the secrets list)."""
     now = datetime.now(timezone.utc)
     out = {"warn_days": warn_days, "critical_days": critical_days, "errors": [],
            "certificates": [], "secrets": [], "keys": []}
@@ -66,7 +79,7 @@ def expiry(client, vault_id, warn_days=30, critical_days=7, max_pages=None):
                                  "Secrets & certificates checks them all.")
         return items
 
-    for kind in LISTS:
+    for kind in lists:
         try:
             try:
                 listed[kind] = read(kind)

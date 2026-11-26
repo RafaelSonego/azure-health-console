@@ -36,6 +36,7 @@ class Signal:
     baseline: float | None = None
     at: str = ""  # when it happened (a fired alert's latest start), for the page to show as a time
     links: list = field(default_factory=list)  # alert_detail.links: where to look at it
+    label: str = ""  # Azure's display name for a metric ("Overall Vault Saturation" for SaturationShoebox)
 
 
 @dataclass

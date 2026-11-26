@@ -1,10 +1,12 @@
 """Curated per-type health profiles: built-in YAML, overridden by the user's own directory."""
+import math
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import yamlio
+from . import localfiles, yamlio
 
 BUILT_IN_DIR = Path(__file__).resolve().parent.parent / "profiles"
+MAX_PROFILE_BYTES = 256 * 1024
 OPERATORS = {"GreaterThan", "GreaterThanOrEqual", "LessThan", "LessThanOrEqual"}
 AGGREGATIONS = {"Average", "Maximum", "Minimum", "Total", "Count"}
 
@@ -74,6 +76,14 @@ def parse(data, source="profile"):
         operator = metric.get("operator", "GreaterThan")
         if operator not in OPERATORS:
             raise ProfileError(f"{where}: operator must be one of {sorted(OPERATORS)}.")
+        for limit in ("warn", "crit"):
+            value = metric.get(limit)
+            if value is not None and (isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value)):
+                raise ProfileError(f"{where}: `{limit}` must be a finite number, not {value!r}.")
+        warn, crit = metric.get("warn"), metric.get("crit")
+        if warn is not None and crit is not None and (crit < warn if operator.startswith("Greater") else crit > warn):
+            raise ProfileError(f"{where}: with {operator}, `crit` ({crit}) must be past `warn` ({warn}), "
+                               f"or critical would never be reached first.")
         profile.metrics.append(MetricSpec(
             name=metric["name"], aggregation=metric["aggregation"], operator=operator,
             warn=metric.get("warn"), crit=metric.get("crit"),
@@ -82,12 +92,20 @@ def parse(data, source="profile"):
 
 
 def load(user_dir=None):
-    """Built-in profiles first; a user profile for the same type replaces it entirely."""
+    """Built-in profiles first; a user profile for the same type replaces it entirely. The user's folder and files
+    must be changeable only by them (localfiles.check_file), each at most MAX_PROFILE_BYTES."""
     profiles = {}
     for directory in (BUILT_IN_DIR, Path(user_dir).expanduser() if user_dir else None):
         if not directory or not directory.is_dir():
             continue
         for path in sorted(directory.glob("*.yaml")):
-            profile = parse(yamlio.load(path.read_bytes()) or {}, source=path.name)
+            if directory == BUILT_IN_DIR:
+                content = path.read_bytes()
+            else:
+                try:
+                    content = localfiles.read_trusted(path, "Health profile", MAX_PROFILE_BYTES)
+                except localfiles.UnsafePath as error:
+                    raise ProfileError(str(error)) from error
+            profile = parse(yamlio.load(content) or {}, source=path.name)
             profiles[profile.type] = profile
     return profiles

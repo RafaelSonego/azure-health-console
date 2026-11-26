@@ -2,13 +2,17 @@
 cluster), Container Insights (when it sends data), and the Kubernetes API (when reachable)."""
 import json
 import re
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 
+import requests
+
 from ..arm import ArmError
 from ..cache import TtlCache
+from ..config import LOOK_BACK_HOURS
 from ..health import METRICS_API_VERSION
-from . import aks_checks, kube
+from . import aks_checks, kube, workload_problems
 
 LOGS_API_VERSION = "2018-03-01-preview"
 UNREACHABLE_SECONDS = 120
@@ -38,6 +42,38 @@ def pod_phases(client, cluster_id):
     return sorted(rows, key=lambda r: (r["phase"] not in PROBLEM_PHASES, r["namespace"] or ""))
 
 
+def failed_lowest(client, cluster_id, hours=24):
+    """{namespace: fewest Failed pods in any hour of the last `hours`}. Failed pods stay until deleted, so pods past
+    that floor failed within the window; an hour without data counts as none."""
+    end = datetime.now(timezone.utc).replace(microsecond=0)
+    payload = client.get(f"{cluster_id}/providers/Microsoft.Insights/metrics", METRICS_API_VERSION, params={
+        "metricnames": "kube_pod_status_phase", "aggregation": "Average", "interval": "PT1H",
+        "timespan": f"{_iso(end - timedelta(hours=hours))}/{_iso(end)}",
+        "$filter": "phase eq 'Failed' and namespace eq '*'", "top": "200",
+    }, tolerate=(400, 404)) or {}
+    lowest = {}
+    for item in payload.get("value", []):
+        for ts in item.get("timeseries") or []:
+            meta = {m["name"]["value"]: m.get("value") for m in ts.get("metadatavalues") or []}
+            values = [p.get("average") or 0 for p in ts.get("data") or []]
+            if values:
+                lowest[meta.get("namespace")] = round(min(values))
+    return lowest
+
+
+def failed_split(client, cluster_id, phases, hours=24):
+    """Each Failed row of `pod_phases` with `new`: how many failed within `hours` (all of them when the history
+    can't be read, so a real failure is never hidden)."""
+    rows = [dict(r) for r in phases if r["phase"] == "Failed"]
+    try:
+        lowest = failed_lowest(client, cluster_id, hours) if rows else {}
+    except ArmError:
+        lowest = {}
+    for r in rows:
+        r["new"] = max(0, r["pods"] - lowest.get(r["namespace"], 0))
+    return rows
+
+
 def resource_logs(client, resource_id, query, timespan="PT1H"):
     """Rows of a KQL query over the logs a resource sends (its workspace, read resource-centric)."""
     payload = client.post(f"{resource_id}/providers/microsoft.insights/logs", LOGS_API_VERSION,
@@ -50,21 +86,32 @@ def resource_logs(client, resource_id, query, timespan="PT1H"):
     return [dict(zip(columns, row)) for row in table.get("rows") or table.get("Rows") or []]
 
 
+# Container Insights' look-back for restarts, OOMKilled and warning events: the workspace keeps 30 days by default.
+CI_HOURS = LOOK_BACK_HOURS
+_CI_LOOK_BACK = {"restarts": 1, "oomkilled": 24, "events": 1}  # hours, when no look-back is picked (aks.*_look_back_hours)
+
+
+def look_back_defaults(kube_settings=None):
+    """Each list's window on Look back's *default*, from Settings → AKS."""
+    aks = kube_settings or {}
+    return {"restarts": aks.get("restarts_look_back_hours", _CI_LOOK_BACK["restarts"]),
+            "oomkilled": aks.get("oom_look_back_hours", _CI_LOOK_BACK["oomkilled"]),
+            "events": aks.get("events_look_back_hours", _CI_LOOK_BACK["events"])}
+
+
 _CI_QUERIES = {
     "not_running": """KubePodInventory | where TimeGenerated > ago(15m)
-| summarize arg_max(TimeGenerated, PodStatus, Namespace, Name, ContainerStatusReason) by PodUid
+| summarize arg_max(TimeGenerated, PodStatus, Namespace, Name, ContainerStatusReason, ControllerKind, ControllerName) by PodUid
 | where PodStatus !in ('Running', 'Succeeded')
-| project Namespace, Pod=Name, Status=PodStatus, Reason=ContainerStatusReason | take 50""",
-    "restarts": """KubePodInventory | where TimeGenerated > ago(1h) and isnotempty(ContainerName)
-| summarize Restarts=max(ContainerRestartCount) - min(ContainerRestartCount), Total=max(ContainerRestartCount)
-  by Namespace, Pod=Name, Container=tostring(split(ContainerName, '/')[1])
-| where Restarts > 0 | top 25 by Restarts""",
-    "oomkilled": """KubePodInventory | where TimeGenerated > ago(24h) and ContainerLastStatus contains 'OOMKilled'
-| summarize Pods=dcount(Name), Last=max(TimeGenerated) by Namespace, Container=tostring(split(ContainerName, '/')[1])
-| top 25 by Pods""",
-    "events": """KubeEvents | where TimeGenerated > ago(1h) and KubeEventType == 'Warning'
-| summarize Count=sum(Count), Last=max(TimeGenerated), Message=take_any(Message) by Reason, Namespace, Object=Name
-| top 25 by Count""",
+| project Namespace, Pod=Name, Status=PodStatus, Reason=ContainerStatusReason, OwnerKind=ControllerKind, Owner=ControllerName | take {limit}""",
+    "restarts": """KubePodInventory | where TimeGenerated > ago({hours}h) and isnotempty(ContainerName)
+| summarize Restarts=max(ContainerRestartCount) - min(ContainerRestartCount), Total=max(ContainerRestartCount),
+  OwnerKind=take_any(ControllerKind), Owner=take_any(ControllerName) by Namespace, Pod=Name, Container=tostring(split(ContainerName, '/')[1])
+| where Restarts > 0 | top {limit} by Restarts""",
+    "oomkilled": None,  # built by oom_query()
+    "events": """KubeEvents | where TimeGenerated > ago({hours}h) and KubeEventType == 'Warning'
+| summarize Count=sum(Count), Last=max(TimeGenerated), Message=take_any(Message) by Reason, Namespace, Object=Name, ObjectKind
+| top {limit} by Count""",
     "hot_containers": """Perf | where TimeGenerated > ago(15m) and ObjectName == 'K8SContainer'
   and CounterName in ('cpuUsageNanoCores', 'cpuLimitNanoCores', 'memoryWorkingSetBytes', 'memoryLimitBytes')
 | summarize cpu=maxif(CounterValue, CounterName == 'cpuUsageNanoCores'), cpuLimit=maxif(CounterValue, CounterName == 'cpuLimitNanoCores'),
@@ -73,31 +120,176 @@ _CI_QUERIES = {
 | where CpuPctOfLimit > 80 or MemPctOfLimit > 85
 | extend parts=split(InstanceName, '/')
 | extend PodUid=tostring(parts[array_length(parts) - 2]), Container=tostring(parts[array_length(parts) - 1])
-| join kind=leftouter (KubePodInventory | where TimeGenerated > ago(15m) | distinct PodUid, Namespace, Pod=Name) on PodUid
-| summarize CpuPctOfLimit=max(CpuPctOfLimit), MemPctOfLimit=max(MemPctOfLimit) by Namespace, Pod, Container
-| top 25 by MemPctOfLimit""",
+| join kind=leftouter (KubePodInventory | where TimeGenerated > ago(15m)
+  | distinct PodUid, Namespace, Pod=Name, OwnerKind=ControllerKind, Owner=ControllerName) on PodUid
+| summarize CpuPctOfLimit=max(CpuPctOfLimit), MemPctOfLimit=max(MemPctOfLimit) by Namespace, Pod, Container, OwnerKind, Owner
+| top {limit} by MemPctOfLimit""",
 }
 
 
-def container_insights(client, cluster_id):
+# One row per kill, dated by the kill (a pod reports OOMKilled as its last state until it stops again), with what
+# tells a container's own limit from a node out of memory: the kernel's line (AKS node-problem-detector), then Perf.
+_OOM_QUERY = """let kills = KubePodInventory | where {inventory} and ContainerLastStatus contains 'OOMKilled'{pod}
+| extend LastState=parse_json(ContainerLastStatus), Container=tostring(split(ContainerName, '/')[1])
+| extend KilledAt=coalesce(todatetime(LastState.finishedAt), TimeGenerated)
+| where {killed}
+| summarize arg_max(TimeGenerated, Namespace, Name, Computer, ControllerKind, ControllerName) by PodUid, Container, KilledAt
+| top {limit} by KilledAt desc
+| project PodUid, Container, KilledAt, Namespace, Pod=Name, Node=Computer, OwnerKind=ControllerKind, Owner=ControllerName;
+let t0 = toscalar(kills | summarize min(KilledAt)) - 10m;
+let t1 = toscalar(kills | summarize max(KilledAt)) + 10m;
+let mem = Perf | where TimeGenerated between (t0 .. t1) and ObjectName == 'K8SContainer'
+  and CounterName in ('memoryWorkingSetBytes', 'memoryLimitBytes')
+| extend parts=split(InstanceName, '/')
+| extend PodUid=tostring(parts[array_length(parts) - 2]), Container=tostring(parts[array_length(parts) - 1])
+| join kind=inner (kills | project PodUid, Container, KilledAt) on PodUid, Container
+| where TimeGenerated between ((KilledAt - 5m) .. (KilledAt + 1m))
+| summarize MemBytes=maxif(CounterValue, CounterName == 'memoryWorkingSetBytes'),
+  LimitBytes=maxif(CounterValue, CounterName == 'memoryLimitBytes') by PodUid, Container, KilledAt;
+let node = Perf | where TimeGenerated between (t0 .. t1) and ObjectName == 'K8SNode'
+  and CounterName in ('memoryWorkingSetBytes', 'memoryAllocatableBytes')
+| join kind=inner (kills | distinct Node, KilledAt) on $left.Computer == $right.Node
+| where TimeGenerated between ((KilledAt - 5m) .. (KilledAt + 1m))
+| summarize NodeMemBytes=maxif(CounterValue, CounterName == 'memoryWorkingSetBytes'),
+  NodeAllocBytes=maxif(CounterValue, CounterName == 'memoryAllocatableBytes') by Node, KilledAt;
+let kernel = KubeEvents | where TimeGenerated between (t0 .. t1 + 1h) and ObjectKind == 'Node'
+  and Reason in ('OOMKilling', 'SystemOOM')
+| extend Seen=coalesce(LastSeen, TimeGenerated)
+| join kind=inner (kills | distinct Node, KilledAt) on $left.Name == $right.Node
+| where Seen between ((KilledAt - 5m) .. (KilledAt + 5m))
+| summarize arg_min(abs(Seen - KilledAt), Kernel=Message),
+  SystemOom=countif(Reason == 'SystemOOM' or Message startswith 'Out of memory') by Node, KilledAt;
+kills | join kind=leftouter mem on PodUid, Container, KilledAt
+| join kind=leftouter node on Node, KilledAt
+| join kind=leftouter kernel on Node, KilledAt
+| project KilledAt, Namespace, Pod, Container, Node, OwnerKind, Owner, MemBytes, LimitBytes, NodeMemBytes,
+  NodeAllocBytes, Kernel, SystemOom
+| order by KilledAt desc"""
+OOM_NEAR_LIMIT = 0.9  # of the container's limit, at the last reading before the kill
+OOM_NODE_FULL = 0.95  # of the node's allocatable memory
+OOM_BEFORE, OOM_AFTER = timedelta(minutes=30), timedelta(minutes=5)  # Investigate: kills this close to the request
+
+
+def oom_query(hours=None, pod=None, around=None, limit=25):
+    """The kills in the last `hours`, or (Investigate) one pod's kills just before and after `around`."""
+    if around is None:
+        inventory, killed = f"TimeGenerated > ago({hours}h)", f"KilledAt > ago({hours}h)"
+    else:
+        start, end = _iso(around - OOM_BEFORE), _iso(around + OOM_AFTER)
+        inventory = f"TimeGenerated between (datetime({start}) .. datetime({_iso(around + timedelta(hours=6))}))"
+        killed = f"KilledAt between (datetime({start}) .. datetime({end}))"
+    if pod is not None and not K8S_NAME.match(pod):
+        raise ValueError(f"'{pod}' isn't a Kubernetes pod name")
+    return _OOM_QUERY.format(inventory=inventory, killed=killed, pod=f" and Name == {json.dumps(pod)}" if pod else "", limit=limit)
+
+
+def _mib(value):
+    return round(value / 1048576) if value else None
+
+
+def oom_cause(row, near_limit=None, node_full=None):
+    """(cause, sure, why) for one kill: 'container' (its own memory limit), 'node' (the node ran out) or 'unknown'."""
+    kernel = row.get("Kernel") or ""
+    if kernel.startswith("Memory cgroup out of memory"):
+        return "container", True, "The kernel says the container's own memory limit was hit (Memory cgroup out of memory)."
+    if kernel.startswith("Out of memory") or row.get("SystemOom"):
+        return "node", True, "The kernel says the node itself ran out of memory, so it killed a process to free some."
+    mem, limit = row.get("MemBytes"), row.get("LimitBytes")
+    node_mem, node_alloc = row.get("NodeMemBytes"), row.get("NodeAllocBytes")
+    # With no limit set, Container Insights reports the node's capacity as the limit.
+    near_limit, full_at = near_limit or OOM_NEAR_LIMIT, node_full or OOM_NODE_FULL
+    has_limit = bool(limit) and not (node_alloc and limit >= node_alloc)
+    node_full = bool(node_mem and node_alloc and node_mem / node_alloc >= full_at)
+    if has_limit and mem and mem / limit >= near_limit:
+        return "container", False, (f"No kernel message was collected, but it used {_mib(mem)} of its {_mib(limit)} MiB "
+                                    "limit just before the kill.")
+    if node_full:
+        return "node", False, (f"No kernel message was collected, but the node was at {round(100 * node_mem / node_alloc)}% "
+                               "of its allocatable memory just before the kill.")
+    if limit and not has_limit:
+        return "node", False, ("It has no memory limit, so only the node running out of memory can kill it; no kernel "
+                               "message was collected to confirm it.")
+    if mem and has_limit:
+        return "unknown", False, (f"It used {_mib(mem)} of its {_mib(limit)} MiB limit at the last reading (once a minute) "
+                                  "and the node had room: a spike between readings can't be seen.")
+    return "unknown", False, ("Neither the kernel's message nor memory readings for that minute were collected "
+                              "(the workspace may not keep Perf or node events, or it was too long ago).")
+
+
+def oom_thresholds(aks_settings=None):
+    """(near the container's limit, node full) as fractions, from settings' aks.oom_*_percent."""
+    aks = aks_settings or {}
+    return aks.get("oom_near_limit_percent", 100 * OOM_NEAR_LIMIT) / 100, aks.get("oom_node_full_percent", 100 * OOM_NODE_FULL) / 100
+
+
+def oom_rows(rows, thresholds=None):
+    """The query's rows as the page shows them, each with its cause."""
+    near, full = thresholds or (None, None)
+    out = []
+    for r in rows:
+        cause, sure, why = oom_cause(r, near, full)
+        limit, node_alloc = r.get("LimitBytes"), r.get("NodeAllocBytes")
+        no_limit = bool(limit and node_alloc and limit >= node_alloc)
+        out.append({"killed_at": r.get("KilledAt"), "namespace": r.get("Namespace") or "", "pod": r.get("Pod") or "",
+                    "container": r.get("Container") or "", "node": r.get("Node") or "",
+                    "owner": " ".join(filter(None, (r.get("OwnerKind"), r.get("Owner")))),
+                    "workload": workload_problems.workload_of(r.get("OwnerKind"), r.get("Owner")),
+                    "memory_mib": _mib(r.get("MemBytes")), "limit_mib": None if no_limit else _mib(limit),
+                    "no_limit": no_limit,
+                    "node_pct": round(100 * r["NodeMemBytes"] / node_alloc) if r.get("NodeMemBytes") and node_alloc else None,
+                    "cause": cause, "sure": sure, "why": why, "kernel": r.get("Kernel") or ""})
+    return out
+
+
+def oom_kills(client, cluster_id, pod, around, aks_settings=None):
+    """Investigate: the pod's OOM kills just before or after `around`, with their causes."""
+    end = around + timedelta(hours=6)
+    query = oom_query(pod=pod, around=around)
+    rows = resource_logs(client, cluster_id, query, f"{_iso(around - OOM_BEFORE - timedelta(minutes=10))}/{_iso(end)}")
+    return {"kills": oom_rows(rows, oom_thresholds(aks_settings)), "query": query}
+
+
+def _timespan(hours):
+    return f"P{hours // 24}D" if hours % 24 == 0 else f"PT{hours}H"
+
+
+CI_LIMITS = {"not_running": 500, "restarts": 200, "events": 200, "hot_containers": 200, "oomkilled": 200}  # rows shown
+
+
+def container_insights(client, cluster_id, hours=None, defaults=None, oom_thresholds=None):
+    """`hours` (one of CI_HOURS) is how far back restarts, OOMKilled and warning events look, else each its own
+    (`defaults`, look_back_defaults); the rest stay "now"."""
+    defaults = defaults or _CI_LOOK_BACK
     try:
         alive = resource_logs(client, cluster_id, "KubePodInventory | where TimeGenerated > ago(30m) | take 1", "PT1H")
     except ArmError as error:
         return {"available": False, "reason": f"Log query failed: {str(error)[:200]}"}
     if not alive:
         return {"available": False,
-                "reason": "No Container Insights data in the last 30 minutes (not enabled, or not sending)."}
+                "reason": "Container Insights isn't sending for this cluster: nothing arrived in the last 30 minutes (not turned on, "
+                          "or its agent is down), so its lists are skipped."}
 
     def run(item):
         name, query = item
+        back, limit = hours or defaults.get(name, 1), CI_LIMITS[name]
         try:
-            return name, resource_logs(client, cluster_id, query, "P1D")
+            if name == "oomkilled":
+                rows = oom_rows(resource_logs(client, cluster_id, oom_query(back, limit=limit + 1), _timespan(max(back, 24))),
+                                oom_thresholds)
+            else:
+                rows = resource_logs(client, cluster_id, query.replace("{hours}", str(back)).replace("{limit}", str(limit + 1)),
+                                     _timespan(max(back, 24)))
+            if len(rows) > limit:  # one more than shown came back: say so, never cut silently
+                cut[name] = limit
+            return name, rows[:limit]
         except ArmError as error:
             return name, {"error": str(error)[:200]}
 
+    cut = {}
     with ThreadPoolExecutor(max_workers=5) as pool:
         results = dict(pool.map(run, _CI_QUERIES.items()))
-    return {"available": True, **results}
+    results["truncated"] = cut
+    return {"available": True, "hours": {name: hours or defaults[name] for name in _CI_LOOK_BACK}, **results}
 
 
 LISTS = {
@@ -151,19 +343,136 @@ def read_lists(k, names):
     return data, failed
 
 
+API_EVENT_LIMIT = 200  # warning events listed (one row per reason and object); the rest are counted
+
+
+def api_warning_events(items, hours, now=None):
+    """The cluster's Warning events from the Kubernetes API, one row per reason and object, shaped like Container
+    Insights' (Reason, Namespace, Object, ObjectKind, Count, Last, Message), newest Last within `hours`, most first.
+    Kubernetes itself keeps events about an hour, so a longer look-back still shows only what it kept."""
+    since = (now or datetime.now(timezone.utc)) - timedelta(hours=hours)
+    rows = {}
+    for e in items:
+        if e.get("type") != "Warning":
+            continue
+        obj, series = e.get("involvedObject") or {}, e.get("series") or {}
+        last = workload_problems._parse(e.get("lastTimestamp") or series.get("lastObservedTime") or e.get("eventTime")
+                                        or (e.get("metadata") or {}).get("creationTimestamp"))
+        if last is None or last < since:
+            continue
+        key = (e.get("reason") or "Warning", obj.get("namespace") or "", obj.get("name") or "", obj.get("kind") or "")
+        row = rows.setdefault(key, {"Reason": key[0], "Namespace": key[1], "Object": key[2], "ObjectKind": key[3],
+                                    "Count": 0, "Last": last, "Message": ""})
+        row["Count"] += int(e.get("count") or series.get("count") or 1)
+        if last >= row["Last"]:
+            row["Last"], row["Message"] = last, (e.get("message") or "")[:500]
+    out = sorted(rows.values(), key=lambda r: (-r["Count"], r["Reason"], r["Object"]))
+    return [{**r, "Last": _iso(r["Last"])} for r in out]
+
+
+def _read_warning_events(k):
+    """(items, why they couldn't be read or None)."""
+    try:
+        return k.items("/api/v1/events", {"fieldSelector": "type=Warning"}), None
+    except kube.KubeUnavailable as error:
+        return [], str(error)
+    except Exception as error:  # the events read failing mustn't sink the lists
+        return [], str(error).splitlines()[0][:200]
+
+
 def kubernetes(client, cluster_id, include_system=False, kube_settings=None):
+    return _kubernetes(client, cluster_id, include_system, kube_settings)[0]
+
+
+def _kubernetes(client, cluster_id, include_system=False, kube_settings=None, events_hours=1):
+    """(result, {(namespace, pod): (namespace, kind, name)}): the owner index stays server side, for `problems`."""
     k, why = _connect(client, cluster_id, kube_settings)
     if k is None:
-        return {"available": False, "reason": why}
-    data, failed = read_lists(k, list(LISTS))
+        return {"available": False, "reason": why}, {}
+    with ThreadPoolExecutor(max_workers=2) as side:  # the pools' autoscaler ranges and the events, read while the lists are
+        profiles = side.submit(pool_profiles, client, cluster_id)
+        warnings = side.submit(_read_warning_events, k)
+        data, failed = read_lists(k, list(LISTS))
     if len(failed) == len(LISTS):
-        return {"available": False, "reason": next(iter(failed.values()))}
+        return {"available": False, "reason": next(iter(failed.values()))}, {}
     objs = {"Deployment": data["deployments"], "StatefulSet": data["statefulsets"],
             "DaemonSet": data["daemonsets"], "CronJob": data["cronjobs"]}
+    aks_settings = kube_settings or {}
     result = aks_checks.analyze(objs, data["pods"], data["replicasets"], data["jobs"], data["hpas"],
                                 data["pdbs"], data["nodes"], data["pod_metrics"], data["node_metrics"],
-                                include_system=include_system)
-    return {"available": True, "server": k.server, "source": k.source, **result, "unreadable": unreadable_notes(failed)}
+                                cfg=aks_checks.Thresholds.from_settings(aks_settings), include_system=include_system,
+                                profiles=profiles.result())
+    pod_owner = aks_checks.map_pods(data["pods"], data["replicasets"], data["jobs"])[0]
+    system = {s["namespace"] for s in result.get("system_namespaces", [])}
+    in_scope = (lambda ns: True) if include_system else (lambda ns: ns not in system)
+    rolled = workload_problems.rollouts(objs, data["replicasets"], in_scope, datetime.now(timezone.utc),
+                                        aks_settings.get("rollout_hours", 24))
+    leftover = timedelta(hours=aks_settings.get("leftover_hours", 24))
+    for row in result.get("pod_rows", []):
+        row["leftover"] = workload_problems.is_leftover(row, datetime.now(timezone.utc), leftover)
+    result.get("pod_rows", []).sort(key=lambda r: r["leftover"])  # stable: left over last, the rest as they were
+    event_items, events_error = warnings.result()
+    events = api_warning_events(event_items, events_hours)
+    return {"available": True, "server": k.server, "source": k.source, **result, "workload_rows": result.get("workloads", []),
+            "workloads": workload_names(objs), "rollouts": [{"namespace": ns, "workload": w, **r} for (ns, w), r in rolled.items()],
+            "unreadable": unreadable_notes(failed), "events": events[:API_EVENT_LIMIT], "events_total": len(events),
+            "events_hours": events_hours, "events_error": events_error}, pod_owner
+
+
+NAMESPACE = re.compile(r"^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$")
+WORKLOAD_KINDS = (("Deployment", "deployments"), ("StatefulSet", "statefulsets"), ("DaemonSet", "daemonsets"))
+_POD_TEMPLATE_HASH = workload_problems.POD_TEMPLATE_HASH
+
+
+def namespace_workloads(client, cluster_id, namespace, kube_settings=None):
+    """One namespace's Deployments, StatefulSets and DaemonSets, for when the cluster-wide lists can't be read: that
+    namespace's own lists (a role on just that namespace is enough), else Container Insights' pod inventory over the
+    last hour. {"source", "workloads": [{kind, name}], "notes"}: no source and an empty list when neither works."""
+    notes = []
+    k, why = _connect(client, cluster_id, kube_settings)
+    if k is not None:
+        found, failed = [], []
+        for kind, plural in WORKLOAD_KINDS:
+            try:
+                found += [{"kind": kind, "name": o["metadata"].get("name", "")}
+                          for o in k.items(f"/apis/apps/v1/namespaces/{namespace}/{plural}")]
+            except kube.KubeUnavailable as error:
+                failed.append(str(error).splitlines()[0][:200])
+        if len(failed) < len(WORKLOAD_KINDS):
+            return {"source": "Kubernetes API", "workloads": _by_kind(found), "notes": failed}
+        notes.append(failed[0])
+    else:
+        notes.append((why or "The Kubernetes API can't be reached.").splitlines()[0][:200])
+    query = (f"KubePodInventory | where TimeGenerated > ago(1h) and Namespace == '{namespace}'"
+             " | distinct ControllerKind, ControllerName")
+    try:
+        rows = resource_logs(client, cluster_id, query, "PT1H")
+    except ArmError as error:
+        rows = []
+        notes.append(f"Container Insights couldn't be read: {str(error).splitlines()[0][:150]}")
+    found = []
+    for r in rows:
+        kind, name = r.get("ControllerKind") or "", r.get("ControllerName") or ""
+        if kind == "ReplicaSet":  # a Deployment's pods belong to its ReplicaSet: <deployment>-<pod template hash>
+            kind, name = "Deployment", _POD_TEMPLATE_HASH.sub("", name)
+        if kind in dict(WORKLOAD_KINDS) and name:
+            found.append({"kind": kind, "name": name})
+    if found:
+        return {"source": "Container Insights", "workloads": _by_kind(found), "notes": notes}
+    return {"source": "", "workloads": [], "notes": notes}
+
+
+def _by_kind(items):
+    order = [kind for kind, _ in WORKLOAD_KINDS]
+    unique = {(w["kind"], w["name"]) for w in items if w["name"]}
+    return [{"kind": kind, "name": name} for kind, name in sorted(unique, key=lambda w: (order.index(w[0]), w[1]))]
+
+
+def workload_names(objs):
+    """Every Deployment, StatefulSet and DaemonSet by namespace, for the Dependencies picker (system ones too)."""
+    return sorted(({"namespace": o["metadata"].get("namespace", ""), "kind": kind, "name": o["metadata"].get("name", "")}
+                   for kind in ("Deployment", "StatefulSet", "DaemonSet") for o in objs[kind]),
+                  key=lambda w: (w["namespace"], w["kind"], w["name"]))
 
 
 # What each list feeds, so a list the identity can't read is reported, never mistaken for "no problems".
@@ -201,12 +510,18 @@ def nodes(client, cluster_id, kube_settings=None):
     them, metrics-server) when it can be reached, else from Container Insights' node inventory (less detail)."""
     k, why = _connect(client, cluster_id, kube_settings)
     if k is not None:
-        data, failed = read_lists(k, ["nodes", "pods", "node_metrics"])
+        with ThreadPoolExecutor(max_workers=1) as side:
+            profiles = side.submit(pool_profiles, client, cluster_id)
+            data, failed = read_lists(k, ["nodes", "pods", "node_metrics"])
         if "nodes" not in failed:
-            pools, _findings = aks_checks.capacity(data["nodes"], data["pods"], data["node_metrics"], aks_checks.Thresholds())
+            aks_settings = kube_settings or {}
+            pools, _findings = aks_checks.capacity(data["nodes"], data["pods"], data["node_metrics"],
+                                                   aks_checks.Thresholds.from_settings(aks_settings), profiles.result())
             return {"available": True, "source": "kubernetes", "via": k.source,
-                    "nodes": aks_checks.node_rows(data["nodes"], data["pods"], data["node_metrics"]),
-                    "pools": pools, "unreadable": unreadable_notes(failed)}
+                    "nodes": aks_checks.node_rows(data["nodes"], data["pods"], data["node_metrics"],
+                                                  warn_days=aks_settings.get("node_image_warning_days")),
+                    "pools": pools, "pool_requests_warn": aks_checks.Thresholds.from_settings(aks_settings).pool_requests,
+                    "unreadable": unreadable_notes(failed)}
         why = failed["nodes"]
     try:
         rows = resource_logs(client, cluster_id, _CI_NODES, "PT1H")
@@ -231,17 +546,39 @@ def nodes(client, cluster_id, kube_settings=None):
     return {"available": True, "source": "container_insights", "reason": why, "nodes": out, "pools": []}
 
 
-def workloads(client, cluster_id, include_system=False, kube_settings=None):
-    """All three layers in parallel; each reports whether it was available and why not."""
-    with ThreadPoolExecutor(max_workers=3) as pool:
-        phases = pool.submit(pod_phases, client, cluster_id)
-        insights = pool.submit(container_insights, client, cluster_id)
-        api = pool.submit(kubernetes, client, cluster_id, include_system, kube_settings)
+def pool_profiles(client, cluster_id):
+    """{pool: {autoscale, min, max, count, vm_size}} from the cluster's ARM record, {} when it can't be read."""
+    try:
+        rows = client.query(f"Resources | where tolower(id) == {json.dumps(cluster_id.lower())} | project properties")
+    except Exception:  # an extra beside the Kubernetes lists: never the reason they don't show
+        return {}
+    pools = ((rows[0].get("properties") or {}).get("agentPoolProfiles") or []) if rows else []
+    return {p.get("name"): {"autoscale": bool(p.get("enableAutoScaling")), "min": p.get("minCount"), "max": p.get("maxCount"),
+                            "count": p.get("count"), "vm_size": p.get("vmSize")} for p in pools}
+
+
+def workloads(client, cluster_id, include_system=False, kube_settings=None, ci_hours=None):
+    """All three layers in parallel; each reports whether it was available and why not, and how long it took
+    (`timings`, seconds), then one list of what's wrong now across them (`problems`)."""
+    def timed(work, *args):
+        start = time.monotonic()
         try:
-            phase_rows = phases.result()
+            return work(*args), round(time.monotonic() - start, 1)
         except ArmError as error:
-            phase_rows = {"error": str(error)[:200]}
-        return {"pod_phases": phase_rows, "container_insights": insights.result(), "kubernetes": api.result()}
+            return {"error": str(error)[:200]}, round(time.monotonic() - start, 1)
+
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        phases = pool.submit(timed, pod_phases, client, cluster_id)
+        insights = pool.submit(timed, container_insights, client, cluster_id, ci_hours, look_back_defaults(kube_settings),
+                               oom_thresholds(kube_settings))
+        api = pool.submit(timed, _kubernetes, client, cluster_id, include_system, kube_settings,
+                          ci_hours or look_back_defaults(kube_settings)["events"])
+        (phase_rows, t_phases), (ci, t_ci), ((k, pod_owner), t_k) = phases.result(), insights.result(), api.result()
+    return {"pod_phases": phase_rows, "container_insights": ci, "kubernetes": k,
+            "problems": workload_problems.problems(phase_rows, ci, k, pod_owner, include_system=include_system,
+                                                   leftover_hours=(kube_settings or {}).get("leftover_hours", 24)),
+            "timings": {workload_problems.PLATFORM: t_phases, workload_problems.CI: t_ci, workload_problems.K8S: t_k},
+            "look_back_defaults": look_back_defaults(kube_settings), "leftover_hours": (kube_settings or {}).get("leftover_hours", 24)}
 
 
 def _window_clause(around, spread):
@@ -254,15 +591,22 @@ def _window_clause(around, spread):
             f"within {spread} minutes of {_iso(around)}")
 
 
-def _kube_lines(k, namespace, pod, container, lines, around, spread):
+def _kube_lines(k, namespace, pod, container, lines, around, spread, previous=False):
     """The pod's own log from the API server; with `around`, the lines time-stamped in that window (the API can only
-    start at a time, so the end is cut here)."""
+    start at a time, so the end is cut here). `previous`: the stopped instance's, none when it's gone."""
     params = {"container": container} if container else {}
+    if previous:
+        params["previous"] = "true"
     if around is None:
         params["tailLines"] = str(lines)
     else:
         params.update(sinceTime=_iso(around - timedelta(minutes=spread)), timestamps="true", limitBytes=str(KUBE_LOG_BYTES))
-    text = k.get(f"/api/v1/namespaces/{namespace}/pods/{pod}/log", params=params, raw=True)
+    try:
+        text = k.get(f"/api/v1/namespaces/{namespace}/pods/{pod}/log", params=params, raw=True)
+    except requests.HTTPError:
+        if not previous:
+            raise
+        text = ""  # 400: no stopped instance is kept for this container any more
     found = (text or "").splitlines()
     if around is None:
         return found[-lines:]
@@ -274,9 +618,10 @@ KUBE_LOG_BYTES = 2_000_000
 
 
 def logs(client, cluster_id, namespace, pod=None, container=None, lines=200, source="auto", kube_settings=None,
-         around=None, spread=2):
+         around=None, spread=2, previous=False):
     """Opt-in container logs: the Kubernetes API when reachable, else Container Insights. With `around` (a datetime),
-    only the lines within `spread` minutes of it; Container Insights answers when the API has none left for then."""
+    only the lines within `spread` minutes of it; Container Insights answers when the API has none left for then.
+    `previous` reads the container's last stopped instance (the one an OOM kill or crash ended)."""
     for value in (namespace, pod, container):
         if value is not None and not K8S_NAME.match(value):
             return {"error": f"'{value}' isn't a valid Kubernetes name."}
@@ -285,9 +630,9 @@ def logs(client, cluster_id, namespace, pod=None, container=None, lines=200, sou
     if source in ("auto", "kubernetes") and pod:
         try:
             k = kube.client_for(client, cluster_id, kube_settings)
-            found = _kube_lines(k, namespace, pod, container, lines, around, spread)
-            if found or around is None or source == "kubernetes":
-                return {"source": "kubernetes", "lines": found}
+            found = _kube_lines(k, namespace, pod, container, lines, around, spread, previous)
+            if found or (around is None and not previous) or source == "kubernetes":
+                return {"source": "kubernetes" + (", the stopped instance" if previous else ""), "lines": found}
         except (kube.KubeUnavailable, ArmError) as error:
             if source == "kubernetes":
                 return {"source": "kubernetes", "error": str(error)}

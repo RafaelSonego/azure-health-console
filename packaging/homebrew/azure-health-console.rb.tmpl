@@ -8,9 +8,10 @@ class AzureHealthConsole < Formula
   depends_on "python@3.13"
 
   def install
-    # Its own virtual environment; the Python dependencies come from PyPI when it's installed.
+    # Its own virtual environment; dependencies are the release's locked versions, each checked by its hash.
     system Formula["python@3.13"].opt_bin/"python3.13", "-m", "venv", libexec
-    system libexec/"bin/pip", "install", "--no-cache-dir", buildpath
+    system libexec/"bin/pip", "install", "--no-cache-dir", "--require-hashes", "-r", buildpath/"requirements-release.txt"
+    system libexec/"bin/pip", "install", "--no-cache-dir", "--no-deps", buildpath
     bin.install_symlink libexec/"bin/azure-health-console"
   end
 

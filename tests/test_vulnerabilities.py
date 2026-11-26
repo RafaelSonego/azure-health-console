@@ -93,6 +93,27 @@ def test_resource_findings_parse_cves_and_where():
     assert f["where"] == "running in AKS" and f["detected"] == "3.0.1" and f["cves"][0]["fixed"] == "1.2"
 
 
+def test_findings_group_one_cve_across_packages_and_image_versions():
+    row = {"cve": "CVE-2026-1", "resources": 3, "findings": 40, "packages": ["openssl"], "maxCvss": 9.8,
+           "severity": "High", "fixable": 40, "running": 2, "images": 37}
+    handlers = [("by cve", lambda kql: [row]), ("by parent, rtype, subscriptionId", lambda kql: []),
+                ("by software", lambda kql: []), ("by rtype", lambda kql: []), ("resources=dcount(parent)", lambda kql: [{}])]
+    client = FakeClient(query_handlers=handlers)
+    out = v.findings(client, [SUB], filters={"running": True})
+    assert out["cves"] == [row] and out["truncated"]["cves"] is False
+    kql = next(q for q in client.queries if "by cve" in q)
+    assert "mv-expand item = list" in kql and "where live" in kql  # the same filters as the other views
+
+
+def test_a_finding_links_to_its_defender_page():
+    rows = [{"title": "t", "software": "openssl", "severity": "High", "cvss": 9.8, "child": "", "childKind": "",
+             "portal": "portal.azure.com/#blade/Microsoft_Azure_Security/RecommendationsBlade/assessmentKey/abc"},
+            {"title": "u", "software": "zlib", "severity": "Low", "cvss": 3.0, "child": "", "childKind": "", "portal": ""}]
+    out = v.for_resource(FakeClient(query_handlers=[("where parent ==", lambda kql: rows)]), AKS)["findings"]
+    assert out[0]["defender"] == "https://portal.azure.com/#blade/Microsoft_Azure_Security/RecommendationsBlade/assessmentKey/abc"
+    assert out[1]["defender"] == ""
+
+
 def test_coverage_names_unscanned_machines_and_plans_off():
     def handler(kql):
         if "pricings" in kql:
@@ -135,7 +156,7 @@ def test_routes_and_export():
     client = FakeClient(query_handlers=[("", handler)], gets={"kubernetesVersions": VERSIONS, "AppStacks": {"value": []},
                                                               "/subscriptions": {"value": [{"subscriptionId": SUB, "displayName": "sub-a"}]}})
     app = Flask("test")
-    app.register_blueprint(create_blueprint(lambda tenant: client, config.load("/nonexistent")))
+    app.register_blueprint(create_blueprint(lambda tenant: client, config.load("/nonexistent"), authorize=lambda: None))
     http = app.test_client()
     assert http.get("/api/vulnerabilities").status_code == 400  # a scope is needed
     data = http.get(f"/api/vulnerabilities?subscription={SUB}&severity=High&fixable=1").get_json()

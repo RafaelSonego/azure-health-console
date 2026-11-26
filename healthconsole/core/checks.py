@@ -9,7 +9,7 @@ from .model import CRITICAL, HEALTHY, INFO, UNKNOWN, WARNING
 from .triage import rg_clause
 
 MAX_PARALLEL = 16
-_ORDER = {CRITICAL: 0, WARNING: 1, UNKNOWN: 2, HEALTHY: 3, INFO: 4}
+_ORDER = {CRITICAL: 0, WARNING: 1, HEALTHY: 2, INFO: 3, UNKNOWN: 4}
 
 
 def _resources(client, resource_type, subscriptions, group_keys):
@@ -82,15 +82,20 @@ def urgency(row):
     return (2 + _ORDER.get(row["status"], 5), days if days is not None else 10**6)
 
 
-def keyvault_scan(client, subscriptions, warn_days, group_keys=None, progress=None, critical_days=7):
+def keyvault_scan(client, subscriptions, warn_days, group_keys=None, progress=None, critical_days=7, max_vaults=None,
+                  max_pages=None, lists=keyvault.LISTS):
     """Every secret, key and certificate expiry in scope: Key Vaults (one listing each) plus App Service
-    certificates (one Resource Graph query)."""
+    certificates (one Resource Graph query). `max_vaults`/`max_pages` bound the work: vaults over the limit are named in
+    `skipped`, a list cut short is in `errors`."""
     report = progress or (lambda message: None)
     report("Listing Key Vaults")
     vaults = _resources(client, "microsoft.keyvault/vaults", subscriptions, group_keys)
+    found_vaults, skipped = len(vaults), []
+    if max_vaults is not None and len(vaults) > max_vaults:
+        vaults, skipped = vaults[:max_vaults], vaults[max_vaults:]
 
     def scan(vault):
-        result = keyvault.expiry(client, vault["id"], warn_days, critical_days)
+        result = keyvault.expiry(client, vault["id"], warn_days, critical_days, max_pages=max_pages, lists=lists)
         rows = [{"source": "Key Vault", "vault": vault["name"], "vault_id": vault["id"],
                  "resource_group": vault["resourceGroup"], "subscription_id": vault["subscriptionId"].lower(),
                  "kind": kind.rstrip("s"), **item} for kind in keyvault.KINDS for item in result.get(kind) or []]
@@ -107,11 +112,11 @@ def keyvault_scan(client, subscriptions, warn_days, group_keys=None, progress=No
     rows.sort(key=lambda r: (_ORDER.get(r["status"], 5), r["days_left"] if r["days_left"] is not None else 10**6))
     counts = {status: sum(1 for r in rows if r["status"] == status) for status in (CRITICAL, WARNING, HEALTHY, INFO)}
     counts["expired"] = sum(1 for r in rows if r["status"] == CRITICAL and r["days_left"] < 0)
-    return {"vaults": len(vaults), "rows": rows, "counts": counts, "errors": errors, "warn_days": warn_days,
-            "critical_days": critical_days}
+    return {"vaults": len(vaults), "vaults_found": found_vaults, "skipped": [v["name"] for v in skipped], "rows": rows,
+            "counts": counts, "errors": errors, "warn_days": warn_days, "critical_days": critical_days}
 
 
-def aks_fleet(client, subscriptions, group_keys=None, with_detectors=False, progress=None, only_id=None):
+def aks_fleet(client, subscriptions, group_keys=None, with_detectors=False, progress=None, only_id=None, leftover_hours=24):
     """Every cluster: power, provisioning, version, pools at max, pods by phase, optionally detectors. `only_id`
     checks just that cluster (a cluster's own page)."""
     report = progress or (lambda message: None)
@@ -135,9 +140,14 @@ def aks_fleet(client, subscriptions, group_keys=None, with_detectors=False, prog
             if pool.get("enableAutoScaling") and pool.get("maxCount") and (pool.get("count") or 0) >= pool["maxCount"]:
                 row["problems"].append((CRITICAL, f"pool {pool.get('name')} at max ({pool['maxCount']} nodes)"))
         try:
-            for phase in aks.pod_phases(client, cluster["id"]):
-                if phase["phase"] in aks.PROBLEM_PHASES:
+            phases = aks.pod_phases(client, cluster["id"])
+            for phase in phases:
+                if phase["phase"] in aks.PROBLEM_PHASES and phase["phase"] != "Failed":
                     row["problems"].append((WARNING, f"{phase['pods']} {phase['phase'].lower()} in {phase['namespace']}"))
+            for f in aks.failed_split(client, cluster["id"], phases, leftover_hours):
+                text = f"{f['pods']} failed in {f['namespace']}"
+                row["problems"].append((WARNING, text if f["new"] == f["pods"] else f"{text}, {f['new']} in the last {leftover_hours} h")
+                                       if f["new"] else (INFO, f"{text}, none in the last {leftover_hours} h: left over"))
         except ArmError as error:
             row["problems"].append((UNKNOWN, f"pods: {str(error).splitlines()[0]}"))
         if with_detectors:

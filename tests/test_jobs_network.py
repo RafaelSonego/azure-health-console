@@ -138,3 +138,13 @@ def test_bench_groups_calls_by_kind_and_reports_each_scenario():
     rows = {r["scenario"]: r for r in result["rows"]}
     assert "seconds" in rows["triage"] and rows["resource"]["skipped"]
     assert "| triage |" in bench.to_markdown(result)
+
+
+def test_a_vnet_without_subnets_is_listed_after_the_healthy_ones():
+    vnets = [{"id": VNET if name == "b-ok" else f"{VNET}-empty", "name": name, "resourceGroup": "net", "subscriptionId": SUB,
+              "location": "canadacentral", "spaces": ["10.0.0.0/22"], "subnetCount": 1 if name == "b-ok" else 0}
+             for name in ("a-empty", "b-ok")]
+    client = FakeClient(query_handlers=[("mv-expand s = properties.subnets", lambda q: [_subnet_row("apps", "10.0.1.0/26", used=10)]),
+                                        ("subnetCount", lambda q: vnets)])
+    ordered = [(v["name"], v["status"]) for v in network.overview(client, [SUB], None, 80, 90)["vnets"]]
+    assert ordered == [("b-ok", HEALTHY), ("a-empty", INFO)]

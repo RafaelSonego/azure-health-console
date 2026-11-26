@@ -66,14 +66,18 @@ def normalise_instance(text):
     if "://" not in text:
         text = f"https://{text}"
     parts = urlsplit(text)
-    host = parts.netloc.lower()
+    try:
+        host, port = (parts.hostname or "").lower(), parts.port  # never a user:password@ part
+    except ValueError:  # a port that isn't a number
+        return ""
     if host and "." not in host:
         host = f"{host}.service-now.com"
-    return f"https://{host}" if host else ""
+    return f"https://{host}{f':{port}' if port and port != 443 else ''}" if host else ""
 
 
 def host_of(instance):
-    return urlsplit(instance or "").netloc.lower()
+    """The instance's host (and port when not 443), from any form `normalise_instance` takes."""
+    return urlsplit(normalise_instance(instance)).netloc
 
 
 def check_read_only(method, url, host, tables):
@@ -97,6 +101,7 @@ class ServiceNowClient(GuardedClient):
 
     def check(self, method, url, **request):
         check_read_only(method, url, self.host, self.tables)
+        guarded.refuse_local_host("ServiceNow", self.host)
 
     def unreachable(self, method, url, error):
         return ServiceNowError(f"ServiceNow ({self.host}) didn't answer: {error}. {ASLEEP_HINT}", "unreachable")
@@ -105,10 +110,12 @@ class ServiceNowClient(GuardedClient):
         """`typed`: secrets typed on the page but not saved yet, so Test can check them first."""
         self.cfg = cfg
         self.typed = {k: v for k, v in (typed or {}).items() if v}
-        self.instance = cfg["instance"].rstrip("/")
+        self.instance = normalise_instance(cfg["instance"])
         self.host = host_of(self.instance)
         self.tables = [t for t in cfg["tables"] if TABLE_NAME.match(t)]
         self._session = session or requests.Session()
+        if isinstance(self._session, requests.Session):
+            self._session.mount("https://", guarded.NotLocalAdapter())
 
     # -------------------------------------------------------------- auth
 

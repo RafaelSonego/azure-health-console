@@ -19,6 +19,7 @@ from ..arm import WriteBlocked
 AKS_AAD_SERVER_APP = "6dae42f8-4368-4678-94ff-3960e28e3630/.default"
 CONNECT_TIMEOUT = 5
 READ_TIMEOUT = 30
+MAX_RESPONSE_BYTES = 128 * 1024 * 1024  # one answer from the API server; a bigger one is refused, not decoded
 CLIENT_TTL_SECONDS = 600
 
 # Read paths only. Secrets, configmaps, exec, attach and port-forward are deliberately absent.
@@ -27,11 +28,22 @@ _ALLOWED = [re.compile(p) for p in (
     r"^/api/v1/(nodes|pods|events)$",
     r"^/api/v1/namespaces/[^/]+/pods$",
     r"^/api/v1/namespaces/[^/]+/pods/[^/]+/log$",
+    r"^/api/v1/namespaces/[^/]+/pods/[^/]+$",
+    r"^/api/v1/namespaces/[^/]+/configmaps/[^/]+$",  # read for host names only (explore/dependencies.py); never Secrets
+    r"^/apis/apps/v1/namespaces/[^/]+/(deployments|statefulsets|daemonsets)/[^/]+$",
+    r"^/apis/apps/v1/namespaces/[^/]+/(deployments|statefulsets|daemonsets)$",
     r"^/apis/apps/v1/(deployments|statefulsets|daemonsets|replicasets)$",
     r"^/apis/batch/v1/(jobs|cronjobs)$",
     r"^/apis/autoscaling/v2/horizontalpodautoscalers$",
     r"^/apis/policy/v1/poddisruptionbudgets$",
     r"^/apis/metrics\.k8s\.io/v1beta1/(pods|nodes)$",
+    r"^/api/v1/events$",  # cluster-wide, read with fieldSelector type=Warning (explore/aks.py api_warning_events)
+    # one namespace's lists, for a workload's details (explore/workload_detail.py)
+    r"^/api/v1/namespaces/[^/]+/events$",
+    r"^/apis/apps/v1/namespaces/[^/]+/replicasets$",
+    r"^/apis/autoscaling/v2/namespaces/[^/]+/horizontalpodautoscalers$",
+    r"^/apis/policy/v1/namespaces/[^/]+/poddisruptionbudgets$",
+    r"^/apis/metrics\.k8s\.io/v1beta1/namespaces/[^/]+/pods$",
 )]
 
 
@@ -65,6 +77,21 @@ class _CaAdapter(HTTPAdapter):
         return super().init_poolmanager(*args, **kwargs)
 
 
+def _capped(response, path):
+    """The body, read up to MAX_RESPONSE_BYTES; past that the read stops and the list is refused with a way round it."""
+    if not hasattr(response, "iter_content"):
+        return None
+    total, chunks = 0, []
+    for chunk in response.iter_content(1024 * 1024):
+        total += len(chunk)
+        if total > MAX_RESPONSE_BYTES:
+            response.close()
+            raise KubeUnavailable(f"The Kubernetes API's answer for {path} is over {MAX_RESPONSE_BYTES // 2**20} MB, "
+                                  "so it wasn't read. Narrow it to one namespace.")
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
 class KubeClient(GuardedClient):
     """One cluster's API server: GETs on `_ALLOWED` only, with the console's own Entra token or a kubeconfig's."""
     source = ""
@@ -91,15 +118,20 @@ class KubeClient(GuardedClient):
     def get(self, path, params=None, raw=False):
         check_kube_read("GET", path)  # before the token is fetched, so a refused path costs nothing
         response = self.send(self._session, "GET", f"{self.server}{path}", (CONNECT_TIMEOUT, READ_TIMEOUT),
-                             params=params, headers={"Authorization": f"Bearer {self._token_source()}"})
+                             params=params, headers={"Authorization": f"Bearer {self._token_source()}"}, stream=True)
         if response.status_code in (401, 403):
             raise KubeUnavailable(access.message(
                 f"the Kubernetes API ({path}, HTTP {response.status_code})", access.KUBERNETES_ROLE,
                 _kube_message(response)))
         if response.status_code == 404:
+            if hasattr(response, "close"):
+                response.close()  # streamed: hand the connection back unread
             return None
         response.raise_for_status()
-        return response.text if raw else response.json()
+        body = _capped(response, path)
+        if body is None:  # a stand-in response without a body stream
+            return response.text if raw else response.json()
+        return body.decode(response.encoding or "utf-8", "replace") if raw else json.loads(body)
 
     def items(self, path, params=None):
         # resourceVersion=0 lets the API server answer from its watch cache instead of reading etcd.

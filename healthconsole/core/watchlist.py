@@ -5,7 +5,7 @@ from pathlib import Path
 
 from . import baseline, snapshot, yamlio
 from .arm import ArmError
-from .localfiles import write_private_text
+from .localfiles import read_trusted, write_private_text
 
 _lock = threading.Lock()
 
@@ -28,7 +28,7 @@ class Watchlist:
     def _read(self):
         if not self.path.is_file():
             return []
-        data = yamlio.load(self.path.read_bytes()) or {}
+        data = yamlio.load(read_trusted(self.path, "Watchlist")) or {}
         items = []
         for i in data.get("items") or []:
             if isinstance(i, dict) and i.get("id"):
@@ -75,7 +75,7 @@ def check(client, items, discovery_options, health_options, profiles, progress=N
             else:
                 snap = snapshot.build(client, item["id"], discovery_options, health_options, profiles)
             problems = [f"{n.name}: {s.name}: {s.detail}" for n in snap.nodes for s in n.problems()]
-            movers = baseline.compare(snap.nodes, health_options.window_minutes)["movers"]
+            movers = baseline.compare_with(snap.nodes, health_options)["movers"]
             rows.append({**item, "status": snap.status, "counts": snap.counts(), "problems": problems[:5],
                          "checked_at": snap.taken_at, "movers": [{**m, "move": baseline.describe(m)} for m in movers]})
         except ArmError as error:

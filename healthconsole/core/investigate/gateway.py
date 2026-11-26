@@ -12,7 +12,7 @@ from .appinsights import kql_string
 APIM_TYPE = "microsoft.apimanagement/service"
 APIM_API_VERSION = "2022-08-01"
 DIAGNOSTICS_API_VERSION = "2021-05-01-preview"
-MAX_GATEWAYS = 10
+MAX_GATEWAYS = 100  # only bounds a huge tenant: each is two reads, eight at a time
 GATEWAY_SPREAD = timedelta(minutes=2)
 GATEWAY_ROWS = 50
 URL_PATH = re.compile(r"^/[A-Za-z0-9/_.~%:@!$&'()*+,;=-]{0,300}$")
@@ -49,15 +49,15 @@ def link(client, service_id, picked=""):
             "candidates": candidates if len(candidates) > 1 else []}
 
 
-def _workspace_logs(client, service_id):
-    """(whether gateway logs go to a Log Analytics workspace, whether into their own table)."""
+def _workspace_logs(client, service_id, categories=GATEWAY_LOG_CATEGORIES):
+    """(whether its logs of `categories` go to a Log Analytics workspace, whether into their own table)."""
     payload = client.get(f"{service_id}/providers/microsoft.insights/diagnosticSettings", DIAGNOSTICS_API_VERSION,
                          tolerate=(400, 403, 404)) or {}
     for setting in payload.get("value") or []:
         props = setting.get("properties") or {}
         enabled = {(log.get("category") or log.get("categoryGroup") or "").lower()
                    for log in props.get("logs") or [] if log.get("enabled")}
-        if props.get("workspaceId") and enabled & GATEWAY_LOG_CATEGORIES:
+        if props.get("workspaceId") and enabled & set(categories):
             return True, (props.get("logAnalyticsDestinationType") or "").lower() == "dedicated"
     return False, False
 
@@ -80,7 +80,7 @@ def gateways(client, subscriptions):
             out["error"] = appinsights.why(error)
         return out
 
-    with ThreadPoolExecutor(max_workers=4) as pool:
+    with ThreadPoolExecutor(max_workers=8) as pool:
         found = list(pool.map(read, rows[:MAX_GATEWAYS]))
     notes = [f"Read {MAX_GATEWAYS} of {len(rows)} API Management services in scope (A–Z); narrow the scope for the rest."]\
         if len(rows) > MAX_GATEWAYS else []
@@ -107,9 +107,12 @@ def log_queries(service_id, at, path=""):
             {"label": "AzureDiagnostics", "query": legacy, "timespan": span}]
 
 
-def logs(client, service_id, at, path=""):
-    """{"rows", "table", "queries", "errors"}: the first table with rows answers."""
+def logs(client, service_id, at, path="", dedicated=None):
+    """{"rows", "table", "queries", "errors"}: the first table with rows answers; the service's own table first
+    (`dedicated`, from its diagnostic setting), and when it's known to log to AzureDiagnostics that one alone."""
     queries, errors = log_queries(service_id, at, path), []
+    if dedicated is False:
+        queries = queries[1:]
     for query in queries:
         try:
             rows = aks.resource_logs(client, service_id, query["query"], query["timespan"])

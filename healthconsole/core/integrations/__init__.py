@@ -69,11 +69,16 @@ def servicenow_status(cfg, typed=None):
     for field in fields:
         if stored[field]:
             continue
+        variable = secrets.env_name(servicenow.TARGET, field)
         if field == "refresh_token":
             problems.append("Not signed in yet: click Sign in with ServiceNow.")
+        elif host and secrets.env_unbound(servicenow.TARGET, host, field):
+            problems.append(f"{variable} is set, but it's sent only to the instance {secrets.SERVICENOW_INSTANCE_ENV} "
+                            f"names ({secrets.env_instance() or 'not set'}). Set {secrets.SERVICENOW_INSTANCE_ENV}={host} "
+                            "and restart the console, or type the secret here and Save.")
         else:
-            problems.append(f"No {SECRET_LABELS[field]} yet: type it and Save, or set the "
-                            f"{secrets.env_name(servicenow.TARGET, field)} environment variable.")
+            problems.append(f"No {SECRET_LABELS[field]} yet: type it and Save, or set the {variable} environment "
+                            f"variable with {secrets.SERVICENOW_INSTANCE_ENV}={host or 'your instance'}.")
     if not cfg["tables"]:
         problems.append("No tables are selected.")
     return {"kind": "servicenow", "name": cfg.get("name") or "ServiceNow", "enabled": cfg["enabled"],

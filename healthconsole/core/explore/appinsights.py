@@ -11,12 +11,13 @@ from ..health import METRICS_API_VERSION
 
 API_VERSION = "2018-04-20"
 COMPONENT_TYPE = "microsoft.insights/components"
-WINDOWS = {"1h": 1, "6h": 6, "24h": 24}
+WINDOWS = {"1h": 1, "6h": 6, "24h": 24, "3d": 72, "7d": 168, "14d": 336, "30d": 720}
+WEEK_HOURS = 7 * 24
 COMPONENT_ID = re.compile(r"/subscriptions/[^/\s]+/resourcegroups/[^/\s]+/providers/microsoft\.insights/components/[^/\s]+", re.I)
 
 # `last` is reserved in this endpoint's KQL, hence `lastSeen`.
 QUERIES = {
-    "roles": "requests | summarize total=count(), failed=countif(success == false), "
+    "roles": "requests | summarize total=sum(itemCount), failed=sumif(itemCount, success == false), "
              "p95=round(percentile(duration, 95), 0) by role=cloud_RoleName | top 20 by total",
     "availability": "availabilityResults | summarize runs=count(), failed=countif(success == 0), "
                     "lastSeen=max(timestamp) by test=name, location | top 20 by failed",
@@ -42,9 +43,14 @@ def _rows(payload):
     return rows
 
 
+# KQL over weeks of a busy component can take longer than other Azure reads the first time it's asked (measured: >30 s
+# cold, 3 s warm, over 30 days of 17 million failures); every other read keeps the client's 30 s.
+QUERY_TIMEOUT_SECONDS = 90
+
+
 def query(client, component_id, kql, start, end):
     """Rows of one KQL query on a component's own endpoint, over start–end."""
-    return _rows(client.get(f"{component_id}/query", API_VERSION,
+    return _rows(client.get(f"{component_id}/query", API_VERSION, timeout=QUERY_TIMEOUT_SECONDS,
                             params={"query": kql, "timespan": f"{iso(start)}/{iso(end)}"}))
 
 
@@ -80,7 +86,8 @@ def insights(client, component_id, window="1h"):
     from ..investigate.appinsights import AppInsightsSource  # it builds on this module, so imported here
     source = AppInsightsSource(client, component_id)
     jobs = {key: (kql, start, end) for key, kql in QUERIES.items()}
-    jobs["roles_week"] = (QUERIES["roles"], start - timedelta(days=7), end - timedelta(days=7))
+    if WINDOWS[window] <= WEEK_HOURS:  # "same window last week" only means something for a window up to a week
+        jobs["roles_week"] = (QUERIES["roles"], start - timedelta(days=7), end - timedelta(days=7))
     shared = ("operations", "exceptions", "dependencies")
     results, errors, sent = {}, [], [{"section": key, "query": kql} for key, kql in QUERIES.items()]
 
@@ -103,7 +110,7 @@ def insights(client, component_id, window="1h"):
             sent += [{"section": key, "query": q["query"]} for q in queries]
             errors += [e for e in problems if e not in errors]
     return {"component_id": component_id, "window": window, "from": iso(start), "to": iso(end),
-            "roles": _merge_roles(results["roles"], results["roles_week"]), "now": results["now"],
+            "roles": _merge_roles(results["roles"], results.get("roles_week", [])), "now": results["now"],
             **{key: results[key] for key in (*shared, "availability")}, "queries": sent, "errors": errors}
 
 
@@ -160,7 +167,7 @@ def _group_key(resource_id):
 
 
 # ------------------------------------------------------------------ Triage: failure spikes from metrics
-MAX_COMPONENTS = 50
+MAX_COMPONENTS = 1000  # Triage's card measures every component; this only bounds a huge tenant
 METRICS = "requests/count,requests/failed,exceptions/count"
 TREND_HOURS = 24
 RESULT_CODE = "request/resultCode"
@@ -178,21 +185,28 @@ def _buckets(payload):
     return out
 
 
-def _server_errors(payload):
-    """Failed requests whose result code is 5xx, from a metrics answer split by result code."""
-    total = 0
+def _codes(payload):
+    """{result code: failed requests} from a metrics answer split by result code. Codes are as Azure gives them, e.g.
+    "0 [not sent in full (see exception telemetries)]" for a response cut short."""
+    out = {}
     for metric in payload.get("value") or []:
         for series in metric.get("timeseries") or []:
             code = next((str(m.get("value") or "") for m in series.get("metadatavalues") or []
                          if ((m.get("name") or {}).get("value") or "").lower() == RESULT_CODE.lower()), "")
-            if code.startswith("5"):
-                total += sum(point.get("count") or 0 for point in series.get("data") or [])
-    return total
+            count = sum(point.get("count") or 0 for point in series.get("data") or [])
+            if count:
+                out[code] = out.get(code, 0) + count
+    return out
+
+
+def _server_errors(payload):
+    """Failed requests whose result code is 5xx, from a metrics answer split by result code."""
+    return sum(count for code, count in _codes(payload).items() if code.startswith("5"))
 
 
 def server_errors(client, rows):
-    """{component ID: (5xx in the last hour or None, error or None)}: failed requests split by result code, one
-    metrics GET each, eight at a time."""
+    """{component ID: (5xx in the last hour or None, error or None, {code: failed})}: failed requests split by result
+    code, one metrics GET each, eight at a time."""
     end = datetime.now(timezone.utc).replace(second=0, microsecond=0)
     params = {"metricnames": "requests/failed", "aggregation": "count", "interval": "PT1H",
               "timespan": f"{iso(end - timedelta(hours=1))}/{iso(end)}", "$filter": f"{RESULT_CODE} eq '*'", "top": "100"}
@@ -200,37 +214,69 @@ def server_errors(client, rows):
     def read(row):
         try:
             payload = client.get(f"{row['id']}/providers/microsoft.insights/metrics", METRICS_API_VERSION, params=params)
-            return row["id"], (_server_errors(payload or {}), None)
+            codes = _codes(payload or {})
+            return row["id"], (sum(n for code, n in codes.items() if code.startswith("5")), None, codes)
         except ArmError as error:
-            return row["id"], (None, error)
+            return row["id"], (None, error, {})
 
     with ThreadPoolExecutor(max_workers=8) as pool:
         return dict(pool.map(read, rows))
 
 
-def assess(counts):
+RULES = {"failed_min": 5, "failed_rate_points": 1, "exceptions_min": 10, "exceptions_percent": 200,
+         "critical_rate_percent": 20, "critical_failed_min": 20}  # settings' appinsights.*, when none are given
+
+
+def failing_more(failed, rate, rate_wk, rules=None):
+    """The failure rule shared by the spike card, Investigate and Path's requests hop (appinsights.* settings)."""
+    r = {**RULES, **(rules or {})}
+    return failed >= r["failed_min"] and (rate_wk is None or (rate or 0) > rate_wk + r["failed_rate_points"])
+
+
+def failing_critical(failed, rate, rules=None):
+    r = {**RULES, **(rules or {})}
+    return (rate or 0) >= r["critical_rate_percent"] and failed >= r["critical_failed_min"]
+
+
+def assess(counts, rules=None):
     """(status, detail, causes) when failures or exceptions are up on last week, else None; causes names which
     ("failed", "exceptions")."""
+    r = {**RULES, **(rules or {})}
     (total, total_wk), (failed, failed_wk), (exc, exc_wk) = (counts.get(m, (0, 0)) for m in METRICS.split(","))
     rate, rate_wk = pct(failed, total), pct(failed_wk, total_wk)
-    failing = failed >= 5 and (rate_wk is None or (rate or 0) > rate_wk + 1)
-    throwing = exc >= 10 and exc >= 2 * exc_wk
+    failing = failing_more(failed, rate, rate_wk, r)
+    throwing = exc >= r["exceptions_min"] and exc >= r["exceptions_percent"] / 100 * exc_wk
     if not failing and not throwing:
         return None
     parts = []
     if failing:
-        parts.append(f"{failed:,} of {total:,} requests failed ({rate}%), same hour last week {rate_wk if rate_wk is not None else 0}%")
+        parts.append(f"failing more: {rate}% of requests vs {rate_wk if rate_wk is not None else 0}% last week "
+                     f"({failed:,} of {total:,} failed)")
     if throwing:
-        parts.append(f"{exc:,} exceptions, last week {exc_wk:,}")
-    critical = failing and (rate or 0) >= 20 and failed >= 20
+        parts.append(f"exceptions {exc / exc_wk:.1f}× last week ({exc:,} vs {exc_wk:,})" if exc_wk
+                     else f"exceptions: {exc:,}, none last week")
+    critical = failing and failing_critical(failed, rate, r)
     causes = [name for name, hit in (("failed", failing), ("exceptions", throwing)) if hit]
     return ("critical" if critical else "warning"), "; ".join(parts), causes
 
 
-def summary(counts):
-    """One component's last hour against the same hour last week, its spike verdict and 24 h trend, from last_hour."""
+def steady(counts, rules=None):
+    """("warning", detail, ["steady"]) when a component fails a lot but no more than last week: `assess` only sees
+    change, so an app failing 70% of its requests every hour would read as fine. Same critical rate and count."""
+    r = {**RULES, **(rules or {})}
+    (total, _), (failed, failed_wk), _ = (counts.get(m, (0, 0)) for m in METRICS.split(","))
+    rate, rate_wk = pct(failed, total), pct(failed_wk, (counts.get(METRICS.split(",")[0]) or (0, 0))[1])
+    if not failing_critical(failed, rate, r):
+        return None
+    return ("warning", f"failing a lot, as last week: {rate}% of requests ({failed:,} of {total:,} failed), "
+                       f"last week {rate_wk if rate_wk is not None else 0}%", ["steady"])
+
+
+def summary(counts, rules=None):
+    """One component's last hour against the same hour last week, its verdict (worse than last week, else failing a
+    lot as last week) and 24 h trend, from last_hour. Triage's spike card uses `assess` alone: it is about change."""
     (total, total_wk), (failed, failed_wk), (exceptions, exceptions_wk) = (counts.get(m, (0, 0)) for m in METRICS.split(","))
-    verdict = assess(counts)
+    verdict = assess(counts, rules) or steady(counts, rules)
     return {"requests": total, "failed": failed, "failed_pct": pct(failed, total), "exceptions": exceptions,
             "week": {"requests": total_wk, "failed": failed_wk, "failed_pct": pct(failed_wk, total_wk),
                      "exceptions": exceptions_wk},
@@ -238,13 +284,14 @@ def summary(counts):
             "causes": verdict[2] if verdict else [], "trend": (counts.get("trend") or {}).get("requests/failed", [])}
 
 
-def measure(client, component_id):
+def measure(client, component_id, rules=None):
     """(summary with its last hour's 5xx, error or ""): last_hour and server_errors for one component."""
     row = {"id": component_id}
     (_, counts, error), = last_hour(client, [row])
     if error:
         return None, why(error)
-    return {**summary(counts), "server_errors": server_errors(client, [row])[component_id][0]}, ""
+    fives, _error, codes = server_errors(client, [row])[component_id]
+    return {**summary(counts, rules), "server_errors": fives, "codes": codes}, ""
 
 
 def last_hour(client, rows):
@@ -266,7 +313,7 @@ def last_hour(client, rows):
         return list(pool.map(read, rows))
 
 
-def spikes(client, subscriptions, rg_clause=""):
+def spikes(client, subscriptions, rg_clause="", rules=None):
     """The Triage card: components in scope whose last hour fails or throws more than the same hour last week."""
     rows = client.query("Resources | where type =~ 'microsoft.insights/components'"
                         f" | project id, name, type, kind, resourceGroup, subscriptionId{rg_clause} | order by name asc",
@@ -274,7 +321,7 @@ def spikes(client, subscriptions, rg_clause=""):
     checked = rows[:MAX_COMPONENTS]
     items, unread = [], 0
     for row, counts, error in last_hour(client, checked):
-        verdict = assess(counts) if counts is not None else None
+        verdict = assess(counts, rules) if counts is not None else None
         if error:
             unread += 1
         elif verdict:
@@ -291,4 +338,5 @@ def spikes(client, subscriptions, rg_clause=""):
     return {"key": "appinsights", "title": "App Insights: failure spikes",
             "description": "Last hour's failed requests or exceptions up on the same hour last week",
             "items": items, "error": " ".join(notes) or None, "checked": len(checked), "total": len(rows),
+            "rules": {**RULES, **(rules or {})},
             "status": next((s for s in ("critical", "warning") if any(i["status"] == s for i in items)), None)}

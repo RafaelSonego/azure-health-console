@@ -6,9 +6,11 @@ import os
 import re
 from pathlib import Path
 
-from . import yamlio
+from . import localfiles, yamlio
 
 DEFAULT_PATH = Path("~/.config/azure-health-console/config.yaml")
+
+LOOK_BACK_HOURS = (1, 6, 24, 72, 168, 336, 720)  # what Workloads' Look back offers (a workspace keeps 30 days by default)
 
 DEFAULTS = {
     "default_tenant": None,
@@ -17,17 +19,34 @@ DEFAULTS = {
               "inbound_limit": 25, "inbound_scope": "subscription"},
     "health": {"window_minutes": 15, "compare_last_week": True, "changes_hours": 24, "alert_hours": 24,
                "critical_max_severity": 1, "warning_max_severity": 2, "heuristic_limit": 8,
-               "detectors": True, "expiry_warning_days": 30, "expiry_critical_days": 7},
+               "detectors": True, "expiry_warning_days": 30, "expiry_critical_days": 7, "baseline_change_percent": 200},
     "network": {"subnet_warning_percent": 80, "subnet_critical_percent": 90},
+    "alerts": {"history_hours": 24},
     "alert_check": {"days": 7, "min_buckets": 24, "always_on_percent": 50, "rare_percent": 5, "change_percent": 50},
     "profiles_dir": "~/.config/azure-health-console/profiles",
     "exports_dir": "exports",
     "cache_dir": "~/.cache/azure-health-console",
+    # This machine's log: errors, actions and requests sent (Settings → Logs); never tokens or secret values.
+    "logs": {"dir": "~/.local/state/azure-health-console/logs", "keep_days": 30},
     "pdf_font": None,
-    "aks": {"kubeconfig_paths": [], "fetch_credentials": True},
+    # AKS Workloads' rules of thumb (the checks say which threshold they used); Kubernetes' own rules aren't here.
+    "aks": {"kubeconfig_paths": [], "fetch_credentials": True, "memory_near_limit_percent": 85, "cpu_near_limit_percent": 80,
+            "cpu_above_request_percent": 90, "cpu_idle_percent": 30, "hpa_target_high_percent": 85, "hpa_near_max_percent": 80,
+            "hpa_overshoot_percent": 150, "pool_requests_percent": 80, "restarts_warning": 5, "leftover_hours": 24,
+            "rollout_hours": 24, "node_image_warning_days": 60, "node_image_critical_days": 180,
+            "restarts_look_back_hours": 1, "oom_look_back_hours": 24, "events_look_back_hours": 1,
+            "oom_near_limit_percent": 90, "oom_node_full_percent": 95},
+    # When an App Insights component's last hour counts as worse than the same hour last week (Triage, Investigate,
+    # Path's requests): the same rule everywhere.
+    "appinsights": {"failed_min": 5, "failed_rate_points": 1, "exceptions_min": 10, "exceptions_percent": 200,
+                    "critical_rate_percent": 20, "critical_failed_min": 20},
+    "path": {"drop_percent": 50, "drop_min": 100, "restarts_min": 3, "restarts_critical": 10},
+    "security": {"risky_ports": [22, 3389, 1433, 3306, 5432, 6379, 27017, 5985, 5986]},
     "triage": {"scope": "none", "changes_hours": 1, "include_system_changes": False,
                "secret_scan_max_vaults": 200, "auto_refresh_minutes": 0,
-               "azure_status_feed": True},
+               "azure_status_feed": True, "capacity_near_max_percent": 80, "resolved_hours": 24},
+    "cost": {"spike_percent": 200},
+    "vulnerabilities": {"eol_warning_days": 90},
     "watchlist_file": "~/.config/azure-health-console/watchlist.yaml",
     "integrations": {"servicenow": [], "monitors": []},
     "summary": {"top_items": 3, "readiness_quick": True, "budget_warn_percent": 80, "compare_hours": 24,
@@ -35,6 +54,16 @@ DEFAULTS = {
     "personas": {},
     "persona": "",
     "updates": {"check": True},
+    # Access audit: actions and data actions that don't count (config.example.yaml says why each).
+    "audit": {"keep_days": 7, "ignore_actions": [
+        "Microsoft.Support/*", "*/*download*/action", "Microsoft.Insights/alertRules/*", "Microsoft.Resources/deployments/*",
+        "*/operationResults/*", "*/register/action", "Microsoft.ResourceHealth/*/action",
+        "Microsoft.Storage/storageAccounts/blobServices/generateUserDelegationKey/action",
+        "*/readMetadata/action", "Microsoft.KeyVault/vaults/*/read",
+        "Microsoft.OperationalInsights/*/read", "Microsoft.OperationalInsights/workspaces/jobs/export/action",
+        "Microsoft.Insights/*/read", "Microsoft.Monitor/*/read", "*/logstream/action",
+        "Microsoft.ContainerService/managedClusters/*/read",
+        "Microsoft.ContainerService/managedClusters/listClusterUserCredential/action"]},
 }
 # One ServiceNow connection's settings; `servicenow` is a list of these, each with a unique name.
 SERVICENOW_DEFAULTS = {"name": "ServiceNow", "enabled": False, "instance": "", "auth": "basic", "username": "",
@@ -59,7 +88,9 @@ MONITOR_FIELDS = {
 }
 # favourite_* and tag_filters are read only until moved into saved scopes (legacy_scope); open_with replaced triage.scope.
 LEGACY_TENANT_KEYS = ("favourite_subscriptions", "favourite_resource_groups", "tag_filters")
-_TENANT_KEYS = {*LEGACY_TENANT_KEYS, "integrations", "saved_scopes", "alert_rules", "open_with"}
+_TENANT_KEYS = {*LEGACY_TENANT_KEYS, "integrations", "saved_scopes", "alert_rules", "open_with", "workload_links"}
+# Workload path: a workload's confirmed front doors (decision 150); each field is checked in _check_workload_links.
+WORKLOAD_LINK_KEYS = {"key", "name", "cluster_id", "namespace", "kind", "site_id", "apim", "agw", "app", "component"}
 SAVED_SCOPE_KEYS = {"name", "subscriptions", "resource_groups", "tag_filters", "connections"}
 # What the page opens with: nothing, every subscription, or a saved scope by name (so no scope may use these two).
 OPEN_WITH = ("none", "all")
@@ -121,6 +152,9 @@ SCHEMA = [
     ("triage", "include_system_changes", "bool", "Include changes made by Azure itself (noisy)."),
     ("triage", "azure_status_feed", "bool",
      "Read the public Azure status feed (azure.status.microsoft) for Azure-wide outages on the service status card."),
+    ("triage", "capacity_near_max_percent", "int",
+     "Triage lists a resource whose autoscale instance count is at this share of its maximum or more (at the maximum is red)."),
+    ("triage", "resolved_hours", "int", "Triage keeps showing Service Health issues this many hours after they're resolved."),
     ("triage", "secret_scan_max_vaults", "int",
      "The Secrets tab scans Key Vaults automatically up to this many vaults; above it, a Scan now button."),
     ("graph", "auto", "bool",
@@ -142,8 +176,19 @@ SCHEMA = [
     ("health", "expiry_warning_days", "int", "Secrets, keys and certificates turn yellow this many days before expiry."),
     ("health", "expiry_critical_days", "int", "...and red this many days before expiry (expired is always red)."),
     ("health", "detectors", "bool", "Run Azure's health/risk detectors in each snapshot (AKS, App Service, Redis)."),
+    ("health", "baseline_change_percent", "int",
+     "A group's \"moved most against last week\": a metric at this share of last week's value or more (200 = doubled), "
+     "or at its inverse or less (halved)."),
+    ("cost", "spike_percent", "int", "Cost: a day at this share of the usual day or more (the median of the 7 before) is a spike."),
+    ("vulnerabilities", "eol_warning_days", "int", "Security: an App Service runtime turns yellow this many days before its end of support."),
     ("network", "subnet_warning_percent", "int", "A subnet with this share of its usable IPs in use turns yellow."),
     ("network", "subnet_critical_percent", "int", "...and red at this share."),
+    ("audit", "keep_days", "int",
+     "Access audit: keep its last result per scope on this machine this many days, so it opens at once with its age "
+     "shown; Refresh reads it again. 0 keeps nothing. Readable only by you; Clear cached data removes it."),
+    ("alerts", "history_hours", "int",
+     "How long the Alerts bar keeps the console's own alerts, in hours (1 to 168). Kept in memory, at most 500 per "
+     "sign-in: a restart clears them."),
     ("alert_check", "days", "int", "Is this alert right?: how many days of history to read (1 to 30)."),
     ("alert_check", "min_buckets", "int", "...the fewest values needed before any verdict is given."),
     ("alert_check", "always_on_percent", "int",
@@ -153,6 +198,38 @@ SCHEMA = [
      "...now this much higher (or lower) than the same time last week counts as a change, e.g. 50 = 1.5×."),
     ("aks", "fetch_credentials", "bool",
      "Fetch the AKS user credential from Azure when no local kubeconfig context matches."),
+    ("aks", "memory_near_limit_percent", "int", "A container using this share of its memory limit or more is near being OOMKilled (red)."),
+    ("aks", "cpu_near_limit_percent", "int", "A container using this share of its CPU limit or more is being throttled (red)."),
+    ("aks", "cpu_above_request_percent", "int", "A container using more than this share of its CPU request relies on spare node CPU (yellow)."),
+    ("aks", "cpu_idle_percent", "int", "A container using less than this share of its CPU request has CPU reserved and unused (a setup note)."),
+    ("aks", "hpa_target_high_percent", "int", "An HPA utilization target above this is high: pods are nearly full before it adds more."),
+    ("aks", "hpa_near_max_percent", "int", "An HPA at this share of its maxReplicas or more has little room left (at the maximum is red)."),
+    ("aks", "hpa_overshoot_percent", "int", "An HPA metric at this share of its target or more means the request is too low (150 = 1.5×)."),
+    ("aks", "pool_requests_percent", "int", "A node pool whose pods request this share of its allocatable CPU or memory has little room left."),
+    ("aks", "restarts_warning", "int", "Container restarts from this many on are a warning; fewer are only shown."),
+    ("aks", "leftover_hours", "int", "A Failed pod older than this many hours is left over (usually already replaced): listed apart on Workloads, "
+     "and info rather than a warning on Check and the AKS card."),
+    ("aks", "rollout_hours", "int", "A rollout within this many hours shows on its workload as recent."),
+    ("aks", "node_image_warning_days", "int", "A node pool's OS image this many days old turns yellow (Nodes and Security)."),
+    ("aks", "node_image_critical_days", "int", "...and red at this age."),
+    ("aks", "restarts_look_back_hours", LOOK_BACK_HOURS, "Workloads' Look back on *default*: restarts are counted over this many hours."),
+    ("aks", "oom_look_back_hours", LOOK_BACK_HOURS, "...OOM kills are listed over this many hours (Container Insights and the monitoring tool)."),
+    ("aks", "events_look_back_hours", LOOK_BACK_HOURS, "...warning events are listed over this many hours."),
+    ("aks", "oom_near_limit_percent", "int",
+     "An OOM kill is probably the container's own limit when memory was at this share of the limit just before (no kernel message)."),
+    ("aks", "oom_node_full_percent", "int", "...and probably the node running out when the node was at this share of its memory."),
+    ("appinsights", "failed_min", "int", "App Insights: failed requests in the last hour before it can count as failing more (Triage, Investigate, Path)."),
+    ("appinsights", "failed_rate_points", "int", "...and its failure rate must be this many points above the same hour last week."),
+    ("appinsights", "exceptions_min", "int", "...exceptions in the last hour before it can count as throwing more."),
+    ("appinsights", "exceptions_percent", "int", "...and they must be at this share of the same hour last week or more (200 = doubled)."),
+    ("appinsights", "critical_rate_percent", "int", "...failing turns red at this failure rate or more..."),
+    ("appinsights", "critical_failed_min", "int", "...with at least this many failed requests."),
+    ("path", "drop_percent", "int", "Path: a hop's traffic under this share of the same hour last week is a drop..."),
+    ("path", "drop_min", "int", "...when that hour last week had at least this many requests."),
+    ("path", "restarts_min", "int", "Path: pods restarting this many times in the hour (and twice last week's) are rising..."),
+    ("path", "restarts_critical", "int", "...red from this many."),
+    ("security", "risky_ports", "ports",
+     "Security: ports that are a finding when open to the internet (comma-separated numbers)."),
     ("summary", "top_items", "int", "Summary: how many items each card lists (problems, findings, subscriptions)."),
     ("summary", "readiness_quick", "bool",
      "Summary runs Readiness's quick checks (scaling, quotas, subnets, single instances) when it opens. Kubernetes and "
@@ -173,6 +250,9 @@ SCHEMA = [
     (None, "exports_dir", "text", "Where the export command writes files."),
     (None, "cache_dir", "text", "Where costs are kept between runs (one file per tenant and account, readable only by you)."),
     (None, "pdf_font", "text", "A .ttf font for PDFs with non-Latin names; empty uses built-in fonts."),
+    ("logs", "dir", "text", "Where this machine's log is kept: errors, what was done in the console and every request it "
+     "sent (Settings → Logs). Readable only by you."),
+    ("logs", "keep_days", "int", "Days the log keeps, 1 to 365; older days are deleted."),
 ]
 
 
@@ -186,10 +266,17 @@ def _check_types(settings, where):
             raise ConfigError(f"{where}: {label} must be a whole number, 0 or more (got {value!r}).")
         if kind == "bool" and not isinstance(value, bool):
             raise ConfigError(f"{where}: {label} must be true or false (got {value!r}).")
+        if kind == "ports" and not (isinstance(value, list) and all(
+                isinstance(p, int) and not isinstance(p, bool) and 1 <= p <= 65535 for p in value)):
+            raise ConfigError(f"{where}: {label} must be a list of port numbers, 1 to 65535 (got {value!r}).")
         if kind == "text" and not isinstance(value, str):
             raise ConfigError(f"{where}: {label} must be text (got {value!r}).")
         if isinstance(kind, tuple) and (isinstance(value, bool) or value not in kind):
             raise ConfigError(f"{where}: {label} must be one of {list(kind)} (got {value!r}).")
+    if not 1 <= settings["logs"]["keep_days"] <= 365:
+        raise ConfigError(f"{where}: logs.keep_days must be 1 to 365 (got {settings['logs']['keep_days']}).")
+    if not 1 <= settings["alerts"]["history_hours"] <= 168:
+        raise ConfigError(f"{where}: alerts.history_hours must be 1 to 168 (got {settings['alerts']['history_hours']}).")
     check = settings["alert_check"]
     if not 1 <= check["days"] <= 30:
         raise ConfigError(f"{where}: alert_check.days must be 1 to 30 (got {check['days']}).")
@@ -204,6 +291,9 @@ def _check_types(settings, where):
     for tenant, entry in settings["tenants"].items():
         if "integrations" in entry:
             _check_integrations(entry["integrations"], f"{where}: tenants.{tenant}")
+    ignore = settings["audit"]["ignore_actions"]
+    if not isinstance(ignore, list) or not all(isinstance(a, str) and a.strip() for a in ignore):
+        raise ConfigError(f"{where}: audit.ignore_actions must be a list of actions, e.g. Microsoft.Support/*.")
     paths = settings["aks"]["kubeconfig_paths"]
     if not isinstance(paths, list) or not all(isinstance(p, str) for p in paths):
         raise ConfigError(f"{where}: aks.kubeconfig_paths must be a list of paths.")
@@ -218,6 +308,44 @@ def _check_types(settings, where):
         if "open_with" in entry and (not isinstance(entry["open_with"], str) or not entry["open_with"].strip()):
             raise ConfigError(f"{where}: tenants.{tenant}.open_with must be none, all or a saved scope's name.")
         check_alert_rules(entry.get("alert_rules"), f"{where}: tenants.{tenant}.alert_rules")
+        check_workload_links(entry.get("workload_links"), f"{where}: tenants.{tenant}.workload_links")
+
+
+def check_workload_links(links, where="workload_links"):
+    """Each link names its workload (an AKS one by cluster, namespace, kind and name, or an App Service by ID) and its
+    front doors: API Management APIs (service_id, api), App Gateway routes (gateway_id, listener, pool), the monitoring
+    tool's app name and an App Insights component ID, all optional."""
+    if links is None:
+        return
+    if not isinstance(links, list):
+        raise ConfigError(f"{where} must be a list.")
+    keys = set()
+    for index, link in enumerate(links):
+        label = f"{where}[{index}]"
+        if not isinstance(link, dict) or not isinstance(link.get("key"), str) or not link["key"].strip():
+            raise ConfigError(f"{label} needs a key (the workload it belongs to).")
+        unknown = set(link) - WORKLOAD_LINK_KEYS
+        if unknown:
+            raise ConfigError(f"{label} unknown key(s) {sorted(unknown)}; allowed {sorted(WORKLOAD_LINK_KEYS)}.")
+        if link["key"].lower() in keys:
+            raise ConfigError(f"{where}: two links for {link['key']}.")
+        keys.add(link["key"].lower())
+        if not (link.get("site_id") or all(isinstance(link.get(k), str) and link[k] for k in ("cluster_id", "namespace", "kind"))):
+            raise ConfigError(f"{label} needs site_id, or cluster_id, namespace and kind.")
+        for field, required in (("apim", ("service_id", "api")), ("agw", ("gateway_id", "listener", "pool"))):
+            items = link.get(field) or []
+            if not isinstance(items, list) or not all(isinstance(i, dict) and all(isinstance(i.get(r), str) and i[r] for r in required)
+                                                      for i in items):
+                raise ConfigError(f"{label}.{field} must be a list, each with {', '.join(required)}.")
+        for field in ("name", "app", "component", "site_id", "cluster_id", "namespace", "kind"):
+            if field in link and link[field] is not None and not isinstance(link[field], str):
+                raise ConfigError(f"{label}.{field} must be text.")
+
+
+def workload_links(settings, tenant):
+    """This tenant's saved workload links (its own entry, never "*")."""
+    key = next((k for k in entry_keys(settings, tenant) if settings["tenants"][k].get("workload_links")), None)
+    return [dict(link) for link in settings["tenants"][key]["workload_links"]] if key else []
 
 
 def check_alert_rules(rules, where="alert_rules"):
@@ -371,8 +499,11 @@ def load(config_path=None):
     file = Path(config_path).expanduser() if config_path else path()
     if not file.is_file():
         return copy.deepcopy(DEFAULTS)
-    data = yamlio.load(file.read_bytes()) or {}
-    return from_data(data, str(file))
+    try:
+        content = localfiles.read_trusted(file, "Settings")
+    except localfiles.UnsafePath as error:
+        raise ConfigError(str(error)) from error
+    return from_data(yamlio.load(content) or {}, str(file))
 
 
 def from_data(data, where="settings"):

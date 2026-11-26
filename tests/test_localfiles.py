@@ -50,3 +50,15 @@ def test_a_shared_cache_folder_loses_write_access_for_others_only(tmp_path):
     assert mode(shared) == 0o755  # others can no longer replace files in it; nothing else changed
     new = localfiles.private_dir(tmp_path / "fresh" / "cache")
     assert mode(new) & 0o077 == 0
+
+
+def test_reports_in_bytes_are_private_and_never_written_through_a_symlink(tmp_path):
+    target = tmp_path / "precious.txt"
+    target.write_text("keep")
+    link = tmp_path / "report.pdf"
+    link.symlink_to(target)
+    with pytest.raises(OSError, match="isn't a regular file"):
+        localfiles.write_private_bytes(link, b"%PDF")
+    assert target.read_text() == "keep"
+    localfiles.write_private_bytes(tmp_path / "new" / "r.pdf", b"%PDF")
+    assert (tmp_path / "new" / "r.pdf").read_bytes() == b"%PDF" and mode(tmp_path / "new" / "r.pdf") == 0o600

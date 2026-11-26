@@ -305,13 +305,13 @@ def _week_change(days, today):
     return recent, before
 
 
-def _spike(days, today, floor):
+def _spike(days, today, floor, factor=SPIKE_FACTOR):
     """The day two days ago against the median of the 7 before it, when it's at least SPIKE_FACTOR times that and
     above `floor`; None otherwise."""
     day = today - timedelta(days=2)
     cost = days.get(day.isoformat(), 0)
     usual = statistics.median([days.get((day - timedelta(days=i)).isoformat(), 0) for i in range(1, 8)])
-    if cost - usual < max(floor, 1.0) or cost < usual * SPIKE_FACTOR:
+    if cost - usual < max(floor, 1.0) or cost < usual * factor:
         return None
     return {"date": day.isoformat(), "cost": cost, "usual": usual, "times": round(cost / usual, 1) if usual else None}
 
@@ -335,7 +335,7 @@ def budgets_for(client, subscriptions):
     return {"budgets": found, "notes": notes}
 
 
-def _subscription_result(sub, rows, today):
+def _subscription_result(sub, rows, today, spike_factor=SPIKE_FACTOR):
     """One subscription and its groups from rows {UsageDate, ResourceGroupName, Cost, Booked}: this month (whole, and
     against the same days last month), the last 30 days, and the weekly change, spikes and trend on usage alone
     (Booked, a purchase or refund, isn't usage: a monthly reservation payment would read as a spike, then a drop)."""
@@ -374,7 +374,7 @@ def _subscription_result(sub, rows, today):
     for name, days in groups.items():
         booked = group_paid.get(name, {})
         row = {"subscription_id": sub, "name": name or SUBSCRIPTION_LEVEL, "grouped": bool(name), **figures(days, booked),
-               "spike": _spike({d: c - booked.get(d, 0) for d, c in days.items()}, today, SPIKE_MIN_SHARE * usual_day) if name else None}
+               "spike": _spike({d: c - booked.get(d, 0) for d, c in days.items()}, today, SPIKE_MIN_SHARE * usual_day, spike_factor) if name else None}
         out_groups.append(row)
     return {"subscription_id": sub, **figures(totals, paid), "currency": _currency(rows), "groups": out_groups,
             "read_at": getattr(rows, "read_at", ""), "up_to": up_to,
@@ -393,10 +393,10 @@ def _entry_rows(entry, today):
     return rows
 
 
-def _stored_result(sub, entry, today):
+def _stored_result(sub, entry, today, spike_factor=SPIKE_FACTOR):
     """One subscription from its store entry. Until the rest of last month is in (the fill reads the last 30 days of
     every subscription first), last month's figures are None, never a misleading 0."""
-    result = {**_subscription_result(sub, _entry_rows(entry, today), today), "month": _month(entry, today)}
+    result = {**_subscription_result(sub, _entry_rows(entry, today), today, spike_factor), "month": _month(entry, today)}
     if entry.get("from", "9") <= cost_store.window_start(today).isoformat():
         return result
     for row in [result, *result["groups"]]:
@@ -406,13 +406,13 @@ def _stored_result(sub, entry, today):
     return result
 
 
-def from_store(store, subscriptions, today=None, since=None):
+def from_store(store, subscriptions, today=None, since=None, spike_factor=SPIKE_FACTOR):
     """The Cost view's result for `subscriptions`, from what the store holds now. With `since` (a Refresh's start),
     it also counts the subscriptions reread from Azure since then (`refreshed` of `to_refresh`)."""
     today = today or _today()
     subs = sorted({s.lower() for s in subscriptions})
     state = store.progress(subs)
-    results = [_stored_result(sub, store.entry(sub), today) for sub in state["read"]]
+    results = [_stored_result(sub, store.entry(sub), today, spike_factor) for sub in state["read"]]
     groups = [g for r in results for g in r["groups"]]
     currencies = sorted({r["currency"] for r in results if r["currency"]})
     return {"subscriptions": sorted(results, key=lambda r: -r["last_30_days"]),
@@ -431,7 +431,8 @@ def from_store(store, subscriptions, today=None, since=None):
             "updating": sum(1 for s in subs if store.updating(s))}
 
 
-def overview(client, subscriptions, store, everything=(), progress=None, publish=None, today=None, refresh=False):
+def overview(client, subscriptions, store, everything=(), progress=None, publish=None, today=None, refresh=False,
+             spike_factor=SPIKE_FACTOR):
     """Every subscription in scope, by resource group, with spikes: asks the store to fill these first (then the
     rest of `everything`, the viewer's subscriptions) and publishes what it holds until each is in, refused or
     failed. Cancelling (Stop) stops the fill too."""
@@ -441,7 +442,7 @@ def overview(client, subscriptions, store, everything=(), progress=None, publish
     store.want(subs, everything=list(everything) or None, client=client, refresh=refresh)
     try:
         while True:
-            result = from_store(store, subs, today, since)
+            result = from_store(store, subs, today, since, spike_factor)
             if progress:
                 progress(f"Costs: {result['refreshed']} of {result['to_refresh']} reread" if since
                          else f"Costs: {result['read']} of {len(subs)} subscriptions")
@@ -451,7 +452,7 @@ def overview(client, subscriptions, store, everything=(), progress=None, publish
                        and (not store.has_recent(s) or cost_store.EARLIER in store.needs(s))]
             unrefreshed = since and result["refreshed"] < result["to_refresh"]
             if (not pending and not unrefreshed) or not store.running():
-                return {**from_store(store, subs, today, since), "done": True}
+                return {**from_store(store, subs, today, since, spike_factor), "done": True}
             if publish:
                 publish(result)
             time.sleep(WATCH_SECONDS)
@@ -475,13 +476,13 @@ def _common_group(chains):
     return next((name for name in lists[0] if name in shared), None)
 
 
-def totals(client, subscriptions, store=None, today=None, cost_type="actual"):
+def totals(client, subscriptions, store=None, today=None, cost_type="actual", spike_factor=SPIKE_FACTOR):
     """The scope's costs from the store when it holds every subscription; else in one query at the management group
     holding them all; else None (the page then runs the Cost view's job, which fills the store)."""
     today = today or _today()
     subs = sorted({s.lower() for s in subscriptions})
     if store is not None and all(store.has_recent(s) or store.refused(s) for s in subs):
-        return {**from_store(store, subs, today), "done": True}
+        return {**from_store(store, subs, today, spike_factor=spike_factor), "done": True}
     try:
         group = _common_group([r.get("chain") for r in client.query(_CHAINS, subscriptions=subs)])
     except ArmError:
@@ -500,7 +501,7 @@ def totals(client, subscriptions, store=None, today=None, cost_type="actual"):
         if sub in wanted:
             booked = float(r.get("Cost") or 0) if str(r.get("ChargeType") or "").lower() in BOOKED_CHARGES else 0
             by_sub.setdefault(sub, []).append({**r, "ResourceGroupName": "", "Booked": booked})
-    results = [{**_subscription_result(sub, by_sub.get(sub, []), today), "groups": []} for sub in subs]
+    results = [{**_subscription_result(sub, by_sub.get(sub, []), today, spike_factor), "groups": []} for sub in subs]
     currencies = sorted({r["currency"] for r in results if r["currency"]})
     return {"subscriptions": sorted(results, key=lambda r: -r["last_30_days"]), "groups": [], "spikes": [],
             "currency": currencies[0] if len(currencies) == 1 else "", "currencies": currencies, "refused": [],

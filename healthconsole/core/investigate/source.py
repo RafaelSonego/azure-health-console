@@ -3,6 +3,9 @@ same questions and shapes, and the page never needs to know which one answered.
 
 Shapes returned:
 operation: operation, role, total, failed, codes, last_seen
+code:      code, failed, failed_pct (of every failure), last_seen, trace_id, endpoints (how many), top (its busiest
+           endpoints: operation, role, failed, last_seen), reasons (for responses not sent in full and code 0: the
+           exceptions on them by type and where it broke: type, problem, requests, message, trace_id, last_seen)
 exception: type, operation, role, total, last_seen, trace_id, instance, message (the latest one's)
 dependency: type, target, role, total, failed, failed_pct, codes, p95_ms, last_seen, trace_id (one failed call's)
 sample:    time, trace_id, role, instance, code, duration_ms, url, success
@@ -14,7 +17,8 @@ from datetime import datetime, timedelta, timezone
 
 from ..guarded import ServiceError
 
-WINDOWS = {"1h": 1, "6h": 6, "24h": 24}
+# Application Insights keeps 30 to 730 days per component (30 is the default), so 30 days fits nearly every one.
+WINDOWS = {"1h": 1, "6h": 6, "24h": 24, "3d": 72, "7d": 168, "14d": 336, "30d": 720}
 TRACE_SPREAD = timedelta(minutes=30)  # a request's spans are read this far either side of its time
 MAX_OPERATIONS, MAX_SAMPLES, MAX_SPANS, MAX_LINES = 25, 20, 500, 100
 # W3C trace IDs are 32 hex characters; older App Insights SDKs used "|abc.1." style IDs.
@@ -104,6 +108,13 @@ class TraceSource:
     def exceptions_queries(self, window):
         raise NotImplementedError
 
+    def codes_queries(self, window):
+        raise NotImplementedError
+
+    def codes(self, window):
+        """Failed requests in the window by HTTP result code, most first, each with the endpoints that return it."""
+        raise NotImplementedError
+
     def dependencies_queries(self, window):
         raise NotImplementedError
 
@@ -115,11 +126,12 @@ class TraceSource:
         """Exceptions in the window by type, operation and service, most first, each with its latest trace."""
         raise NotImplementedError
 
-    def samples_queries(self, operation, role, window, failed=True):
+    def samples_queries(self, operation, role, window, failed=True, code=None):
         raise NotImplementedError
 
-    def samples(self, operation, role, window, failed=True):
-        """The latest requests of one operation (failed only, by default), newest first."""
+    def samples(self, operation, role, window, failed=True, code=None):
+        """The latest requests of one operation (failed only, by default; only those with `code` if given), newest
+        first."""
         raise NotImplementedError
 
     def trace_queries(self, trace_id, at=None):

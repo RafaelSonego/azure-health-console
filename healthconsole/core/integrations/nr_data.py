@@ -8,8 +8,9 @@ from .. import alert_check
 
 from .matching import AZURE_ID, cached, match, name_index
 from .newrelic import NewRelicClient, NewRelicError
-from .provider import (ALERT_HISTORY, ALERTS, ENTITIES, ENTITY_SEARCH_LIMIT, LOG_LIMIT, LOGS, PARTITION, REPORT_LIMIT,
-                       SEARCHABLE_NAME, Provider, ProviderError, match_entity)
+from .provider import (ALERT_HISTORY, ALERTS, ENTITIES, ENTITY_SEARCH_LIMIT, LOG_LIMIT, LOGS, OOM_KILLS, PARTITION, WARNING_EVENTS, WORKLOADS,
+                       REQUESTS, RUNTIME_MEMORY, WORKLOAD_PODS, WORKLOAD_USAGE,
+                       REPORT_LIMIT, SEARCHABLE_NAME, Provider, ProviderError, match_entity)
 
 CACHE_SECONDS = 60
 MAX_ENTITIES = 1000
@@ -73,7 +74,8 @@ def _window(window):
 class NewRelicProvider(Provider):
     kind = "newrelic"
     label = "New Relic"
-    capabilities = (ALERTS, ENTITIES, LOGS, ALERT_HISTORY)
+    capabilities = (ALERTS, ENTITIES, LOGS, ALERT_HISTORY, OOM_KILLS, WARNING_EVENTS, WORKLOADS, REQUESTS, WORKLOAD_PODS, WORKLOAD_USAGE,
+                    RUNTIME_MEMORY)
     reports = ("errors", "slow")
 
     def __init__(self, monitor, client=None):
@@ -278,6 +280,8 @@ class NewRelicProvider(Provider):
         account, name = ref.get("account_id"), (ref.get("condition") or "").strip()
         if not account or not name:
             raise ProviderError("This issue doesn't name its condition and account, so its rule can't be read.")
+        if int(account) not in self.accounts:
+            raise ProviderError(f"Account {account} isn't one of {self.monitor['name']}'s accounts, so its rule isn't read.")
         found = [c for c in self.client.nrql_conditions(account, name) if (c.get("name") or "").lower() == name.lower()]
         if not found:
             raise ProviderError(f"No NRQL condition named '{name}' in account {account}: it may be another kind of "
@@ -351,6 +355,254 @@ class NewRelicProvider(Provider):
                 "queries": [{"label": f"NRQL, account {rule['account_id']}" + (f", read {i + 1} of {len(nrqls)}" if len(nrqls) > 1 else ""),
                              "query": nrql} for i, nrql in enumerate(nrqls)]}
 
+    def oom_kills(self, cluster_name, hours, refresh=False):
+        """See `Provider.oom_kills`: the node's OOM events matched to the container that restarted just after."""
+        if not K8S_CLUSTER.match(cluster_name or ""):
+            raise ProviderError(f"'{cluster_name}' isn't a cluster name New Relic could have.")
+        lists = _oom_lists(cluster_name, hours)
+
+        def fetch():
+            found, kills, queries, known, notes = False, [], [], set(), []
+            for account_id in self.accounts:
+                clusters, events, restarts = self.client.nrql_many(account_id, lists)
+                queries += [{"account": account_id, "nrql": q} for q in lists]
+                names = {n for row in clusters for n in row.get("clusters") or []}
+                known |= names
+                if cluster_name not in names and not events:
+                    continue
+                found = True
+                if len(events) >= NRQL_MAX:
+                    notes.append(f"New Relic returned its most, {NRQL_MAX:,} OOM events: kills before the oldest of them "
+                                 "aren't counted. Pick a shorter Look back to see them all.")
+                if len(restarts) >= NRQL_MAX:
+                    notes.append(f"New Relic returned its most, {NRQL_MAX:,} container restarts: some kills may show "
+                                 "no container.")
+                kills += [(account_id, *kill) for kill in _oom_match(events, restarts)]
+            kills.sort(key=lambda k: k[1], reverse=True)
+            detailed = {}
+            for account_id in {k[0] for k in kills[:OOM_DETAIL_LIMIT]}:
+                mine = [k for k in kills[:OOM_DETAIL_LIMIT] if k[0] == account_id]
+                reads = [_oom_memory(cluster_name, at, node, restart) for _, at, node, _, restart in mine]
+                answers = iter(self.client.nrql_many(account_id, [q for group in reads for q in group]))
+                for kill, group in zip(mine, reads):
+                    detailed[id(kill)] = [(next(answers) or [{}])[0] for _ in group] + [None] * (2 - len(group))
+            rows = []
+            for kill in kills[:OOM_ROW_LIMIT]:
+                _, at, node, event, restart = kill
+                rows.append(_oom_row(at, node, event, restart, *detailed.get(id(kill), (None, None))))
+            if not found:
+                notes.append(f"New Relic has no Kubernetes data for a cluster named {cluster_name}"
+                             + (f" (it knows {', '.join(sorted(known)[:10])})." if known else "."))
+            return {"found": found, "rows": rows, "total": len(kills), "by_owner": _oom_owners(kills),
+                    "detailed": min(len(kills), OOM_DETAIL_LIMIT), "queries": queries, "notes": notes}
+        return cached(self._key("oom", cluster_name, int(hours)), CACHE_SECONDS, fetch, refresh)
+
+    def warning_events(self, cluster_name, hours, refresh=False):
+        """See `Provider.warning_events`: nri-kubernetes' events (InfrastructureEvent), Warning only, faceted by reason
+        and object; Count is how many times New Relic received it."""
+        if not K8S_CLUSTER.match(cluster_name or ""):
+            raise ProviderError(f"'{cluster_name}' isn't a cluster name New Relic could have.")
+        lists = [_oom_lists(cluster_name, hours)[0], _events_list(cluster_name, hours)]
+
+        def fetch():
+            found, rows, queries, known, notes = False, [], [], set(), []
+            for account_id in self.accounts:
+                clusters, answer = self.client.nrql_many(account_id, lists)
+                queries += [{"account": account_id, "nrql": q} for q in lists]
+                names = {n for row in clusters for n in row.get("clusters") or []}
+                known |= names
+                if cluster_name not in names and not answer:
+                    continue
+                found = True
+                if len(answer) >= NRQL_MAX:
+                    notes.append(f"New Relic returned its most, {NRQL_MAX:,} reasons and objects: the rest aren't counted. "
+                                 "Pick a shorter Look back.")
+                for r in answer:
+                    facet = (list(r.get("facet")) if isinstance(r.get("facet"), list) else []) + [None] * 4
+                    last = _number(r.get("Last"))
+                    rows.append({"Reason": facet[0] or "Warning", "Namespace": facet[1] or "", "Object": facet[2] or "",
+                                 "ObjectKind": facet[3] or "", "Count": int(_number(r.get("Count")) or 0),
+                                 "Last": _iso_ms(last) if isinstance(last, (int, float)) else None,
+                                 "Message": str(r.get("Message") or "")[:500]})
+            if not found:
+                notes.append(f"New Relic has no Kubernetes data for a cluster named {cluster_name}"
+                             + (f" (it knows {', '.join(sorted(known)[:10])})." if known else "."))
+            rows.sort(key=lambda r: (-r["Count"], r["Reason"], r["Object"]))
+            return {"found": found, "rows": rows[:EVENT_ROW_LIMIT], "total": len(rows), "queries": queries, "notes": notes}
+        return cached(self._key("events", cluster_name, int(hours)), CACHE_SECONDS, fetch, refresh)
+
+    def workload_names(self, cluster_name, namespace, refresh=False):
+        """See `Provider.workload_names`: the owners named on the namespace's container samples over the last hour."""
+        if not K8S_CLUSTER.match(cluster_name or "") or not K8S_CLUSTER.match(namespace or ""):
+            raise ProviderError("That isn't a cluster and namespace New Relic could have.")
+        kinds = [(kind, field) for kind, field in OWNERS if kind != "Job"]
+        nrql = (f"SELECT {', '.join(f'uniques({field}, 1000) AS {field}' for _, field in kinds)} FROM K8sContainerSample"
+                f" WHERE clusterName = {nrql_string(cluster_name)} AND namespaceName = {nrql_string(namespace)} SINCE 1 hour ago")
+
+        def fetch():
+            found, queries = set(), []
+            for account_id in self.accounts:
+                rows = self.client.nrql_many(account_id, [nrql])[0] or [{}]
+                queries.append({"account": account_id, "nrql": nrql})
+                found |= {(kind, name) for kind, field in kinds for name in rows[0].get(field) or [] if name}
+            order = [kind for kind, _ in kinds]
+            return {"found": bool(found), "queries": queries,
+                    "workloads": [{"kind": k, "name": n} for k, n in sorted(found, key=lambda w: (order.index(w[0]), w[1]))]}
+        return cached(self._key("workloads", cluster_name, namespace), CACHE_SECONDS, fetch, refresh)
+
+    # Workload path: requests from APM transactions, pods from Kubernetes container samples.
+    def _each_account(self, nrqls, key, read):
+        """`read(rows per query, account)` over every account until one has data: (result, queries sent)."""
+        sent = []
+        for account_id in self.accounts:
+            answers = self.client.nrql_many(account_id, nrqls)
+            sent += [{"account": account_id, "nrql": q} for q in nrqls]
+            found = read(answers, account_id)
+            if found:
+                return found, sent
+        return None, sent
+
+    def app_names(self, refresh=False):
+        nrql = "SELECT uniques(appName, 2000) AS apps FROM Transaction SINCE 1 day ago"
+
+        def fetch():
+            names, sent = set(), []
+            for account_id in self.accounts:
+                rows = self.client.nrql_many(account_id, [nrql])[0] or [{}]
+                sent.append({"account": account_id, "nrql": nrql})
+                names |= {n for n in rows[0].get("apps") or [] if n}
+            return {"names": sorted(names), "queries": sent}
+        return cached(self._key("apps"), 600, fetch, refresh)
+
+    def request_paths(self, app, refresh=False):
+        nrql = (f"SELECT count(*) FROM Transaction WHERE appName = {nrql_string(app)} FACET request.uri"
+                " SINCE 1 day ago LIMIT 50")
+
+        def fetch():
+            found, sent = self._each_account([nrql], "paths", lambda answers, _: [
+                str(r.get("facet") or r.get("request.uri") or "") for r in answers[0] if r.get("facet") or r.get("request.uri")])
+            return {"paths": found or [], "queries": sent}
+        return cached(self._key("paths", app), 600, fetch, refresh)
+
+    def requests(self, app, refresh=False):
+        where = f"FROM Transaction WHERE appName = {nrql_string(app)}"
+        what = ("SELECT count(*) AS total, filter(count(*), WHERE error IS true OR httpResponseCode LIKE '5%') AS errors,"
+                " percentile(duration, 95) AS p95")
+        nrqls = [f"{what} {where} SINCE 60 minutes ago", f"{what} {where} SINCE 10140 minutes ago UNTIL 10080 minutes ago",
+                 "SELECT count(*) AS total, filter(count(*), WHERE error IS true OR httpResponseCode LIKE '5%') AS errors"
+                 f" {where} SINCE 60 minutes ago TIMESERIES 1 minute"]
+
+        def period(rows):
+            row = (rows or [{}])[0]
+            p95 = row.get("p95")
+            p95 = next(iter(p95.values()), None) if isinstance(p95, dict) else p95
+            return {"total": row.get("total") or 0, "errors": row.get("errors") or 0,
+                    "p95_ms": round(p95 * 1000) if isinstance(p95, (int, float)) else None}
+
+        def read(answers, _):
+            now, week = period(answers[0]), period(answers[1])
+            if not now["total"] and not week["total"]:
+                return None
+            minutes = [[datetime.fromtimestamp(r["beginTimeSeconds"], timezone.utc).isoformat(), r.get("total") or 0,
+                        r.get("errors") or 0] for r in answers[2] if r.get("beginTimeSeconds") is not None]
+            return {"now": now, "week": week, "minutes": minutes}
+
+        def fetch():
+            found, sent = self._each_account(nrqls, "requests", read)
+            return {"found": bool(found), **(found or {"now": {}, "week": {}, "minutes": []}), "queries": sent}
+        return cached(self._key("requests", app), CACHE_SECONDS, fetch, refresh)
+
+    def workload_pods(self, cluster_name, namespace, kind, name, refresh=False):
+        field = dict(OWNERS).get(kind)
+        if not field or not all(K8S_CLUSTER.match(x or "") for x in (cluster_name, namespace, name)):
+            raise ProviderError("That isn't a cluster, namespace and workload New Relic could have.")
+        where = (f"FROM K8sContainerSample WHERE clusterName = {nrql_string(cluster_name)}"
+                 f" AND namespaceName = {nrql_string(namespace)} AND {field} = {nrql_string(name)}")
+        nrqls = [f"SELECT sum(restartCountDelta) AS restarts, uniqueCount(podName) AS pods {where} SINCE 60 minutes ago",
+                 f"SELECT sum(restartCountDelta) AS restarts, uniqueCount(podName) AS pods {where}"
+                 " SINCE 10140 minutes ago UNTIL 10080 minutes ago",
+                 f"SELECT uniqueCount(podName) AS pods, filter(uniqueCount(podName), WHERE isReady IS false) AS not_ready {where}"
+                 " SINCE 5 minutes ago",
+                 f"SELECT sum(restartCountDelta) AS restarts {where} SINCE 60 minutes ago TIMESERIES 5 minutes"]
+
+        def read(answers, _):
+            now, week, ready = ((rows or [{}])[0] for rows in answers[:3])
+            if not now.get("pods") and not week.get("pods"):
+                return None
+            restarts = int(now.get("restarts") or 0)
+            return {"now": {"restarts": restarts, "errors": restarts, "pods": now.get("pods") or 0,
+                            "not_ready": ready.get("not_ready") or 0},
+                    "week": {"restarts": int(week.get("restarts") or 0), "errors": int(week.get("restarts") or 0),
+                             "pods": week.get("pods") or 0},
+                    "minutes": [[datetime.fromtimestamp(r["beginTimeSeconds"], timezone.utc).isoformat(), None,
+                                 int(r.get("restarts") or 0)] for r in answers[3] if r.get("beginTimeSeconds") is not None]}
+
+        def fetch():
+            found, sent = self._each_account(nrqls, "pods", read)
+            return {"found": bool(found), **(found or {"now": {}, "week": {}, "minutes": []}), "queries": sent}
+        return cached(self._key("pods", cluster_name, namespace, kind, name), CACHE_SECONDS, fetch, refresh)
+
+    def _workload_where(self, cluster_name, namespace, kind, name):
+        field = dict(OWNERS).get(kind)
+        if not field or not all(K8S_CLUSTER.match(x or "") for x in (cluster_name, namespace, name)):
+            raise ProviderError("That isn't a cluster, namespace and workload New Relic could have.")
+        return (f"FROM K8sContainerSample WHERE clusterName = {nrql_string(cluster_name)}"
+                f" AND namespaceName = {nrql_string(namespace)} AND {field} = {nrql_string(name)}")
+
+    def workload_usage(self, cluster_name, namespace, kind, name, refresh=False):
+        where = self._workload_where(cluster_name, namespace, kind, name)
+        nrqls = [f"SELECT percentile(cpuUsedCores, 95, 99), max(cpuUsedCores), percentile(memoryWorkingSetBytes, 95, 99),"
+                 f" max(memoryWorkingSetBytes) {where} FACET containerName SINCE 7 days ago LIMIT 50",
+                 f"SELECT max(cpuUsedCores), max(memoryWorkingSetBytes) {where} FACET containerName SINCE 30 days ago LIMIT 50"]
+
+        def read(answers, _):
+            out = {}
+            for r in answers[0]:
+                cpu, mem = r.get("percentile.cpuUsedCores") or {}, r.get("percentile.memoryWorkingSetBytes") or {}
+                out[_facet(r)] = {"container": _facet(r),
+                                  "cpu": {"p95": cpu.get("95"), "p99": cpu.get("99"), "max_7d": r.get("max.cpuUsedCores")},
+                                  "memory": {"p95": mem.get("95"), "p99": mem.get("99"), "max_7d": r.get("max.memoryWorkingSetBytes")}}
+            for r in answers[1]:
+                c = out.setdefault(_facet(r), {"container": _facet(r), "cpu": {}, "memory": {}})
+                c["cpu"]["max_30d"], c["memory"]["max_30d"] = r.get("max.cpuUsedCores"), r.get("max.memoryWorkingSetBytes")
+            return sorted(out.values(), key=lambda c: c["container"]) or None
+
+        def fetch():
+            found, sent = self._each_account(nrqls, "usage", read)
+            return {"found": bool(found), "containers": found or [], "queries": sent}
+        return cached(self._key("usage", cluster_name, namespace, kind, name), 600, fetch, refresh)
+
+    def runtime_memory(self, app, refresh=False):
+        names = ", ".join(nrql_string(n) for n in RUNTIME_METRICS.values())
+        nrqls = [f"SELECT average(newrelic.timeslice.value) FROM Metric WHERE appName = {nrql_string(app)}"
+                 f" AND metricTimesliceName IN ({names}) FACET metricTimesliceName SINCE 15 minutes ago",
+                 f"SELECT average(newrelic.timeslice.value) FROM Metric WHERE appName = {nrql_string(app)}"
+                 f" AND metricTimesliceName = {nrql_string(RUNTIME_METRICS['heap_used'])} SINCE 30 days ago TIMESERIES 1 day"]
+        by_metric = {v: k for k, v in RUNTIME_METRICS.items()}
+
+        def read(answers, _):
+            now = {by_metric[_facet(r)]: _value(r) for r in answers[0] if _facet(r) in by_metric}
+            if not now:
+                return None
+            daily = [[datetime.fromtimestamp(r["beginTimeSeconds"], timezone.utc).isoformat(), _value(r)]
+                     for r in answers[1] if r.get("beginTimeSeconds") is not None and _value(r) is not None]
+            return {**now, "heap_daily": daily}
+
+        def fetch():
+            found, sent = self._each_account(nrqls, "runtime", read)
+            return {"found": bool(found), **(found or {}), "queries": sent}
+        return cached(self._key("runtime", app), 600, fetch, refresh)
+
+
+# APM agents' memory metrics (MB): Java reports all of them; other agents some or none.
+RUNTIME_METRICS = {"heap_used": "Memory/Heap/Used", "heap_committed": "Memory/Heap/Committed", "heap_max": "Memory/Heap/Max",
+                   "non_heap_used": "Memory/NonHeap/Used", "process": "Memory/Physical"}
+
+
+def _facet(row):
+    facet = row.get("facet")
+    return str(facet[0] if isinstance(facet, list) else facet or "")
+
 
 def _value(row):
     """The one value in a TIMESERIES row (named after its function, e.g. "count" or "average.duration"; a percentile
@@ -380,3 +632,106 @@ def _facet_row(row, facets, columns, account_id):
         value = _number(row.get(column))
         out[column] = _iso_ms(value) if column == "last_seen" and isinstance(value, (int, float)) else value
     return {**out, "account": account_id}
+
+
+# Kubernetes OOM kills (nri-kubernetes): the node's OOMKilling/SystemOOM events carry the kernel's line, and the
+# container that restarted on that node just after is the one killed; memory just before comes from the samples.
+NRQL_MAX = 5000  # NRQL's LIMIT MAX: a list that comes back this long may have been cut, and the page says so
+OOM_ROW_LIMIT = 200  # kills listed one per row (newest first); every kill is still counted
+OOM_DETAIL_LIMIT = 25  # of those, the newest get memory readings (two reads each); the kernel's line covers the rest
+OOM_MATCH = (-30, 180)  # seconds from the node's event to the restart sample of the killed container
+OOM_SAME_KILL = 10  # seconds: an OOMKilling and a SystemOOM this close on one node are one kill
+K8S_CLUSTER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,100}$")
+OWNERS = (("Deployment", "deploymentName"), ("StatefulSet", "statefulsetName"), ("DaemonSet", "daemonsetName"),
+          ("Job", "jobName"))
+
+
+def _oom_lists(cluster, hours):
+    c, since = nrql_string(cluster), f"SINCE {int(hours)} hours ago"
+    return [f"SELECT uniques(clusterName, 100) AS clusters FROM K8sClusterSample SINCE {max(int(hours), 24)} hours ago",
+            "SELECT timestamp, event.involvedObject.name AS node, event.reason AS reason, event.message AS message"
+            f" FROM InfrastructureEvent WHERE category = 'kubernetes' AND clusterName = {c}"
+            f" AND event.reason IN ('OOMKilling', 'SystemOOM') {since} LIMIT MAX",
+            "SELECT timestamp, podName, containerName, namespaceName, nodeName, "
+            + ", ".join(field for _, field in OWNERS)
+            + f" FROM K8sContainerSample WHERE clusterName = {c} AND restartCountDelta > 0 {since} LIMIT MAX"]
+
+
+def _oom_match(events, restarts):
+    """[(seconds, node, event, its restart or None)], newest first: one per kill. Only an OOMKilling and a SystemOOM
+    close together on one node are one kill; two OOMKilling events are two kills."""
+    kills, last_on = [], {}
+    for e in sorted(events, key=lambda e: e.get("timestamp") or 0):
+        at, node = (e.get("timestamp") or 0) / 1000, e.get("node") or ""
+        last = last_on.get(node)
+        reasons = {x.get("reason") for x in [last[2], *last[2].get("also", [])]} if last else set()
+        if last and at - last[0] <= OOM_SAME_KILL and e.get("reason") not in reasons:
+            last[2].setdefault("also", []).append(e)
+            continue
+        kills.append([at, node, e, None])
+        last_on[node] = kills[-1]
+    used = set()
+    for kill in reversed(kills):
+        near = [(abs(r["timestamp"] / 1000 - kill[0]), i) for i, r in enumerate(restarts)
+                if i not in used and r.get("nodeName") == kill[1]
+                and OOM_MATCH[0] <= r["timestamp"] / 1000 - kill[0] <= OOM_MATCH[1]]
+        if near:
+            index = min(near)[1]
+            used.add(index)
+            kill[3] = restarts[index]
+    return [tuple(k) for k in reversed(kills)]
+
+
+EVENT_ROW_LIMIT = 200  # one row per reason and object, most first; `total` counts them all
+
+
+def _events_list(cluster, hours):
+    return ("SELECT count(*) AS Count, max(timestamp) AS Last, latest(event.message) AS Message FROM InfrastructureEvent"
+            f" WHERE category = 'kubernetes' AND clusterName = {nrql_string(cluster)} AND event.type = 'Warning'"
+            " FACET event.reason, event.involvedObject.namespace, event.involvedObject.name, event.involvedObject.kind"
+            f" SINCE {int(hours)} hours ago LIMIT MAX")
+
+
+def _oom_owners(kills):
+    """Every kill counted by what it killed: [{Namespace, OwnerKind, Owner, Pods, Kills}], most kills first."""
+    counted = {}
+    for _, _, _, _, restart in kills:
+        restart = restart or {}
+        kind, owner = next(((k, restart[field]) for k, field in OWNERS if restart.get(field)), ("", ""))
+        if not owner and restart.get("podName"):
+            kind, owner = "Pod", restart["podName"]
+        entry = counted.setdefault((restart.get("namespaceName") or "", kind, owner),
+                                   {"Namespace": restart.get("namespaceName") or "", "OwnerKind": kind, "Owner": owner,
+                                    "Pods": set(), "Kills": 0})
+        entry["Kills"] += 1
+        if restart.get("podName"):
+            entry["Pods"].add(restart["podName"])
+    return sorted(({**e, "Pods": sorted(e["Pods"])} for e in counted.values()), key=lambda e: -e["Kills"])
+
+
+def _oom_memory(cluster, at, node, restart):
+    span = f"SINCE {int((at - 300) * 1000)} UNTIL {int((at + 60) * 1000)}"
+    c = nrql_string(cluster)
+    out = [f"SELECT max(memoryWorkingSetBytes) AS mem, latest(allocatableMemoryBytes) AS alloc FROM K8sNodeSample"
+           f" WHERE clusterName = {c} AND nodeName = {nrql_string(node)} {span}"]
+    if restart:
+        out.append(f"SELECT max(memoryWorkingSetBytes) AS mem, latest(memoryLimitBytes) AS lim FROM K8sContainerSample"
+                   f" WHERE clusterName = {c} AND podName = {nrql_string(restart['podName'])}"
+                   f" AND containerName = {nrql_string(restart.get('containerName') or '')} {span}")
+    return out
+
+
+def _oom_row(at, node, event, restart, node_mem, mem):
+    events = [event] + event.get("also", [])
+    kernel = next((e.get("message") or "" for e in events if e.get("reason") == "OOMKilling"), "")
+    system = any(e.get("reason") == "SystemOOM" or (e.get("message") or "").startswith("Out of memory") for e in events)
+    restart = restart or {}
+    owner = next(((kind, restart[field]) for kind, field in OWNERS if restart.get(field)), ("", ""))
+    node_alloc = (node_mem or {}).get("alloc")
+    limit = (mem or {}).get("lim")
+    if mem and mem.get("mem") and not limit:
+        limit = node_alloc  # no limit set; reported as the node's memory, like Container Insights does
+    return {"KilledAt": _iso_ms(at * 1000), "Namespace": restart.get("namespaceName") or "", "Pod": restart.get("podName") or "",
+            "Container": restart.get("containerName") or "", "Node": node, "OwnerKind": owner[0], "Owner": owner[1],
+            "MemBytes": (mem or {}).get("mem"), "LimitBytes": limit, "NodeMemBytes": (node_mem or {}).get("mem"),
+            "NodeAllocBytes": node_alloc, "Kernel": kernel, "SystemOom": int(system)}

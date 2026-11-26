@@ -121,6 +121,13 @@ def test_profile_rejects_unknown_keys():
         profiles.parse({"type": "x", "metrics": [{"name": "a", "aggregation": "Total", "threshold": 1}]})
 
 
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), True, "90"])
+def test_profile_thresholds_must_be_finite_numbers(value):
+    with pytest.raises(ProfileError, match="finite number"):  # NaN compares false, so it would read as healthy
+        profiles.parse({"type": "x", "metrics": [{"name": "a", "aggregation": "Total", "crit": value}]})
+    assert profiles.parse({"type": "x", "metrics": [{"name": "a", "aggregation": "Total", "warn": 1, "crit": 2.5}]}).metrics
+
+
 def test_repeated_alerts_collapse_into_one_signal():
     alerts = [{"name": "rh", "severity": 4, "started": f"2026-10-30T0{i}:00", "service": "Resource Health"}
               for i in range(5)]
@@ -260,3 +267,18 @@ def test_without_detectors_nothing_waits(monkeypatch):
     node = Node(id=REDIS, name="cache", type="microsoft.cache/redis", display_type="Redis", hop=0, subscription_id=SUB)
     health.assess(FakeClient(), [node], HealthOptions(detectors=False), {}, on_quick=lambda: called.append("quick"))
     assert called == []
+
+
+
+def test_metric_signals_carry_the_display_name_and_follow_the_change_setting():
+    client = FakeClient(gets={
+        "metricDefinitions": {"value": [{"name": {"value": "serverLoad", "localizedValue": "Server Load"}, "unit": "Percent",
+                                         "primaryAggregationType": "Maximum"}]},
+        "/metrics": {"value": [{"name": {"value": "serverLoad"}, "timeseries": [{"data": [{"maximum": 30.0}]}]}]},
+    })
+    redis = profiles.load()["microsoft.cache/redis"]
+    signals = health._metric_signals(client, _node(), HealthOptions(), redis, [])
+    load = next(s for s in signals if s.name.startswith("serverLoad"))
+    assert load.label == "Server Load" and load.baseline == 30.0 and "last week" not in load.detail
+    assert health._evaluate(health._Check(spec=redis.metrics[0], source="profile"), 30.0, 10.0, "Percent",
+                            HealthOptions(baseline_change_percent=400)).detail == ""  # 3x is under the setting's 4x

@@ -26,12 +26,13 @@ What changed in each version is in [`CHANGELOG.md`](CHANGELOG.md). MIT licensed 
     [New Relic](#new-relic-and-other-monitoring-tools) · [Watchlist](#watchlist) · [Alerts](#alerts) · [Is this alert right?](#is-this-alert-right) · [Access](#access-pim) ·
     [Settings](#settings) · [Links](#links)
 - [Connecting ServiceNow and monitoring tools](#connecting-servicenow-and-monitoring-tools)
-- [Permissions](#permissions)
+- [Permissions](#permissions): what each feature needs, the recommended access, a custom role
+- [How far back you can look](#how-far-back-you-can-look): each history source's limit, measured
 - [Configuration reference](#configuration-reference)
 - [How health is decided](#how-health-is-decided)
 - [Commands](#commands)
 - [Troubleshooting](#troubleshooting)
-- [For maintainers](#for-maintainers): development, releasing
+- [For maintainers](#for-maintainers): development, what it's built with, releasing
 
 ---
 
@@ -48,28 +49,10 @@ What changed in each version is in [`CHANGELOG.md`](CHANGELOG.md). MIT licensed 
   you connect, it reads only public pages: Azure's status feed, and this app's PyPI page (whether a newer version is
   out, every 6 hours, `updates.check`; download numbers when About opens).
 
-That's enough for Triage, Browse, a resource's health, metrics and timeline, Readiness, Search, Secrets, Network, the
-Watchlist, Alerts and the Vulnerabilities tab's platform checks. **Everything else is optional**: when something
-isn't there, the page says what's missing and how to get it, instead of showing an empty list.
-
-| Feature | Needs, on top of the above | Without it |
-|---|---|---|
-| **Vulnerabilities: findings** | **Microsoft Defender for Cloud** paid plans: *Defender for Servers* (VMs, with its vulnerability assessment) and *Defender for Containers* (registry images and running AKS containers) | The tab says Defender's plans are off (or don't answer) and shows only the platform checks: AKS versions and node images, runtimes, TLS |
-| **Recommendations: Defender findings** | Defender for Cloud (the free tier gives some; the plans above give more) | Azure Advisor's recommendations still show |
-| **Resource Health** | the `Microsoft.ResourceHealth` provider registered in the subscription | that signal is reported as not registered (registering is a write, so the console never does it) |
-| **Diagnostics** | a resource type with detectors in Azure's read API: App Service, AKS, Redis, Logic Apps, Batch | the tab says the type has none (or that Azure refused the request), links to the portal and shows Microsoft's troubleshooting guides for the type |
-| **AKS workloads and logs** | *AKS Cluster User Role*, a Kubernetes read role, and a network path to the API server; **Container Insights** for logs and pod history | the parts that can't be read are named with the role or setting they need |
-| **Vulnerabilities: find tags** (registry images) | **AcrPull** on the registry (or *Container Registry Repository Reader* where it uses repository permissions), and a network its firewall allows (often VPN) | the image's digest still shows; the page says whether the registry's firewall or a missing role refused it |
-| **Vulnerabilities: running image** (AKS) | the same as AKS workloads below: *AKS Cluster User Role*, a Kubernetes read role, a network path to the API server | the page names the role or network path that's missing |
-| **Application Insights tab** | an Application Insights resource (for an app, linked to it) | the tab says no component is linked to the app, and how to find one |
-| **ServiceNow, monitoring tools** (tabs, cards, alert signals) | a connection in Settings → Integrations (New Relic now; Datadog and Grafana later) | their tabs and cards don't appear |
-| **Check someone's access** | your account can read other users in Microsoft Graph (most tenants allow it; some restrict it) | the search shows Microsoft Graph's refusal |
-| **PIM hints** (Access tab) | roles assigned through PIM | the tab shows your standing access only |
-| **Saving integration secrets** | an OS keychain (macOS Keychain, Windows Credential Manager, or a Secret Service on Linux) | set them as `AHC_…` environment variables instead |
-| **Browser notifications** (Alerts) | notifications allowed for `127.0.0.1` in your browser | alerts still show in the bar on every tab |
-
-A personal tenant usually has none of the paid parts (Defender, Container Insights, ServiceNow, New Relic). The
-console works there too, with the platform checks, health, timeline and the rest.
+That's enough for most of the console. **What each feature needs** (roles, the exact actions for custom roles, and
+what the page shows without it) is in [Permissions](#permissions); **Access → What the console needs** checks your own
+access against it, in the scope you picked. A personal tenant usually has none of the paid parts (Defender, Container
+Insights, ServiceNow, New Relic); the console works there too, with the platform checks, health, timeline and the rest.
 
 ## Install
 
@@ -126,15 +109,72 @@ azure-health-console             # starts it and opens your browser
 
 ### pipx (Windows, Linux, or a Mac without Homebrew)
 
-With the [prerequisites](#prerequisites) installed:
+With the [prerequisites](#prerequisites) installed. These steps check every file before it's installed: the release's
+list of files is signed, and pip installs only files whose fingerprint (SHA-256) is on that list.
+
+**macOS or Linux** (Terminal):
 
 ```bash
-pipx install azure-health-console
+V=1.2.0   # the version to install: the newest is at the top of the Releases page
+mkdir -p ~/Downloads/azure-health-console-$V && cd ~/Downloads/azure-health-console-$V
+R=https://github.com/RafaelSonego/azure-health-console/releases/download/v$V
+curl -fsSL -O $R/SHA256SUMS.txt -O $R/SHA256SUMS.txt.sig -O $R/constraints.txt
+curl -fsSL -o release-signing.pem https://raw.githubusercontent.com/RafaelSonego/azure-health-console/v$V/healthconsole/release-signing.pem
+openssl dgst -sha256 -verify release-signing.pem -signature SHA256SUMS.txt.sig SHA256SUMS.txt   # must say "Verified OK"
+shasum -a 256 -c SHA256SUMS.txt --ignore-missing                                                # must say "constraints.txt: OK"
+pipx upgrade-shared
+pipx install "azure-health-console==$V" --pip-args="--require-hashes -c constraints.txt"
 az login
 azure-health-console
 ```
 
-**Upgrade** with `pipx upgrade azure-health-console`; **uninstall** with `pipx uninstall azure-health-console`.
+**Windows** (PowerShell; `openssl` comes with [Git for Windows](https://git-scm.com/download/win)):
+
+```powershell
+$V = "1.2.0"   # the version to install: the newest is at the top of the Releases page
+New-Item -ItemType Directory -Force "$HOME\Downloads\azure-health-console-$V" | Set-Location
+$R = "https://github.com/RafaelSonego/azure-health-console/releases/download/v$V"
+foreach ($f in "SHA256SUMS.txt", "SHA256SUMS.txt.sig", "constraints.txt") { Invoke-WebRequest "$R/$f" -OutFile $f }
+Invoke-WebRequest "https://raw.githubusercontent.com/RafaelSonego/azure-health-console/v$V/healthconsole/release-signing.pem" -OutFile release-signing.pem
+& "$env:ProgramFiles\Git\usr\bin\openssl.exe" dgst -sha256 -verify release-signing.pem -signature SHA256SUMS.txt.sig SHA256SUMS.txt   # must say "Verified OK"
+$listed = (Select-String '  constraints\.txt$' SHA256SUMS.txt).Line.Split(' ')[0]
+if ((Get-FileHash constraints.txt).Hash.ToLower() -ne $listed) { throw "constraints.txt isn't the released file: stop here" }
+pipx upgrade-shared
+pipx install "azure-health-console==$V" --pip-args="--require-hashes -c constraints.txt"
+az login
+azure-health-console
+```
+
+If a check doesn't say what's shown, stop: don't install, and [open an issue](https://github.com/RafaelSonego/azure-health-console/issues).
+
+**Upgrade:** run the first four lines above (macOS/Linux) or three (Windows) with the new version, into a new folder.
+Then check the files with the version you already have, and install:
+
+```bash
+azure-health-console verify        # must end with "Verified": it checks with the key inside your installed version
+pipx upgrade-shared
+pipx install --force "azure-health-console==$V" --pip-args="--require-hashes -c constraints.txt"
+```
+
+Don't use `pipx upgrade`: it doesn't check the files (and stops, because it reuses the last version's
+`constraints.txt`). **Uninstall** with `pipx uninstall azure-health-console`.
+
+### Check what you install
+
+The release pipeline lists every file of a release with its SHA-256 in `SHA256SUMS.txt` and signs that list with a key
+that never leaves Azure Key Vault: `SHA256SUMS.txt.sig` on the
+[GitHub release](https://github.com/RafaelSonego/azure-health-console/releases). `constraints.txt`, on that list,
+names the exact version and SHA-256 of every package pip installs, the console's own wheel included, so
+`--require-hashes -c constraints.txt` refuses anything else, from PyPI or a company mirror alike.
+
+- **First install:** the public key comes from this repository. Its fingerprint is
+  `873cc6a6353d51196dfa4fcb6b87fed1556897ec2cc79be0477e33429a65e8ab`; check it with
+  `openssl pkey -pubin -in release-signing.pem -outform DER | openssl dgst -sha256`.
+- **Upgrades:** `azure-health-console verify [folder]` checks the signature with the key built into the version you
+  already have, so a key swapped on GitHub later wouldn't pass, then each file in the folder against the list.
+- **Homebrew** installs the dependencies from the release's `requirements-release.txt`, each one checked by its hash.
+  To check the formula: download and verify `SHA256SUMS.txt` as above, then compare `grep tar.gz SHA256SUMS.txt` with
+  `brew cat rafaelsonego/tools/azure-health-console | grep sha256`.
 
 ### From the source
 
@@ -207,17 +247,20 @@ Exported reports stay in the `exports` folder wherever you ran the console.
 
 1. **Sign in:** `az login` (or `az login --tenant <your-tenant-domain>`). If you skip this, the page shows a
    "Sign in to Azure" screen: **Sign in** runs `az login` for you (your browser opens), **Use a code instead** shows a
-   code to enter at microsoft.com/devicelogin on any device, or run the command it shows yourself. It carries on by
-   itself once you're signed in. Later, **Sign in / out** (in your account menu, top right) does the same to switch account or tenant (pick
-   **another tenant** and type its ID or domain, e.g. a personal tenant on another account), or after activating a PIM
-   group. **Sign out <account>** there runs `az logout --username <account>` after asking: only that account is
-   signed out, others stay. Both change the Azure CLI's sign-in on your machine, so terminals see it too. Only the
+   code to enter at microsoft.com/devicelogin on any device, or run the command it shows yourself. Its **Tenant** box
+   adds `--tenant`: a personal account, or a tenant that asks for multi-factor sign-in, needs it. It carries on by
+   itself once you're signed in. Later, **Switch account or tenant** (in your account menu, top right) does the same
+   to switch account or tenant (pick **another tenant** and type its ID or domain, e.g. a personal tenant on another
+   account), or after activating a PIM group. **Sign out** (same menu, under your account's name) runs
+   `az logout --username <account>` after asking: only that account is signed out, others stay. Both change the Azure CLI's sign-in on your machine, so terminals see it too. Only the
    local console has these buttons.
 2. **Start it:** `azure-health-console` (or `python -m healthconsole serve --open`). It listens
    on `http://127.0.0.1:8765`, your machine only (another port if that one is busy). It prints (and with `--open`,
-   opens) an address carrying your key: open it once per browser and `http://127.0.0.1:8765` works for 30 days,
-   restarts included. Another user or program on the same machine can't use the console without it. The key is kept
-   in `cache_dir/launch-key`, readable only by you; delete it to make a new one.
+   opens) an address carrying your key: open it once per browser and `http://127.0.0.1:8765` keeps working there,
+   restarts included. The page keeps the key for its own address and sends it with every request; another user,
+   program or website (a page on another port included) can't use the console without it. The key travels after a
+   `#` in that address, which the browser never sends anywhere. It's kept in `cache_dir/launch-key`, readable only by
+   you; delete it to make a new one. A key file anyone else could read or change is replaced, never used.
 3. **Pick a scope:** the page opens on **Triage** with nothing selected, so it hasn't queried anything yet.
    In the Scope bar, choose **Subscriptions ▾** (or a saved scope), then press **Apply**.
 4. **Look around:** Triage fills in within seconds. Click anything listed to open it.
@@ -253,7 +296,10 @@ scopes and Open with under this tenant and removes the old keys (the previous fi
 | Windows | `C:\Users\<you>\.config\azure-health-console\config.yaml` |
 
 Create it if it doesn't exist. To keep it elsewhere, set `AHC_CONFIG` to its path, or pass `--config <path>`
-before any command. Everything is per **tenant**, because the same person often works in more than one; name the
+before any command. The console uses settings, health profiles, the Watchlist and its own data only from files and
+folders no other account can change (on macOS and Linux: yours or root's, without write access for others, folders
+above included). Yours are tightened for you; anything else stops with the `chmod` to run. A settings or profile file
+over 1 MB (256 KB for a profile) isn't read. Everything is per **tenant**, because the same person often works in more than one; name the
 tenant whichever way is easiest:
 
 | Key | Example | When to use |
@@ -324,7 +370,7 @@ Tenant menu, or opened from a link with `?tenant=`, stays put instead.
 ### The tabs
 
 **Summary · Triage · Browse · Investigate · Readiness · Security · Cost · Sweeps ▾** (Secrets & certificates, Network) **· Tools ▾** (ServiceNow and each
-monitoring tool, when connected) **· Watchlist · Access**, and **Settings** on the right; your account menu (your name, top right) holds **Refresh access**, **Sign in / out**, the ☀ ◐ ☾ theme switch (light, system, the default, or dark) and **About** (what it is, its version, its PyPI numbers: latest release and downloads from pypistats.org without mirrors, read when it opens and kept 6 hours, and where your files are). A menu shows which of its
+monitoring tool, when connected) **· Watchlist · Access**, and **Settings** on the right; your account menu (your name, top right) holds **Refresh access**, **Switch account or tenant**, **Sign out**, the ☀ ◐ ☾ theme switch (light, system, the default, or dark), the **Layout** switch (**Classic**: the whole page scrolls; **Panes**: the bars stay put and each part of the window scrolls once, nothing scrolling inside it, like the Azure portal; windows 700 px wide or less stay classic) and **About** (what it is, its version, its PyPI numbers: latest release and downloads from pypistats.org without mirrors, read when it opens and kept 6 hours, and where your files are). A menu shows which of its
 pages is open ("Tools: New Relic"); Sweeps carries the Secrets badge, and Access shows how many PIM roles are
 active. Which views lead the band depends on your persona (below); the rest are under **More ▾**.
 
@@ -418,34 +464,83 @@ Narrow it to a team with the Scope bar, e.g. **+ tag filter** → `costcenter` �
 One failing request end to end, starting from the app that's failing. Nothing is picked for you; each step is a read
 of its own, with its KQL under **Query sent**:
 
-1. **Which app is failing?** Every Application Insights component in scope, with the Web and Function Apps that
-   report to it (their `hidden-link` tag; AKS apps don't say), its last hour (failed of all requests, exceptions)
-   against the same hour last week, worst first: the same metrics read as Triage's failure-spike card, one GET per
-   component for the first 50. **Investigate** on a row picks it ("Investigating shop-appi · pick another app").
+1. **Pick the app.** The Application Insights components that **need a look**: a red or amber status, or any server
+   errors (5xx) in the last hour. The quiet ones are counted ("4 quiet, hidden") and **Show all** lists them; **Go to
+   a component or app by name** searches every component and the apps that report to them. Each row has the Web and
+   Function Apps that report to it (their `hidden-link` tag; AKS apps don't say; a long list shows three and "+N
+   more"), its last hour (failed of all requests, exceptions) against the same hour last week, worst first: the same metrics read as Triage's failure-spike card, one GET per
+   component for every one in scope. The list shows at once, A–Z; each component is then measured, 25 at a time, and
+   the rows re-sort as their numbers arrive (a few hundred components take about 15 s). **Server errors (5xx)** also lists the top three 5xx codes (*502 7,938 · 500 6,968 ·
+   503 2,392*) and, in amber, failures without a usable status: responses **not sent in full** (API Management couldn't
+   send the whole response, usually because the caller hung up while the backend was slow) and **failed runs (no HTTP
+   status)** (code 0: a function or job started by a queue or timer, not over HTTP). Neither is 5xx. Hovering **Last
+   hour** lists the 4xx codes, mostly the caller's side. Always the last hour, whatever
+   Look back says. **Last 24 h** is failed requests per
+   hour, grey, with its peak beside it (each line is scaled to its own peak); the newest point is red only when the
+   last hour had failures. **Investigate** on a row picks it ("Investigating shop-appi · pick another app").
    **Investigate** on a failing operation of a resource's App Insights tab jumps straight to step 3. An operation ID
    from a log or an alert can be pasted here once the app is picked.
-2. **Its failing endpoints:** each endpoint (operation) and the service (cloud role) that answered, failed requests
-   out of all, failure rate, HTTP status codes, last failure, over the **Look back** window.
+
+   **What the status means**, written under it with a *change* link to its setting (*Settings → Thresholds → App
+   Insights*):
+
+   | Status | When (defaults) |
+   |---|---|
+   | **critical** | failing more than last week (below) at a 20% failure rate or more, with 20 failed or more |
+   | **warning** | failing more than last week: 5 failed or more and a rate over 1 point above last week's; or exceptions 10 or more and at least double last week's; or **failing a lot, as last week** (the critical rate and count, with no change) |
+   | – | none of those |
+
+   Triage's spike card uses only the "more than last week" rules: it lists what got worse.
+2. **By HTTP code:** every failed request in the window by its code: server errors (5xx), then not sent in full,
+   then failed runs (code 0), then 4xx, with each code's count and share of the failures, how many endpoints return it
+   and when it was last seen. Not sent in full and code 0 add **Why**: the exceptions logged on those requests, by
+   reason (*ClientConnectionFailure*: the caller closed the connection; *Timeout*; a failed policy expression…) and
+   where it broke (the API Management policy step, or the code location), with **Follow**. Opening a code lists its 5
+   busiest endpoints; **Samples** there reads only that code's failures, and
+   **Follow one** opens the latest request that failed with it end to end.
+   **Its failing endpoints:** each endpoint (operation) and the service (cloud role) that answered, failed requests
+   out of all, failure rate, HTTP status codes, last failure, over the **Look back** window (one picker at the top of
+   Investigate for steps 2 to 4 and Search logs, with a *Showing:* line saying what each step covers; 1 hour to 30 days;
+   Application Insights keeps 30 days by default, some components 90 or more, so a longer window finds nothing older;
+   30 days of a busy app takes 10 to 15 seconds).
 3. **Its latest failures:** that endpoint's latest failed requests (tick *successful ones too* for the rest), with
-   when, HTTP status, how long it took, the instance (pod or host) and URL.
+   when, HTTP status, how long it took, the instance (pod or host) and URL. Samples you've followed are marked
+   **✓ followed**.
 4. **One request end to end** (**Follow** on a sample, or paste an operation ID at the top): every request,
    dependency, exception (click for the stack) and log line with that operation ID, in time order, indented under the
    span that made it. **API Management** services in scope that log to Application Insights are read too (ticked at
    the top; the gateway forwards the trace ID, so its span sits on top, marked *gateway*). A service whose gateway
    logs go to a workspace gets **Gateway logs**: rows within 2 minutes whose URL contains the request's path, marked
-   probable, since they share no ID with it.
+   probable, since they share no ID with it (gateway logs keep no trace header unless the service logs headers). The
+   line at the top names which services offer which, and which offer neither.
 5. **The pod that served it** (**Pod …**, from the request's role instance): the cluster in scope whose Container
    Insights saw that pod name, its state then, when it started, restarts, owner and node; its logs within 2 minutes of
    the request (the Kubernetes API when reachable, else Container Insights); warning events in its namespace 15
    minutes either side; and what changed on the cluster from 6 hours before. When no cluster knows the name, pick
    the cluster and namespace yourself.
 
+**Finding your way.** A trail in the bar at the top says where you are (app › what you picked › latest 500s ›
+request › pod); each part jumps back to its step. Going deeper folds the step above to one line saying what you picked
+("you picked 500 · GetItem", "you're following 01:41 · 500 · 1.1 s"), so the next step opens right under it.
+**Show all again** reopens step 2 at the row you came from; **Back to the samples** (on steps 3 and 4) reopens the
+sample list to pick the next one.
+
+**Counts** name their window ("500s in the last 30 days", "Failed in the last 7 days") and include sampling: where
+Application Insights keeps one row for many requests, each row counts as the requests it stands for (`itemCount`), so
+totals and failure rates match the component's own metrics.
+
+**Recent changes** (in step 2) lists what Azure recorded changing on the component, its reporting apps and its
+gateways in the window, each field before → after ("sku.capacity 3 → 4" is API Management scaling). An empty window
+says when the last change was. Azure keeps 14 days; code deployments and API Management APIs and policies aren't
+recorded there.
+
 **Search logs** (sub-tab) searches the component's log lines and exceptions for text and a level; **Follow** on a
 line opens its request. Nothing is read until you click, and each read is one query per component.
 
 ### Security
 
-Two tabs, both over the scope in use, read-only and with your own access.
+Three tabs, all over the scope in use, read-only and with your own access: **Exposure & configuration**,
+**Vulnerabilities** and **Access audit**.
 
 **Exposure & configuration** is a handful of Resource Graph queries for the whole scope, checked by setting rather
 than by resource type, so a new type that has the setting is covered too:
@@ -477,8 +572,12 @@ What's vulnerable in the scope, what to fix first, and what nobody is scanning.
 - **Findings from Microsoft Defender for Cloud:** one per vulnerable package on a VM, a running container or a registry
   image, with the CVEs, CVSS, installed and fixed versions. A summary (by severity, how many have a fix, where they
   are), then **By resource**, ranked by what to fix first (reachable from the internet, then running rather than just
-  an image, then fixable, then CVSS), or **By software** ("openssl on 15 resources, fixed in 3.0.15"). Filters for
-  severity, *has a fix*, CVSS and type; click a row for its findings and CVEs. *Reachable* means a VM's public IP,
+  an image, then fixable, then CVSS), **By software** ("openssl on 15 resources, fixed in 3.0.15"), or **By CVE**
+  (one row per CVE, however many packages, images and image versions have it). Filters for severity, *has a fix*,
+  CVSS and type; the page opens on **only running + has a fix + High**, what to act on now, **Show everything**
+  clears them, and your own choice is kept in this browser (exports follow the filters). Click a row for its
+  findings and CVEs; each finding links to its page in Defender (**Defender ↗**), and **Open Defender for Cloud ↗**
+  sits at the top. *Reachable* means a VM's public IP,
   public network access left on, or a public AKS API server (a container's own exposure isn't read).
 - **Search** findings by CVE (`CVE-2026-1234` matches exactly, not `CVE-2026-12345`), package, resource, container
   or image, or version; several words must all match. **only running** keeps VMs and containers running in AKS (not
@@ -499,6 +598,59 @@ What's vulnerable in the scope, what to fix first, and what nobody is scanning.
   TLS and FTP are checked there, Windows apps included).
 
 Defender refreshes its findings up to once a day. The console never sends package or resource data anywhere.
+
+#### Access audit
+
+Who can change things or **see data without PIM** in the scope: people only (not apps or managed identities).
+
+- **Standing access:** a role assignment that isn't a PIM activation: assigned outright, or through PIM as *active*
+  with no end (time-limited active ones show their end date). Assigned to the person, or to a group they're in
+  (nested groups included). A PIM activation, which ends by itself, isn't listed.
+- **What it lets them do,** worked out from the role's permissions rather than its name, so custom roles count, widest
+  first: *Manages access* (Owner, User Access Administrator), *Changes everything* (Contributor), *Gets keys or
+  secrets, or signs in* (storage keys and SAS, connection strings, Cosmos DB read-only keys, a secret's value, signing
+  in to a machine), *Changes data*, *Sees data* (blobs, files, queues, tables, configuration values…), *Changes some
+  things* (start or stop a VM, restart an app).
+- **Reader roles that show no data don't count.** Reads Azure names as actions (`checkNameAvailability`,
+  `getBgpPeerStatus`, `backendHealth`, `exportTemplate`…) are told apart by their verb. `audit.ignore_actions` lists
+  the rest, each explained in `config.example.yaml`: harmless writes (support requests, deployments, which run with
+  the caller's own rights, operation results, provider registration), metadata (Key Vault Reader sees names and
+  dates, never values), logs and metrics (Log Analytics Reader, Monitoring Data Reader: people need them during an
+  investigation, so they aren't standing access to remove) and Kubernetes objects other than secrets. Remove an entry
+  to count it.
+- **AKS Cluster User Role** only hands out the kubeconfig on a cluster with Entra ID (what you can do there comes from
+  Kubernetes RBAC or the AKS RBAC roles, which count), so it's left out; on a cluster **without** Entra ID that
+  credential is admin, so there it counts, naming the clusters. The Cluster **Admin** Role always counts.
+- **Conditions:** an assignment with a condition (e.g. User Access Administrator allowed to assign only some roles)
+  shows it, so a limited one can be told from a full one.
+- **Could use PIM instead:** someone who holds a role standing and can also activate the same role through PIM (at
+  that scope or above, directly or through a group) doesn't need the standing assignment, so it can be removed; those
+  are counted and flagged. Everything a person can activate, not only these matches, is on
+  **Access (PIM) → Check someone's access**.
+- One row per person, widest access first; **Show** lists each role, where it applies (with a link to its Access
+  control in the portal), what **type** it's on (Key Vault, Storage Account, Subscription, Resource group…) and how
+  they got it. Tiles filter by what they can do; filter by **name** (or sign-in name), **role**, **group** and
+  **type** (lists from the results, with how many people each), *assigned directly*, *could use PIM instead* and *guests*.
+  The type is where the role is assigned: one on a subscription or resource group also covers every resource in it,
+  so *Type = Key Vault* shows roles given on vaults themselves. **Export** as Markdown, CSV or PDF.
+- **Two sources, so nothing is missed:** Azure's PIM records per subscription (they tell a PIM activation from
+  standing access) and Resource Graph's role assignments, which fill in the subscriptions where you lack Reader at
+  subscription level and the few assignments the PIM records leave out. In those subscriptions each resource group
+  holding assignments is read on its own (Reader on the group is enough); a group that refuses too is marked
+  *standing, or a PIM activation (can't tell here)*. Checked against an independent rebuild per person on a large
+  tenant: every role the audit shows exists in Azure, and nothing readable is missing.
+- **Key Vault access policies:** vaults still on the access policy model give secrets through their policies, not
+  roles. Each entry that reads a secret's value (*get*), changes data or uses keys is listed as **Key Vault access
+  policy** with its permissions; access policies have no PIM, so they're always standing. *list* alone is metadata.
+- **Assignments to deleted users or groups** (*Identity not found* in the portal) give nobody access but are worth
+  removing: listed under the people, with where each sits.
+- **What it can't tell:** group memberships made through PIM for Groups look the same as standing ones (Microsoft
+  Graph needs a permission the Azure CLI sign-in doesn't have); the page says so.
+- **Saved on this machine:** the last result per scope is kept in `cache_dir` (readable only by you) for
+  `audit.keep_days` (7; 0 keeps nothing), so the audit opens at once, even for a whole tenant, under a *Saved result
+  from …* line with its age. Access changes at any moment and can't be read as "what changed since", so a saved
+  result is never patched: **Refresh** (or *Read it again from Azure*) reads everything and replaces it. A different
+  `audit.ignore_actions` is a different saved result. **Clear cached data** removes them.
 
 ### Cost
 
@@ -588,7 +740,7 @@ row.
 
 **A resource group's summary** shows what's in it and when it was last checked. Once a group is checked, going back
 to it (in the tree or the breadcrumb) shows that check again, kept for the last 10 groups until each is checked anew;
-**group summary** beside its results returns to this page, where **Show last check** goes back to it without
+**‹ Group page (cost, access)** beside its results returns to this page, where **Show last check** goes back to it without
 checking again (**Check again** reads it anew). **Check this group** reads the
 health of every resource in it, as a table, worst first (**Table | Graph** switches view for that check; the next
 check opens on Table again, or on Graph when `graph.auto` is on). A group check reads every
@@ -641,6 +793,11 @@ including its requests to Azure.
 | 🟢 healthy | everything Azure reports is fine |
 | ⚪ unknown | not readable with your access, or nothing reported for this type. Never assumed healthy |
 
+Its header has **Refresh** (reads the open tab again from Azure instead of the cache), **Open in portal**, **Check
+from here** and the Watchlist star. Elsewhere in the console a row or card that leads to a resource opens it only
+from its **Open in Browse** button (Summary's view links say **Show**), so selecting text or a stray click never
+jumps away: Triage cards, Secrets, Readiness, Summary, Watchlist and the alert history.
+
 Its tabs, in order (a red count means something is open there):
 
 - **Overview:** **Needs attention** lists only what's critical or warning, each saying what it is: for a fired
@@ -652,13 +809,15 @@ Its tabs, in order (a red count means something is open there):
   **Recent events** from the last 24 hours with their day and time, leaving out the alerts already listed. Then
   *Your access here*, what's open in ServiceNow and monitoring tools, and every signal. If you can't read it, the
   roles you could activate through PIM are listed with a link.
-- **Timeline:** what happened in the last 6 h, 24 h or 7 days, newest first: alerts fired and resolved, changes,
+- **Timeline:** what happened in the last 6 h, 24 h, 3, 7, 14 or 30 days, newest first (changes stop at 14 days,
+  which is all Azure keeps, and the page says so): alerts fired and resolved, changes,
   Activity Log operations, Resource Health, plus ServiceNow incidents and changes and the monitoring tool's issues.
   Tick sources on or off. Built to answer "what came first": the deploy, the alert, or the incident. The same
   operation by the same caller with the same outcome 3 or more times is one row with a count (API Management logs
   hundreds of "Get subscription keys" a day), and so is an alert that keeps firing; up to ~2,000 Activity Log events
   are read, and the tab says when the window held more.
-- **Metrics:** any metric over 1 h to 7 days, split by any dimension (status code, instance, namespace…).
+- **Metrics:** any metric over 1 h to 90 days (Azure keeps platform metrics 93 days), split by any dimension
+  (status code, instance, namespace…).
 - **Nodes** (AKS): every node with its pool, VM size and zone, Ready or NotReady (with the reason), memory, disk or
   PID pressure, cordoned and taints, CPU, memory and pods requested and used against what it holds, kubelet version,
   node image and its age, and the pools in total; click a node for its conditions, OS, kernel and runtime. Worst
@@ -667,9 +826,57 @@ Its tabs, in order (a red count means something is open there):
 - **Workloads** (AKS): pods by phase, Container Insights, and checks through the Kubernetes API, with pod logs on
   request. **Happening now** (HPAs at max, replicas not ready, pending pods, OOMKilled, nodes NotReady) and
   **Configuration risks** (single replicas, missing requests or limits, HPA and PDB settings). A part your role
-  can't read is named with the role it needs.
-- **Application Insights** (a component, or a Web or Function App through its component): the last 1 to 24 h
-  against the same window a week ago, by role; failing operations, exceptions, failing dependencies,
+  can't read is named with the role it needs. Each section folds (ones with problems open, your own open/close kept
+  in this browser; empty ones are one grey line). A toolbar that stays at the top holds one filter over every
+  section, a **namespace** picker (namespaces with problems first, with their counts; kept per cluster), **Go to
+  workload** (type part of a name; its details open under the toolbar), **Look back** (1 hour to 30 days, for restarts, OOMKilled and warning events; the workspace keeps 30 days
+  by default), *include system namespaces* and **Expand all / Collapse all**, with a *Showing:* line (and Reset) and a
+  jump bar to each section with its count. **logs** opens under the row you clicked, one at a time (✕, Esc), JSON
+  lines as time · level · message, with a filter, errors-and-warnings only, wrap and copy. **OOMKilled** lists each kill with its pod, node and time, and whether the container hit its own memory
+  limit or the node ran out (the kernel's message on the node, else memory just before), with the killed instance's
+  logs around the kill. With a monitoring tool picked in the Scope bar (New Relic's Kubernetes integration), **OOM
+  kills from** that tool lists the same for clusters without Container Insights, matched by the cluster's name: every
+  kill in the look-back is counted (in the section's header and in What's wrong now), the newest 200 are listed and
+  the newest 25 get memory readings. **Warning events** (BackOff, FailedMount, a node's OOMKilling…) come from
+  Container Insights over the look-back; without it, from the cluster itself (what Kubernetes still keeps, about an
+  hour), and from the monitoring tool over the look-back. A read that reaches a tool's own limit says so.
+  **Dependencies of a workload** (namespace and Deployment, StatefulSet or DaemonSet, picked from the cluster's own, or for one namespace from Container Insights or the monitoring tool; also Investigate → pod): the
+  Azure resources it uses, from the host names in its env and ConfigMaps (scanned on your machine, values never
+  shown, Secrets never read) and from what its workload identity holds roles on, Cosmos DB data roles included.
+  Without the Kubernetes API it shows the identity part alone and says so. **Path** (same pickers; also Investigate →
+  pod and an App Service's App Insights tab): each hop in front of the workload and the workload itself, the last hour
+  against the same hour last week, per minute on one 60-minute strip, and one sentence on where it breaks (the hop
+  furthest back whose errors rose, or whose traffic fell below half). *App Gateway* routes and *API Management* APIs
+  are read from their logs in Log Analytics (5xx, 502/504, the gateway's own errors against the backend's, p95, top
+  reasons); *requests* from the monitoring tool picked in the Scope bar (an app's transactions) or an App Insights
+  component; *pods* from Container Insights, else the monitoring tool. Nothing ties a gateway route to a workload on
+  its own, so **Link front doors** suggests them from data (a backend pool that is the cluster's internal load
+  balancer or in its subnets; APIs sharing words with the workload or a path its app serves; its app and component
+  by name), each with why, and keeps what you tick for this tenant (`workload_links` in the config file). A hop it
+  can't read says why, never zero. **Workload details**: click a workload on any line that names one (HPAs, Happening
+  now, Configuration risks, Pods not running; or pick it and press **Details**) and it opens under that line, read
+  then: rollout and images; the checks for it; its **HPA** with each metric now against its target and how many pods
+  that metric alone asks for (so *held at its maximum by memory* is shown, not guessed), its conditions and behaviour;
+  each container's requests and limits against use now, probes, scratch volumes, and its runtime's memory settings
+  (`-Xmx`, `MaxRAMPercentage`, `--max-old-space-size`, `GOMEMLIMIT`… picked out of its env and arguments; the rest of a
+  value is never kept); its pods with node, zone, restarts and last exit; its events. Below that, its CPU and memory
+  over 7 and 30 days (Container Insights, else the monitoring tool) with the pod request each HPA target needs to be
+  reachable (memory from its 30-day max, CPU from its 7-day p99), and, when the monitoring tool reports it, the app's
+  heap and process memory against the pod's, which shows memory held outside the runtime. **Would a change fit?**
+  takes new requests per container (today's, or *what its HPA targets need*) and, on **Check**, reads the nodes and
+  every pod on them: the replicas its HPA would then ask for (its own arithmetic with the new request, or a number
+  you give), whether they fit node by node on the pools its pods run on, each pool's requests before and after, the
+  nodes missing when they don't (and whether the pool's autoscaler can add them), and the room a rolling update has
+  next to the old pods. Taints, affinity and topology spread aren't modelled. The ⓘ next to a section shows the kubectl command for the same list, with copy. A Failed pod is a
+  warning, dated by when it stopped; one that stopped over a day ago is marked *leftover* (Kubernetes keeps Failed
+  pods until someone deletes them).
+- **kubectl** (AKS): the commands to run in your own terminal, this cluster's name, group and subscription filled
+  in, in ten folding sections (remembered in this browser): connect, what the console shows, find your way, look
+  closer at one workload, network, config and storage, jobs, debug inside a container, the cluster in Azure, and
+  making changes (restart, roll back, scale, clean up Failed pods, cordon and drain…), under a warning that the next
+  deploy undoes a change made by hand. The console itself still only reads.
+- **Application Insights** (a component, or a Web or Function App through its component): the last 1 hour to 30
+  days, by role, against the same window a week ago for windows up to 7 days; failing operations, exceptions, failing dependencies,
   availability tests, and the queries sent. On an app it says which component it used and how it found it.
 - **ServiceNow** and one tab per **monitoring tool:** the records and entities that name this resource.
 - **Details:** type-specific facts, e.g. Key Vault expiry (names only), SQL usage and replication, Redis patch
@@ -704,7 +911,7 @@ values are never read.**
 
 ### Network
 
-Address space and subnet IP usage for every VNet in scope, worst first.
+Address space and subnet IP usage for every VNet in scope, worst first; a VNet without subnets (info) comes last.
 
 - **The list:** each VNet's address space, how much is allocated, and its three fullest subnets. Yellow at 80%,
   red at 90% (`network.subnet_warning_percent` / `subnet_critical_percent`).
@@ -896,7 +1103,8 @@ user's), so one is never mistaken for the other. The tab's label shows how many 
 - **Check someone's access** (its own tab): type a name, sign-in name, mail or object ID (2 characters or more) and pick the user.
   The page is laid out like **My access**: counts first (roles now, roles they can activate, groups), one filter, then
   their roles now and the roles they can activate in the subscriptions in scope, grouped by subscription with the same
-  Role, Scope, Type and Via group columns, including roles held at management groups, and their groups, the ones
+  Role, Scope, Type and Via group columns (**Order**: by subscription name, or most roles first; remembered in this
+  browser), including roles held at management groups, and their groups, the ones
   that give them a role in scope first. Groups and active roles show first; eligible roles take
   one read per subscription (8 at a time) and follow, and above 100 subscriptions the page asks before reading them.
   It shows only what your own access can read, and says what it couldn't. Roles from a PIM group the user is only
@@ -905,18 +1113,43 @@ user's), so one is never mistaken for the other. The tab's label shows how many 
   permanent ones). The PIM groups you *could* activate can't be read with the Azure CLI's sign-in (Microsoft only
   lets its own apps read them), so there's a link to the portal's PIM groups page instead.
 
-The console never activates anything: activate in the portal, then click **Refresh access** (account menu, top right). Azure
+The console never activates anything: activate in the portal, then click **Refresh access** (account menu, top right).
+**Refresh access** drops cached tokens and results, keeps the scope you're using (Settings → *Open with* only applies
+when the page opens) and reloads the page you're on. **What the console needs** (a sub-tab here) lists what each
+feature needs and checks it against your roles in the scope: what you have, what a PIM-eligible role would give
+(with *activate*), and what neither does; see [Permissions](#permissions). Azure
 roles take effect without signing in again; a **PIM group** changes your sign-in, so run `az login` again.
 
 ### Settings
 
 A menu on the left: **General** (saved scopes, Open with, Triage), **Thresholds** (health, expiry,
-subnets), **Dependency graph**, **AKS**, **Files and Watchlist**, **Integrations** and **Alerts**. Each setting has a plain
+subnets), **Dependency graph**, **AKS**, **Files and Watchlist**, **Integrations**, **Alerts** and **Logs**. Each setting has a plain
 name, what it does, its default, and its config key in small print; **reset** puts back a changed one.
 
 A bar at the bottom appears as soon as something changes ("2 unsaved changes: …") with **Discard** and **Save**.
 Save validates first (nothing is written if a value is wrong, and the message says which), keeps your comments
 and the previous file as `config.yaml.bak`, and applies at once. **Reload from file** picks up hand edits.
+
+### Logs
+
+**Settings → Logs** shows what happened in the console, on this machine. Nothing in it is sent anywhere, and it never
+holds tokens, keys or secret values (they're hidden before anything is written). Pick **Today**, **Last 7 days** or
+**Last 30 days**; the filter box finds any text, such as an error ID.
+
+- **Errors:** a bug in the console, a check that failed, or an error in the page itself, each with an ID. When the page
+  says *error ID 7f3a2c1d*, that's the row here; **Details** has the stack trace and **Copy for a bug report** copies it
+  with subscription and object IDs hidden.
+- **What was done:** who did what and when: settings saved (which ones), connections and keychain secrets changed,
+  Watchlist and alert rules, sign-in and sign-out, every read started, and the sensitive reads (Check someone's access
+  names who was looked up). A request without the console's key is listed as *refused*.
+- **Requests sent:** first the answer, "✓ Only reads left this machine today" (or what didn't), then every request the
+  console sent, one block per service with its address and total, by method and path (names and IDs as `{…}`) and how
+  each was answered. Each POST says which read it is: services take a few reads only as POST (Resource Graph, Log
+  Analytics and Cost Management queries, the AKS user credential, New Relic's GraphQL, the ServiceNow sign-in token).
+  Anything else is stopped before it's sent and counted as *refused*. *No answer* means a timeout or a dropped connection.
+
+The log is kept while the console runs with `serve`: one file per kind and day in `logs.dir`, readable only by you,
+deleted after `logs.keep_days` (30).
 
 ### Links
 
@@ -976,8 +1209,8 @@ in the browser. **Test connection** should now read. What's readable still depen
 `em_event`) — a table the account can't read, or the instance doesn't have, is reported and skipped.
 
 **Monitoring tools:** one card per connection (e.g. *NR Prod* and *NR NonProd*). **New Relic** connects today:
-region, account IDs and a **User API key** (`NRAK-…`; it sees what its user sees). Datadog and Grafana can be
-saved and connect in a later version.
+region, account IDs and a **User API key** (`NRAK-…`; it sees what its user sees). Datadog and Grafana aren't offered
+until they connect; one already in a config file still loads and shows its card.
 
 **Test connection** checks exactly what's typed and saves nothing; it says who you're signed in as and what's
 readable. **Save** keeps the fields in `config.yaml` and the secret in your keychain.
@@ -985,12 +1218,38 @@ readable. **Save** keeps the fields in `config.yaml` and the secret in your keyc
 **Where secrets go:** passwords, client secrets, tokens and API keys go to your **OS keychain** (macOS Keychain,
 Windows Credential Manager, Linux Secret Service), named for what they hold (e.g. *Azure Health Console - NR Prod
 (API key)*). They're never written to `config.yaml`, shown again, or logged. Where the keychain is blocked, set the
-environment variable each card names (e.g. `AHC_MONITOR_NR_PROD_API_KEY`) before starting the console.
+environment variable each card names (e.g. `AHC_MONITOR_NR_PROD_API_KEY`) before starting the console. A ServiceNow
+secret from the environment (`AHC_SERVICENOW_PASSWORD`, `AHC_SERVICENOW_CLIENT_SECRET`) is sent only to the instance
+`AHC_SERVICENOW_INSTANCE` names (e.g. `AHC_SERVICENOW_INSTANCE=yourcompany.service-now.com`), so it never reaches
+another connection or an instance changed in Settings; the card says when it's held back. The console never connects
+ServiceNow to an address on your own machine or its link (`localhost`, `127.x`, `169.254.x`); an internal instance
+over the VPN is fine.
 
 **Connection names** are 1 to 40 characters (letters, digits, spaces and `. _ - ( )`) and unique, ignoring case
 and punctuation ("NR Prod" and "nr-prod" clash, since they'd share an environment variable).
 
 ---
+
+## How far back you can look
+
+Each history read goes as far back as the console offers or Azure keeps, whichever is shorter. Measured on a large
+tenant (2026-11-20):
+
+| Source | Azure keeps | The console offers |
+|---|---|---|
+| Activity Log (Timeline: operations) | 90 days | 30 days |
+| Alerts (Timeline, Triage) | 30 days | 30 days |
+| Resource changes (Timeline, Investigate, Triage) | 14 days | up to 14 days, said when a longer window is picked |
+| Platform metrics (Metrics tab) | 93 days | 90 days |
+| Application Insights (Investigate, a resource's Application Insights tab) | 30 days by default, per component (90 or more on some) | 30 days |
+| Container Insights (Workloads → Look back) | the Log Analytics workspace's retention, 30 days by default | 30 days |
+| Kubernetes events (Workloads, the API) | about 1 hour (Kubernetes' own default) | what the cluster has |
+| Monitoring tools' logs (New Relic) | the tool's plan | 7 days |
+| OOM kills and warning events from a monitoring tool (Workloads, New Relic) | the tool's plan | 30 days (follows Look back) |
+| The console's own alert history (Alerts bar) | in memory, `alerts.history_hours` (1 to 168), at most 500 per sign-in | 24 hours |
+
+Long windows cost more: 30 days of a busy Application Insights component took about 14 s (590,000 requests) and 30
+days of Container Insights about 10 s, against under a second for the last hour.
 
 ## Performance and scale
 
@@ -1018,18 +1277,41 @@ waits at most 20 s on Azure's throttling before it says so; background jobs wait
 
 ## Permissions
 
-The console only reads, and only what your account can already read.
+The console only reads, and only what your account can already read. Nothing here is required up front: where
+something is missing, the page says what and how to get it. **Access → What the console needs** checks each row below
+against your own roles in the scope you picked (✓ what you have, *activate* what a PIM-eligible role would give, ✗ what
+neither does), worked out from what your roles allow, so custom roles count.
 
-| Feature | Role needed (at the resource, its resource group, or subscription) |
-|---|---|
-| Triage, search, health, metrics, Resource Health, diagnostics, Advisor, Activity Log, Timeline | **Reader** (Monitoring Reader also works for metrics) |
-| vCPU quota (Readiness) | **Reader** on the subscription |
-| Key Vault expiry | **Reader** on the vault (names and dates only). Data roles like *Key Vault Secrets User* aren't enough. A vault firewall that doesn't allow trusted Azure services blocks it, and the page says so |
-| AKS Container Insights | **Reader** on the cluster, or **Log Analytics Reader** on its workspace |
-| Investigate | **Reader** on the App Insights components; on API Management for its loggers and gateway logs; on the AKS clusters for the pod's Container Insights rows |
-| AKS workload checks and logs | **AKS Cluster User Role** (unless you have a kubeconfig context for it), a Kubernetes read role (**AKS RBAC Reader**, or a `view` binding), and a network path to the API server (VPN for private clusters) |
-| Cost | **Cost Management Reader** or **Reader** on the subscription (a resource group's costs: on the group). Some offer types (sponsorships, some credit-based subscriptions) have no Cost Management at all. Billed while idle needs only **Reader** |
-| Access tab | your own PIM eligibilities, activations and role assignments, and your own groups: no extra role (standing roles are read where you can read them) |
+**Recommended access** for everything: **Reader** on the subscriptions (Cost included), **Azure Kubernetes Service
+Cluster User Role** and **Azure Kubernetes Service RBAC Reader** on the clusters, **AcrPull** on the registries.
+Or one custom role that holds exactly that: **Access → What the console needs → Download the custom role**
+(`azure-health-console-reader.json`: `*/read`, the AKS user credential, Kubernetes objects other than secrets, registry
+images). Set its `AssignableScopes`, then `az role definition create --role-definition azure-health-console-reader.json`.
+Plus the settings in the table that aren't roles (Defender plans, Container Insights).
+
+| Feature | Needs | Exact actions (for a custom role) | Without it |
+|---|---|---|---|
+| Triage, Browse, health, metrics, timeline, Readiness, Search, Secrets (names and dates), Network | **Reader** on the subscriptions | `*/read` | Subscriptions you can't read aren't in the scope picker; resources you can't read show as not readable |
+| Cost | **Cost Management Reader** or **Reader** on the subscriptions (a resource group's costs: on the group). Some offer types (sponsorships, some credit-based subscriptions) have no Cost Management at all | `Microsoft.CostManagement/*/read`, `Microsoft.Consumption/*/read` | The Cost card names the subscriptions it couldn't read and the role to ask for |
+| Access audit, Check someone's access | **Reader** on the subscriptions (role assignments and PIM records) | `Microsoft.Authorization/*/read` | Those subscriptions are read resource group by resource group from Resource Graph; groups still refused can't be told from PIM activations |
+| AKS Workloads, Nodes, pod logs, Running image | **AKS Cluster User Role** and a Kubernetes read role (**AKS RBAC Reader**, or a `view` binding), plus a network path to the API server (VPN for private clusters) | `Microsoft.ContainerService/managedClusters/listClusterUserCredential/action`; data `Microsoft.ContainerService/managedClusters/*/read` | Workloads and Nodes name the role, binding or network path that's missing; platform metrics and Container Insights still show |
+| Vulnerabilities: find tags (registry images) | **AcrPull** on the registries (or *Container Registry Repository Reader* where it uses repository permissions), and a network its firewall allows (often VPN) | `Microsoft.ContainerRegistry/registries/pull/read`, or data `…/repositories/content/read` | The image's digest still shows; the page says what refused |
+| Access audit (group members), Check someone's access | Your account can read groups' members and other users in **Microsoft Graph** (the default for members; some tenants restrict it) | none (directory setting) | The audit names the groups whose members couldn't be listed; the user search shows Graph's refusal |
+| Vulnerabilities: findings, Recommendations from Defender | **Defender for Servers** and **Defender for Containers** turned on (paid plans, a setting, not a role); the free tier gives some recommendations | none (setting) | Only the platform checks show (AKS versions and node images, runtimes, TLS); Advisor's recommendations still show |
+| AKS dependencies of a workload | **Reader** on the cluster's subscription (managed identities and their federated credentials, role assignments, Cosmos DB role assignments); for its configuration, the AKS roles and network path above | `*/read` | Without the Kubernetes API the list comes from the workload identity's roles alone, and says so |
+| AKS workload details | As AKS Workloads (above), plus every namespace's pods for *Would a change fit*; its CPU and memory history from **Container Insights** or a monitoring tool; the app's heap from the monitoring tool (New Relic's APM agents) | `*/read` | Each part says what it couldn't read |
+| Workload path | **Reader** on the App Gateways and API Management services (routes, APIs, diagnostic settings) and on the cluster's node resource group and virtual network (its load balancer and subnets, for suggestions); their logs in a workspace (**Reader** on the resource, or **Log Analytics Reader**); a monitoring tool for requests or pods where Azure has none | `*/read` | Each hop says what it couldn't read; suggestions note what wasn't listed |
+| AKS logs and pod history (Container Insights) | **Container Insights** turned on for the cluster (a setting), and **Reader** on the cluster or **Log Analytics Reader** on its workspace | `*/read` | Workloads says Container Insights isn't available and shows the other layers |
+| Key Vault expiry (Secrets, a vault's page) | **Reader** on the vault: names and dates only, never values. Data roles like *Key Vault Secrets User* aren't enough. A vault firewall that doesn't allow trusted Azure services blocks it | `*/read` | The page says the firewall or role refused it |
+| vCPU quota (Readiness) | **Reader** on the subscription | `*/read` | That check is skipped and named |
+| Investigate | **Reader** on the Application Insights components; on API Management for its loggers and gateway logs; on the AKS clusters for the pod's Container Insights rows | `*/read` | Each step names what it couldn't read |
+| Resource Health | the `Microsoft.ResourceHealth` provider registered in the subscription | none (registration is a write, so the console never does it) | That signal is reported as not registered |
+| Diagnostics | a resource type with detectors in Azure's read API: App Service, AKS, Redis, Logic Apps, Batch | `*/read` | The tab says the type has none (or that Azure refused it), links to the portal and shows Microsoft's troubleshooting guides |
+| Application Insights tab | an Application Insights resource (for an app, linked to it) | `*/read` | The tab says no component is linked to the app, and how to find one |
+| ServiceNow, monitoring tools (tabs, cards, alert signals) | a connection in Settings → Integrations (New Relic); the account rules below | none (their own accounts) | Their tabs and cards don't appear |
+| PIM hints (Access tab, "activate" on refusals) | roles assigned through PIM | none | The tab shows your standing access only |
+| Saving integration secrets | an OS keychain (macOS Keychain, Windows Credential Manager, or a Secret Service on Linux) | none | Set them as `AHC_…` environment variables instead |
+| Browser notifications (Alerts) | notifications allowed for `127.0.0.1` in your browser | none | Alerts still show in the bar on every tab |
 
 **ServiceNow:** the connection's account needs **read access to the records** of each table it reads: `incident`,
 `change_request`, and when ticked `task_ci`, `change_task`, `em_alert`, `em_event`. Being allowed to call the API
@@ -1064,7 +1346,9 @@ All settings are optional; most are also editable in **Settings**. The annotated
 | `triage.scope` | `none` | before 1.0.0; read as Open with until a tenant has its own `open_with` |
 | `triage.changes_hours` | `1` | how far back Triage looks for changes on the resources its cards list (shown under each one) |
 | `triage.include_system_changes` | `false` | include changes made by Azure itself (noisy) |
-| `triage.secret_scan_max_vaults` | `200` | Secrets scans automatically up to this many vaults |
+| `triage.secret_scan_max_vaults` | `200` | Secrets scans automatically up to this many vaults; Readiness reads at most this many and names the rest |
+| `triage.capacity_near_max_percent` | `80` | Triage lists autoscale at this share of its maximum or more (at the maximum is red) |
+| `triage.resolved_hours` | `24` | resolved Service Health issues stay listed this long |
 | `triage.azure_status_feed` | `true` | the service status card reads the public Azure status feed (`azure.status.microsoft`, no token, nothing about you sent) |
 | `updates.check` | `true` | an installed copy (pip, pipx, brew) asks PyPI every 6 hours whether a newer version is out: a dot on the account button, a menu line, and About gives the upgrade command for how it was installed. Never from a checkout; nothing about you sent |
 | `graph.auto` | `false` | draw dependencies on every click |
@@ -1078,14 +1362,36 @@ All settings are optional; most are also editable in **Settings**. The annotated
 | `health.expiry_warning_days` / `expiry_critical_days` | `30` / `7` | expiry turns yellow / red this many days before |
 | `health.heuristic_limit` | `8` | metrics picked for types without a profile |
 | `health.detectors` | `true` | run Azure's detectors in each check |
+| `health.baseline_change_percent` | `200` | a group's metric "moved" against last week at this share or more (200 = doubled), or its inverse |
+| `appinsights.failed_min` / `failed_rate_points` | `5` / `1` | failing more: at least this many failed requests, and the rate this many points above the same hour last week (Triage's spike card, Investigate, Path) |
+| `appinsights.exceptions_min` / `exceptions_percent` | `10` / `200` | throwing more: at least this many exceptions, at this share of last week or more |
+| `appinsights.critical_rate_percent` / `critical_failed_min` | `20` / `20` | failing turns red at this rate with at least this many failed |
+| `path.drop_percent` / `drop_min` | `50` / `100` | Path: traffic under this share of last week (when it had this many) is a drop |
+| `path.restarts_min` / `restarts_critical` | `3` / `10` | Path: pod restarts rising from (and twice last week), red from |
+| `cost.spike_percent` | `200` | a day at this share of the usual day (median of the 7 before) is a spike |
+| `security.risky_ports` | `22, 3389, 1433, 3306, 5432, 6379, 27017, 5985, 5986` | ports that are a warning when open to the internet |
+| `vulnerabilities.eol_warning_days` | `90` | an App Service runtime turns yellow this many days before its end of support |
 | `network.subnet_warning_percent` / `subnet_critical_percent` | `80` / `90` | subnet usage that turns yellow / red |
+| `audit.keep_days` | `7` | Access audit: days its last result per scope is kept on this machine; 0 keeps nothing |
+| `alerts.history_hours` | `24` | how long the Alerts bar keeps the console's own alerts (1 to 168), in memory: a restart clears them |
 | `alert_check.days` | `7` | Is this alert right?: days of history read (1 to 30) |
 | `alert_check.always_on_percent` / `rare_percent` | `50` / `5` | true in at least this share: *not new*; true now and in at most this share: *unusual* |
 | `alert_check.change_percent` | `50` | now this much above (or below) last week counts as a change (50 = 1.5×) |
 | `alert_check.min_buckets` | `24` | the fewest values before any verdict |
 | `aks.kubeconfig_paths` | none | extra kubeconfig files or folders |
 | `aks.fetch_credentials` | `true` | fetch the AKS user credential when no local context matches |
+| `aks.memory_near_limit_percent` / `cpu_near_limit_percent` | `85` / `80` | a container near its memory limit (OOM) / CPU limit (throttled) |
+| `aks.cpu_above_request_percent` / `cpu_idle_percent` | `90` / `30` | CPU above / below this share of its request |
+| `aks.hpa_target_high_percent` / `hpa_near_max_percent` / `hpa_overshoot_percent` | `85` / `80` / `150` | an HPA target that's high; an HPA near its max; a metric this far past its target |
+| `aks.pool_requests_percent` | `80` | a node pool this full is a finding (and amber) when it can't grow |
+| `aks.restarts_warning` | `5` | restarts from this many on are a warning |
+| `aks.leftover_hours` / `rollout_hours` | `24` / `24` | a Failed pod older than this is left over; a rollout this recent shows |
+| `aks.node_image_warning_days` / `node_image_critical_days` | `60` / `180` | node image age that turns yellow / red (Nodes and Security) |
+| `aks.restarts_look_back_hours` / `oom_look_back_hours` / `events_look_back_hours` | `1` / `24` / `1` | Workloads' Look back on *default* |
+| `aks.oom_near_limit_percent` / `oom_node_full_percent` | `90` / `95` | an OOM kill's probable cause without a kernel message: its own limit / the node |
 | `watchlist_file` | `~/.config/azure-health-console/watchlist.yaml` | where the Watchlist is saved |
+| `logs.dir` | `~/.local/state/azure-health-console/logs` | where this machine's log is kept (Settings → Logs) |
+| `logs.keep_days` | `30` | days the log keeps, 1 to 365 |
 | `profiles_dir` | `~/.config/azure-health-console/profiles` | your own health profiles |
 | `exports_dir` | `exports` | where the commands write files |
 | `cache_dir` | `~/.cache/azure-health-console` | where the cost store is kept (`costs-<tenant>-<account>.json.gz`, mode 600) |
@@ -1154,7 +1460,9 @@ and after a change, on the same scope, to compare.
 
 | Symptom | What to do |
 |---|---|
+| "Something went wrong inside the console … Error ID …" | A bug in the console, not Azure. **Settings → Logs → Errors**: type the ID in the filter, open **Details**, and **Copy for a bug report** |
 | "Sign in to Azure to continue" | Run the command it shows (`az login`, or `az login --tenant <id>`); the page carries on by itself. If the Azure CLI isn't installed, it links to the installer |
+| "az login finished, but no account was saved: … needs a sign-in of its own" | `az login` without a tenant skipped that tenant (usually for multi-factor sign-in) and saved nothing. Press **Sign in to …** next to it, or run `az login --tenant <id>` |
 | Triage is empty | No scope is applied yet: pick subscriptions in the Scope bar and press **Apply** |
 | A saved scope picks the wrong subscriptions | `azure-health-console config` shows how many each scope's patterns match |
 | A resource is grey with "No access to …" | The message names the role, and lists the PIM roles you could activate. Activate one, then **Refresh access**. A refused read is remembered for 5 minutes (an unreachable private cluster for 2), so reopening it answers at once; **Refresh access** or the view's **Refresh** asks Azure again |
@@ -1188,7 +1496,7 @@ healthconsole/
   core/explore/    a resource's tabs: metrics, details, scaling, diagnostics, timeline, App Insights,
                    AKS workloads (read-only Kubernetes client), Key Vault expiry
   core/integrations/  ServiceNow and monitoring tools, behind one provider interface, each with its own guard
-  web/             Flask blueprint (mountable) and the local app with a loopback guard; static/app.js is the page
+  web/             Flask blueprint (mountable: `authorize=` is your sign-in check) and the local app with its key; static/js/ is the page
   profiles/        built-in per-type health profiles
   cli.py           the commands
 packaging/         the Homebrew formula template
@@ -1200,6 +1508,18 @@ Rules worth knowing before changing anything:
 - **Generic:** no tenant, subscription, tag or instance names in code, defaults or tests.
 - **Nothing silently missing:** a setting that isn't configured, or something that couldn't be read, is named on
   the page with its fix.
+
+### Built with
+
+| Layer | What it uses |
+|---|---|
+| Backend | Python 3.11+ and [Flask](https://flask.palletsprojects.com/) (the page template is Flask's Jinja). [requests](https://requests.readthedocs.io/) for every outbound call, behind the read-only guards; [azure-identity](https://pypi.org/project/azure-identity/) to use your `az login`; [ruamel.yaml](https://pypi.org/project/ruamel.yaml/) for the config file; [fpdf2](https://pypi.org/project/fpdf2/) for PDF exports; [keyring](https://pypi.org/project/keyring/) for secrets in the OS keychain; [truststore](https://pypi.org/project/truststore/) for the OS's certificate store (corporate proxies). |
+| Frontend | Plain JavaScript, no framework and no build step: `web/static/js/` (the page: one file per area, loaded in order by `SCRIPTS` in `web/__init__.py`) and `diagram.js` (the dependency diagrams). [Chart.js](https://www.chartjs.org/) 4.4.4, bundled under `web/static/vendor/`, draws the charts. Diagrams are SVG drawn on the server (`core/diagram.py`). |
+| Style | Hand-written CSS (`web/static/style.css`), no CSS framework; light and dark themes from CSS variables. |
+| Tests and lint | [pytest](https://pytest.org/), with fakes for Azure, Kubernetes, ServiceNow and the keychain; [flake8](https://flake8.pycqa.org/) for errors. |
+| Packaging and release | PyPI, pipx and Homebrew (the formula template is in `packaging/`), released by an Azure DevOps pipeline (see [Releasing](#releasing)). |
+
+The versions each needs are in [`pyproject.toml`](pyproject.toml).
 
 ### Releasing
 

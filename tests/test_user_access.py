@@ -129,7 +129,7 @@ def test_user_access_api(monkeypatch):
     client = AccessClient()
     client.token_provider = FakeTokens()
     app = Flask("test")
-    app.register_blueprint(create_blueprint(lambda tenant: client, config.load("/nonexistent")))
+    app.register_blueprint(create_blueprint(lambda tenant: client, config.load("/nonexistent"), authorize=lambda: None))
     http = app.test_client()
     assert http.post("/api/access/user", json={"user": {"id": "nope"}, "subscriptions": [SUB_A]}).status_code == 400
     assert http.post("/api/access/user", json={"user": {"id": USER}}).status_code == 400
@@ -189,13 +189,13 @@ def test_single_cluster_check_only_checks_that_cluster(monkeypatch):
 
     seen = {}
 
-    def fleet(client, subscriptions, groups=None, with_detectors=False, progress=None, only_id=None):
+    def fleet(client, subscriptions, groups=None, with_detectors=False, progress=None, only_id=None, leftover_hours=24):
         seen.update(subscriptions=subscriptions, groups=groups, only_id=only_id, detectors=with_detectors)
         return {"clusters": 1, "rows": [], "counts": {}}
 
     monkeypatch.setattr(checks, "aks_fleet", fleet)
     app = Flask("test")
-    app.register_blueprint(create_blueprint(lambda tenant: FakeClient(), config.load("/nonexistent")))
+    app.register_blueprint(create_blueprint(lambda tenant: FakeClient(), config.load("/nonexistent"), authorize=lambda: None))
     http = app.test_client()
     cluster = f"/subscriptions/{SUB_A}/resourceGroups/app-rg/providers/Microsoft.ContainerService/managedClusters/shop"
     job = http.post("/api/checks", json={"check": "aks", "id": cluster, "detectors": True}).get_json()["job_id"]

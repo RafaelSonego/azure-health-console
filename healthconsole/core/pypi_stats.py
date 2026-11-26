@@ -12,7 +12,8 @@ from .guarded import GuardedClient, ServiceError, WriteBlocked
 
 PACKAGE = "azure-health-console"
 RELEASE_NOTES = "https://github.com/RafaelSonego/azure-health-console/releases/tag/v{version}"
-UPGRADE = {"brew": f"brew upgrade {PACKAGE}", "pipx": f"pipx upgrade {PACKAGE}", "pip": f"pip install -U {PACKAGE}"}
+UPGRADE = {"brew": f"brew upgrade {PACKAGE}"}  # pipx and pip: the README's steps, which check the files first
+UPGRADE_STEPS = "https://github.com/RafaelSonego/azure-health-console#pipx-windows-linux-or-a-mac-without-homebrew"
 PROJECT_PAGE = f"https://pypi.org/project/{PACKAGE}/"
 STATS_PAGE = f"https://pypistats.org/packages/{PACKAGE}"
 URLS = {
@@ -36,7 +37,22 @@ class _Public(GuardedClient):
             raise WriteBlocked(f"Only reading this app's public PyPI pages is allowed, not {method} {parts.netloc}{parts.path}.")
 
     def unreachable(self, method, url, error):
-        return ServiceError(f"{urlsplit(url).netloc} couldn't be reached from this machine.", "network")
+        return ServiceError(f"{urlsplit(url).netloc} couldn't be reached from this machine: {why_unreachable(error)}", "network")
+
+
+def why_unreachable(error):
+    """Why Python couldn't connect when a browser on the same machine can: it has its own certificates and proxy settings."""
+    if isinstance(error, requests.exceptions.SSLError):
+        return ("Python doesn't trust the site's HTTPS certificate. A company proxy that inspects HTTPS signs sites with "
+                "its own certificate, which your browser trusts and Python doesn't.")
+    if isinstance(error, requests.exceptions.ProxyError):
+        return "the proxy refused the connection (Python uses HTTPS_PROXY, not the browser's proxy settings)."
+    if isinstance(error, requests.exceptions.Timeout):
+        return ("no answer in time. A firewall may be dropping it: Python goes out directly unless HTTPS_PROXY is set, "
+                "while your browser can use a proxy (PAC) Python doesn't read.")
+    if "resolve" in str(error).lower() or "nodename" in str(error).lower():
+        return "its name couldn't be resolved (DNS), so this network may need a proxy (HTTPS_PROXY)."
+    return f"the connection failed ({type(error).__name__})."
 
 
 _CLIENT = _Public()
@@ -124,4 +140,5 @@ def update(current, enabled=True, refresh=False):
             hit = _cache.put("latest", {"latest": "", "error": str(failure)}, FAILURE_SECONDS)
     latest = hit["latest"]
     return {**base, "checked": True, "latest": latest, "newer": newer(latest, current), "error": hit["error"],
-            "command": UPGRADE[method], "notes": RELEASE_NOTES.format(version=latest) if latest else ""}
+            "command": UPGRADE.get(method, ""), "steps": "" if method in UPGRADE else UPGRADE_STEPS,
+            "notes": RELEASE_NOTES.format(version=latest) if latest else ""}

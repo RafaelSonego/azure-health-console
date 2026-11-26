@@ -51,7 +51,7 @@ def test_a_failure_is_reported_and_kept_briefly(monkeypatch):
 def test_about_route(monkeypatch):
     monkeypatch.setattr(pypi_stats, "fetch", lambda name, session=None: {"pypi": PYPI, "recent": RECENT, "overall": OVERALL}[name])
     app = Flask("test")
-    app.register_blueprint(create_blueprint(lambda tenant: FakeClient(), config.load("/nonexistent")))
+    app.register_blueprint(create_blueprint(lambda tenant: FakeClient(), config.load("/nonexistent"), authorize=lambda: None))
     body = app.test_client().get("/api/about/pypi").get_json()
     assert body["latest"] == "1.1.1" and body["error"] is None and body["last_week"] == 40
 
@@ -78,7 +78,8 @@ def test_update_says_how_to_upgrade_and_reads_once(monkeypatch):
     monkeypatch.setattr(pypi_stats, "install_method", lambda: "pipx")
     monkeypatch.setattr(pypi_stats, "fetch", lambda name, session=None: calls.append(name) or PYPI)
     found = pypi_stats.update("1.1.0")
-    assert found["newer"] and found["latest"] == "1.1.1" and found["command"] == "pipx upgrade azure-health-console"
+    assert found["newer"] and found["latest"] == "1.1.1" and found["command"] == ""  # pipx upgrade checks nothing
+    assert found["steps"].endswith("#pipx-windows-linux-or-a-mac-without-homebrew")
     assert found["notes"].endswith("/releases/tag/v1.1.1")
     pypi_stats.update("1.1.0")
     assert calls == ["pypi"]
@@ -96,6 +97,27 @@ def test_update_route(monkeypatch):
     monkeypatch.setattr(pypi_stats, "install_method", lambda: "brew")
     monkeypatch.setattr(pypi_stats, "fetch", lambda name, session=None: PYPI)
     app = Flask("test")
-    app.register_blueprint(create_blueprint(lambda tenant: FakeClient(), config.load("/nonexistent")))
+    app.register_blueprint(create_blueprint(lambda tenant: FakeClient(), config.load("/nonexistent"), authorize=lambda: None))
     body = app.test_client().get("/api/update").get_json()
     assert body["command"] == "brew upgrade azure-health-console" and body["checked"]
+
+
+def test_unreachable_names_why_python_failed_where_a_browser_did_not():
+    import requests
+
+    class Session:
+        def __init__(self, error):
+            self.error = error
+
+        def request(self, *args, **kwargs):
+            raise self.error
+
+    def said(error):
+        with pytest.raises(ServiceError) as caught:
+            pypi_stats.fetch("recent", session=Session(error))
+        return str(caught.value)
+
+    assert "pypistats.org" in said(requests.exceptions.SSLError("cert")) and "certificate" in said(requests.exceptions.SSLError("x"))
+    assert "HTTPS_PROXY" in said(requests.exceptions.ProxyError("x"))
+    assert "no answer in time" in said(requests.exceptions.ConnectTimeout("x"))
+    assert "DNS" in said(requests.exceptions.ConnectionError("Failed to resolve 'pypistats.org'"))

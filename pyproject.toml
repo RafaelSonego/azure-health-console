@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=77"]
+requires = ["setuptools>=77,<85"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -20,12 +20,14 @@ classifiers = [
   "Topic :: System :: Monitoring",
 ]
 dependencies = [
-  "flask>=3.0",
-  "requests>=2.32",
-  "azure-identity>=1.17",
-  "fpdf2>=2.8",
-  "ruamel.yaml>=0.18",
-  "keyring>=25",
+  "flask>=3.0,<4",
+  "requests>=2.32,<3",
+  "azure-identity>=1.17,<2",
+  "fpdf2>=2.8,<3",
+  "ruamel.yaml>=0.18,<0.20",
+  "keyring>=25,<26",
+  "truststore>=0.10,<0.11",
+  "cryptography>=43,<51",
 ]
 
 [project.urls]
@@ -34,7 +36,7 @@ Changelog = "https://github.com/RafaelSonego/azure-health-console/blob/main/CHAN
 Issues = "https://github.com/RafaelSonego/azure-health-console/issues"
 
 [project.optional-dependencies]
-test = ["pytest>=8"]
+test = ["pytest>=8,<10"]
 
 [project.scripts]
 azure-health-console = "healthconsole.cli:main"
@@ -46,7 +48,7 @@ version = { file = "VERSION" }
 include = ["healthconsole*"]
 
 [tool.setuptools.package-data]
-healthconsole = ["profiles/*.yaml", "report_templates/*.html", "web/templates/*.html", "web/static/*", "web/static/vendor/*", "diagram_icons/*"]
+healthconsole = ["release-signing.pem", "profiles/*.yaml", "report_templates/*.html", "web/templates/*.html", "web/static/*", "web/static/js/*", "web/static/vendor/*", "diagram_icons/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

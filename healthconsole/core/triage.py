@@ -9,7 +9,7 @@ from .cards import card as build_card, item as build_item
 from .arm import ArmError, kql_list, rg_clause
 from .model import CRITICAL, INFO, WARNING
 
-MAX_ITEMS = 100
+MAX_ITEMS = 100  # per card; each reads one more, so a cut card says so
 CHANGE_IDS = 500  # problem resources whose changes are read, in one query
 NEAR_MAX = 0.8
 
@@ -35,7 +35,7 @@ def _alerts(client, scope, rg_clause, options):
         f"{rg_clause}"
         " | summarize alerts=count(), worst=min(sev), lastFired=max(tostring(e.startDateTime)),"
         " names=make_set(name, 3) by id, type, resourceGroup, subscriptionId"
-        f" | order by worst asc, alerts desc | take {MAX_ITEMS}", subscriptions=scope)
+        f" | order by worst asc, alerts desc | take {MAX_ITEMS + 1}", subscriptions=scope)
     return [_item(r, CRITICAL if r["worst"] <= crit else WARNING,
                   f"{r['alerts']} alert(s), worst Sev{r['worst']}, latest {alert_detail.when(r['lastFired'])}: {', '.join(r['names'])}")
             for r in rows]
@@ -45,7 +45,7 @@ def _failed(client, scope, rg_clause, options):
     rows = client.query(
         "Resources | extend state = tostring(properties.provisioningState)"
         f" | where state in~ ('Failed', 'Canceled') and {_noise_clause()}{rg_clause}"
-        f" | project id, name, type, kind, resourceGroup, subscriptionId, state | take {MAX_ITEMS}", subscriptions=scope)
+        f" | project id, name, type, kind, resourceGroup, subscriptionId, state | take {MAX_ITEMS + 1}", subscriptions=scope)
     return [_item(r, CRITICAL, f"provisioningState {r['state']}") for r in rows]
 
 
@@ -59,7 +59,7 @@ def _aks(client, scope, rg_clause, options):
         " | summarize poolsAtMax=make_set_if(strcat(tostring(pool.name), ' ', tostring(pool['count']), '/',"
         " tostring(pool.maxCount)), atMax) by id, name, type, resourceGroup, subscriptionId, power, state"
         " | where power != 'Running' or state != 'Succeeded' or array_length(poolsAtMax) > 0"
-        f" | take {MAX_ITEMS}", subscriptions=scope)
+        f" | take {MAX_ITEMS + 1}", subscriptions=scope)
     items = []
     for r in rows:
         problems = []
@@ -82,8 +82,8 @@ def _autoscale(client, scope, rg_clause, options):
         " | summarize maxCap = max(toint(p.capacity.maximum)) by target, setting=name"
         " | join kind=inner (Resources | project target=tolower(id), id, name, type, kind, resourceGroup,"
         " subscriptionId, cap=toint(sku.capacity)) on target"
-        f" | where isnotnull(cap) and maxCap > 0 and cap >= {NEAR_MAX} * maxCap{rg_clause}"
-        f" | project id, name, type, kind, resourceGroup, subscriptionId, cap, maxCap, setting | take {MAX_ITEMS}",
+        f" | where isnotnull(cap) and maxCap > 0 and cap >= {float(options.get('capacity_near_max_percent', 100 * NEAR_MAX)) / 100} * maxCap{rg_clause}"
+        f" | project id, name, type, kind, resourceGroup, subscriptionId, cap, maxCap, setting | take {MAX_ITEMS + 1}",
         subscriptions=scope)
     return [_item(r, CRITICAL if r["cap"] >= r["maxCap"] else WARNING,
                   f"{r['cap']} of max {r['maxCap']} instances (autoscale '{r['setting']}')") for r in rows]
@@ -97,7 +97,7 @@ def _private_endpoints(client, scope, rg_clause, options):
         " | extend state = tostring(c.properties.privateLinkServiceConnectionState.status)"
         " | where state in~ ('Pending', 'Rejected', 'Disconnected')"
         " | summarize states=make_set(state), endpoints=count() by id, name, type, kind, resourceGroup, subscriptionId"
-        f" | take {MAX_ITEMS}", subscriptions=scope)
+        f" | take {MAX_ITEMS + 1}", subscriptions=scope)
     return [_item(r, CRITICAL if any(s.lower() in ("rejected", "disconnected") for s in r["states"]) else WARNING,
                   f"{r['endpoints']} private endpoint connection(s): {', '.join(r['states'])}") for r in rows]
 
@@ -116,7 +116,7 @@ def _subnets(client, scope, rg_clause, options):
                           "detail": f"{subnet['used']} of {subnet['usable']} usable IPs in use ({subnet['percent']}%), "
                                     f"{', '.join(subnet['cidrs'])}"})
     items.sort(key=lambda i: -i["percent"])
-    return items[:MAX_ITEMS]
+    return items[:MAX_ITEMS + 1]
 
 
 def _changes(client, scope, ids, options):
@@ -185,7 +185,7 @@ def _service_health(client, scope, rg_clause, options):
         " updated = tolong(properties.LastUpdateTime)"
         " | where (status =~ 'Active' and eventType in ('ServiceIssue', 'PlannedMaintenance', 'SecurityAdvisory',"
         " 'HealthAdvisory'))"
-        f" or (status =~ 'Resolved' and eventType =~ 'ServiceIssue' and updated > tolong(ago({RESOLVED_HOURS}h)))"
+        f" or (status =~ 'Resolved' and eventType =~ 'ServiceIssue' and updated > tolong(ago({int(options.get('resolved_hours', RESOLVED_HOURS))}h)))"
         " | extend phase = iff(status =~ 'Active', 'active', 'resolved')"
         " | summarize subscriptions=dcount(subscriptionId), events=dcount(tostring(properties.TrackingId)),"
         " impacts=make_set(tostring(properties.Impact), 20), updated=max(updated)"
@@ -230,13 +230,13 @@ def _service_health(client, scope, rg_clause, options):
 def _public_access(client, scope, rg_clause, options):
     """Security's exposure warnings, one item per resource; information, since it's a setting to review, not an
     outage. A read that fails raises, so the card says so instead of looking clear."""
-    found, errors = security.exposure_warnings(client, scope, rg_clause)
+    found, errors = security.exposure_warnings(client, scope, rg_clause, options.get("risky_ports"))
     if errors and not found:
         raise ArmError("; ".join(errors))
     return [build_item({"id": r["id"], "name": r["name"], "type": r["type"], "resourceGroup": r["resource_group"],
                         "subscriptionId": r["subscription_id"]}, INFO, "; ".join(r["findings"]),
                        badge={"tone": WARNING, "label": security.EXPOSED})  # Security's warning colour, outside the problem counts
-            for r in found][:MAX_ITEMS]
+            for r in found][:MAX_ITEMS + 1]
 
 
 CARDS = [
@@ -246,7 +246,7 @@ CARDS = [
      _service_health),
     ("failed", "Failed deployments", "Resources whose provisioning failed or was cancelled", _failed),
     ("aks", "AKS clusters", "Stopped, failed, or with node pools at their maximum", _aks),
-    ("autoscale", "Autoscale near max", "At or above 80% of the autoscale maximum", _autoscale),
+    ("autoscale", "Autoscale near max", "At or near their autoscale maximum", _autoscale),
     ("private_endpoints", "Private endpoints", "Connections pending, rejected or disconnected", _private_endpoints),
     ("public_access", "Exposed to the internet", "Security's exposure warnings: details in Security → Exposure & configuration",
      _public_access),
@@ -274,6 +274,9 @@ def triage(client, subscriptions, options, group_keys=None, cards=None):
             items, error = [], str(failure)
         if isinstance(items, tuple):  # (items, a note on a part that wasn't read, without failing the card)
             items, note = items
+        if len(items) > MAX_ITEMS:
+            items = items[:MAX_ITEMS]
+            note = " ".join(filter(None, [note, f"Only the first {MAX_ITEMS} are listed, worst first: there are more. Narrow the scope to see the rest."]))
         return build_card(key, title, description, items, error, note=note, links=CARD_LINKS.get(key, []))
 
     with ThreadPoolExecutor(max_workers=4) as pool:

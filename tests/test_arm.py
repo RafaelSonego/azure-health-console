@@ -10,6 +10,7 @@ ARM = "https://management.azure.com"
 
 @pytest.mark.parametrize("method,url", [
     ("GET", f"{ARM}/subscriptions"),
+    ("GET", "https://management.azure.com:443/subscriptions/x/providers/Microsoft.ApiManagement/service/s/apis?$skip=100"),
     ("POST", f"{ARM}/providers/Microsoft.ResourceGraph/resources"),
     ("POST", f"{ARM}/subscriptions/x/providers/Microsoft.CostManagement/query"),
     ("POST", f"{ARM}/subscriptions/x/resourceGroups/rg/providers/Microsoft.CostManagement/forecast"),
@@ -29,6 +30,8 @@ def test_reads_are_allowed(method, url):
     ("POST", f"{ARM}/subscriptions/x/providers/Microsoft.CostManagement/scheduledActions/a/execute"),
     ("GET", "https://evil.example.com/subscriptions"),
     ("GET", "http://management.azure.com/subscriptions"),
+    ("GET", "https://management.azure.com:8443/subscriptions"),
+    ("PUT", "https://management.azure.com:443/subscriptions/x/resourceGroups/rg"),
 ])
 def test_everything_else_is_blocked(method, url):
     with pytest.raises(WriteBlocked):
@@ -238,7 +241,7 @@ def test_signed_out_api_answers_401_with_what_to_run(tmp_path):
         raise CredentialError("The Azure CLI couldn't provide a token.", "signed_out", "az login")
 
     app = Flask("test")
-    app.register_blueprint(create_blueprint(signed_out, config.load(tmp_path / "none.yaml"), config_file=tmp_path / "c.yaml"))
+    app.register_blueprint(create_blueprint(signed_out, config.load(tmp_path / "none.yaml"), config_file=tmp_path / "c.yaml", authorize=lambda: None))
     response = app.test_client().get("/api/context?verify=1")
     assert response.status_code == 401
     assert response.get_json()["kind"] == "credential" and response.get_json()["command"] == "az login"
@@ -363,7 +366,7 @@ def test_fresh_on_a_request_gives_the_route_a_fresh_client(tmp_path):
     session = FakeSession([FakeResponse(200, {"value": []}) for _ in range(3)])
     client = ArmClient(FakeTokens(), session=session)
     app = Flask("test")
-    app.register_blueprint(create_blueprint(lambda tenant: client, config.load(tmp_path / "none.yaml"), config_file=tmp_path / "c.yaml"))
+    app.register_blueprint(create_blueprint(lambda tenant: client, config.load(tmp_path / "none.yaml"), config_file=tmp_path / "c.yaml", authorize=lambda: None))
     web = app.test_client()
     for query in ("", "", "?fresh=1"):
         assert web.get(f"/api/subscriptions{query}").status_code == 200
@@ -435,6 +438,6 @@ def test_throttling_reaches_the_page_as_its_own_kind(tmp_path):
         def get_paged(self, *a, **k):
             raise Throttled(12)
     app = Flask("test")
-    app.register_blueprint(create_blueprint(lambda t: Busy(), config.load(tmp_path / "n.yaml"), config_file=tmp_path / "c.yaml"))
+    app.register_blueprint(create_blueprint(lambda t: Busy(), config.load(tmp_path / "n.yaml"), config_file=tmp_path / "c.yaml", authorize=lambda: None))
     answer = app.test_client().get("/api/subscriptions")
     assert answer.status_code == 429 and answer.get_json()["kind"] == "throttled" and answer.get_json()["retry_after"] == 12

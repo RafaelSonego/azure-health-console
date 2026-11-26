@@ -8,16 +8,20 @@ import re
 import secrets
 import subprocess
 import threading
+import time
 from pathlib import Path
+from urllib.parse import urlsplit
 
-from flask import Blueprint, Flask, abort, jsonify, redirect, render_template, request, send_file, url_for
+from flask import Blueprint, Flask, abort, g, jsonify, redirect, render_template, request, send_file, url_for
 from werkzeug.exceptions import HTTPException
 
 from ..core import (acr, alerts, cache, checks, config, cost, graph, personas, inventory, jobs, network, pim, profiles, readiness, report,
                     search, security, settings_file, snapshot, tables, triage, user_access, vulnerabilities)
-from ..core import alert_check, azure_alerts, cost_store, diagram, integrations, investigate, pypi_stats, summary_history
+from ..core import (access_audit, audit_store, requirements, alert_check, azure_alerts, cost_store, diagram, integrations, investigate,
+                    pypi_stats, summary_history)
+from ..core import eventlog
 from ..core.guarded import ServiceError
-from ..core.integrations.provider import ALERT_HISTORY
+from ..core.integrations.provider import ALERT_HISTORY, OOM_KILLS, REQUESTS, WARNING_EVENTS, WORKLOADS
 from ..core.investigate import gateway as inv_gateway, pod as inv_pod
 from ..core.integrations import secrets as integration_secrets
 from ..core.integrations import servicenow as sn
@@ -29,29 +33,72 @@ from ..core.cache import TtlCache
 from ..core.arm import AccessDenied, ArmClient, ArmError, Throttled, WriteBlocked, rg_clause
 from ..core.credentials import AzureCliTokenProvider, CredentialError
 from ..core.discovery import DiscoveryOptions
-from ..core.explore import activity, advice, aks, appinsights, details, detectors, help_guides, kube, metrics, scaling
+from ..core.explore import (activity, advice, aks, appinsights, dependencies, details, detectors, help_guides, kube, metrics,
+                            kube_yaml, pod_detail, scaling, workload_detail, workload_fit, workload_path, workload_problems)
 from ..core.health import HealthOptions
-from ..core.localfiles import private_dir, write_private_text
+from ..core.localfiles import private_dir, read_private_text, write_private_text
 from ..signin import AzLogin, SignInError, accounts as signin_accounts_read, logout as signin_logout
 from .. import __version__
 
 logger = logging.getLogger(__name__)
 
 HERE = Path(__file__).resolve().parent
+# The page's script, in load order: one global scope, so a file may only use at load what an earlier one declares.
+SCRIPTS = [f"js/{name}.js" for name in (
+    "core", "signin", "scope", "browse", "explore", "lists", "resource-tabs", "access", "timeline-appinsights",
+    "investigate", "metrics", "aks-workloads", "aks-nodes", "sections", "wiring", "views", "triage", "vulnerabilities",
+    "secrets", "readiness", "summary", "cost", "audit", "watchlist", "settings", "logs", "servicenow", "monitoring", "scopes",
+    "integrations", "nav", "user-access", "alerts", "boot")]
+SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
+CROSS_SITE = {"cross-site", "same-site"}  # same-site includes another port on 127.0.0.1
+LOCAL_OPEN_PATHS = ("/static/", "/integrations/servicenow/callback")
 MAX_DEPTH = 4
 SECRET_CACHE_SECONDS = 600
 ALERT_CHECK_SECONDS = 900  # Is this alert right?: one check per alert, kept 15 minutes
-LONG_EXPIRED_DAYS = 90  # same fold as the Secrets tab: long past expiry is almost always unused
+LONG_EXPIRED_DAYS = 90
+# The audit's kind for each action: change (settings, connections, keychain, lists), sensitive (a read about people or
+# secrets); every other POST starts a read. Client errors are logged as errors, not as actions.
+AUDIT_CHANGES = {"settings_save", "settings_reload", "integrations_servicenow", "integrations_monitors",
+                 "integrations_move_legacy", "integrations_secret", "servicenow_sign_in", "watchlist_add",
+                 "watchlist_remove", "alerts_save", "alerts_acknowledge", "alerts_snooze", "alerts_dismiss",
+                 "saved_scopes_save", "open_with_save", "saved_scopes_move_legacy", "cache_clear", "path_link_save",
+                 "signin_start", "signin_cancel", "signout"}
+AUDIT_SENSITIVE = {"access_user", "secrets_scan", "access_audit_start"}
+AUDIT_SKIP = {"client_errors"}
+CLIENT_ERRORS_PER_MINUTE = 30  # same fold as the Secrets tab: long past expiry is almost always unused
 
 
-def create_blueprint(client_for, settings, url_prefix="", config_file=None, start_alerts=False, alert_session_ttl=None):
-    """`client_for(tenant_id)` returns an ArmClient for the current viewer and tenant. `settings` is
+def refuse_other_sites(api_prefix):
+    """Only the page itself calls the API: another site's request (a form, a link, a page on another port) is refused,
+    whatever cookie the browser would send with it; actions take JSON only, which a plain form can't send."""
+    if request.path.startswith(api_prefix) and request.headers.get("Sec-Fetch-Site") in CROSS_SITE:
+        abort(403, "The console's API answers only its own page.")
+    if request.method not in SAFE_METHODS:
+        origin = request.headers.get("Origin")
+        if origin and urlsplit(origin).netloc != request.host:
+            abort(403, "The console's API answers only its own page.")
+        if not request.is_json:
+            abort(415, "Send JSON.")
+
+
+def create_blueprint(client_for, settings, url_prefix="", config_file=None, start_alerts=False, alert_session_ttl=None, *,
+                     authorize):
+    """`authorize()` is the host's own check of the caller, run before every request: None lets it through, a
+    response refuses it (required: the blueprint has no sign-in of its own). `client_for(tenant_id)` returns an
+    ArmClient for the current viewer and tenant. `settings` is
     updated in place when the Settings tab saves, so every request sees the current values. `start_alerts` runs
     alert rules in the background from now on (local: the default sign-in's too); `alert_session_ttl` (seconds,
     hosted) stops a viewer's rules once their page stops asking, since their delegated token is gone with it."""
+    if not callable(authorize):
+        raise TypeError("create_blueprint needs authorize=: the host's check of the caller (None lets a request through).")
     blueprint = Blueprint("healthconsole", __name__, url_prefix=url_prefix,
                           template_folder=str(HERE / "templates"),
                           static_folder=str(HERE / "static"))
+
+    @blueprint.before_request
+    def caller_checked():
+        refuse_other_sites(f"{url_prefix}/api/")
+        return authorize()
     runner = jobs.JobRunner()
     config_file = Path(config_file).expanduser() if config_file else config.path()
     live = {}
@@ -61,7 +108,8 @@ def create_blueprint(client_for, settings, url_prefix="", config_file=None, star
         live["watchlist"] = Watchlist(settings["watchlist_file"])
 
     reload_live()
-    alert_runner = alerts.AlertRunner(session_ttl=alert_session_ttl)
+    alert_runner = alerts.AlertRunner(session_ttl=alert_session_ttl,
+                                      history_hours=lambda: settings["alerts"]["history_hours"])
     blueprint.alert_runner = alert_runner
 
     def client():
@@ -94,6 +142,10 @@ def create_blueprint(client_for, settings, url_prefix="", config_file=None, star
     def throttled(error):
         return jsonify(error=str(error), kind="throttled", retry_after=error.retry_after), 429
 
+    @blueprint.errorhandler(jobs.TooManyJobs)
+    def too_many_jobs(error):
+        return jsonify(error=str(error), kind="busy"), 429
+
     @blueprint.errorhandler(WriteBlocked)
     def write_blocked(error):
         return jsonify(error=str(error), kind="blocked"), 500
@@ -107,13 +159,71 @@ def create_blueprint(client_for, settings, url_prefix="", config_file=None, star
         """`abort(400, "why")` reaches the page as that reason, not Flask's HTML page."""
         return jsonify(error=error.description, kind="request"), error.code
 
+    def who():
+        """(name, id) of the person behind this request, for the log; ("", "") when signed out."""
+        try:
+            arm_client = client()
+            return arm_client.identity.name, owner(arm_client)
+        except Exception:  # signed out, or no tenant yet: the event is still written
+            return "", ""
+
+    @blueprint.errorhandler(Exception)
+    def unexpected(error):
+        """A bug in the console, not an answer from Azure: logged with an ID the page shows."""
+        name, user_id = who()
+        error_id = eventlog.record_error(str(error), source="server", error=error, user=name, user_id=user_id,
+                                         context={"method": request.method, "path": request.path})
+        logger.error("unexpected error on %s %s", request.method, request.path, exc_info=error, extra={"recorded": True})
+        where = f" Error ID {error_id}: Settings → Logs has the details." if error_id else ""
+        return jsonify(error=f"Something went wrong inside the console (not in Azure).{where}", kind="internal",
+                       error_id=error_id), 500
+
+    @blueprint.after_request
+    def audit_action(response):
+        action = (request.endpoint or "").rsplit(".", 1)[-1]
+        if request.method not in SAFE_METHODS and request.path.startswith(f"{url_prefix}/api/") and action not in AUDIT_SKIP:
+            name, user_id = who()
+            eventlog.audit(action, kind="change" if action in AUDIT_CHANGES else "sensitive" if action in AUDIT_SENSITIVE
+                           else "read", outcome=response.status_code, user=name, user_id=user_id,
+                           detail=g.get("audit_detail"))
+        return response
+
+    client_error_times, client_error_lock = [], threading.Lock()
+
+    @blueprint.post("/api/client-errors")
+    def client_errors():
+        """An error in the page itself (its JavaScript), which only the browser sees; a few a minute at most."""
+        now = time.monotonic()
+        with client_error_lock:
+            client_error_times[:] = [t for t in client_error_times if now - t < 60]
+            if len(client_error_times) >= CLIENT_ERRORS_PER_MINUTE:
+                return jsonify(error_id=None, dropped=True), 202
+            client_error_times.append(now)
+        body = request.get_json(silent=True) or {}
+        name, user_id = who()
+        error_id = eventlog.record_error(str(body.get("message") or "")[:2000], source="page", user=name, user_id=user_id,
+                                         context={k: str(body.get(k) or "")[:500] for k in ("where", "view", "line")},
+                                         stack=str(body.get("stack") or "")[:6000])
+        return jsonify(error_id=error_id), 202
+
+    @blueprint.get("/api/logs")
+    def logs_view():
+        """This machine's log: errors, actions, or requests sent grouped. Locally one person sees it all."""
+        kind = request.args.get("kind", "errors")
+        if kind not in eventlog.KINDS:
+            abort(400, f"kind must be one of {list(eventlog.KINDS)}")
+        days = min(max(int(request.args.get("days") or 1), 1), settings["logs"]["keep_days"])
+        return jsonify(enabled=eventlog.enabled(), folder=str(eventlog.folder() or settings["logs"]["dir"]),
+                       keep_days=settings["logs"]["keep_days"], kind=kind, days=days,
+                       rows=eventlog.read(kind, days=days))
+
     def asset(name):
         # The file's change time in its URL, so a browser never keeps an old copy after an update.
         return url_for("healthconsole.static", filename=name, v=int((HERE / "static" / name).stat().st_mtime))
 
     @blueprint.get("/")
     def index():
-        return render_template("index.html", asset=asset)
+        return render_template("index.html", asset=asset, scripts=SCRIPTS)
 
     def tenant_of(arm_client):
         tenant_id = arm_client.identity.tenant_id
@@ -192,11 +302,16 @@ def create_blueprint(client_for, settings, url_prefix="", config_file=None, star
         subscriptions, groups = scope_args(request.args)
         if not subscriptions:
             abort(400, "Pick at least one subscription.")
-        options = {**settings["health"], **settings["triage"], **settings["network"]}
+        options = {**settings["health"], **settings["triage"], **settings["network"], **settings["security"]}
         return jsonify(triage.triage(client(), subscriptions, options, groups))
 
     # A running or finished job per viewer and scope, reused for a while instead of starting the same work again.
     reused_jobs = TtlCache("reused jobs", SECRET_CACHE_SECONDS)
+    saved_jobs = TtlCache("saved audit jobs", SECRET_CACHE_SECONDS)  # job ID -> when its saved result was read
+
+    def audit_path(arm_client):
+        identity = arm_client.identity
+        return audit_store.path_for(settings["cache_dir"], identity.tenant_id, identity.object_id)
 
     def reusable_job(key, arm_client):
         job_id = reused_jobs.get(key)
@@ -300,7 +415,7 @@ def create_blueprint(client_for, settings, url_prefix="", config_file=None, star
         subscriptions, groups = scope_args(request.args)
         if not subscriptions:
             abort(400, "Pick at least one subscription.")
-        return jsonify(security.posture(client(), subscriptions, rg_clause(groups)))
+        return jsonify(security.posture(client(), subscriptions, rg_clause(groups), risky_ports=settings["security"]["risky_ports"]))
 
     @blueprint.get("/api/personas")
     def persona_list():
@@ -331,8 +446,9 @@ def create_blueprint(client_for, settings, url_prefix="", config_file=None, star
         store, refresh = cost_store_of(arm_client, cost_type_arg(body)), bool(getattr(arm_client, "is_fresh", False))
         everything = [s["id"] for s in inventory.list_subscriptions(arm_client)
                       if (s.get("state") or "").lower() in cost_store.ACTIVE_STATES]
+        spike = settings["cost"]["spike_percent"] / 100
         work = lambda bound, progress, publish: cost.overview(bound, subscriptions, store, everything,  # noqa: E731
-                                                              progress, publish, refresh=refresh)
+                                                              progress, publish, refresh=refresh, spike_factor=spike)
         return jsonify(job_id=start_job(arm_client, work, kind="cost", replace=True)), 202
 
     budgets_cache = TtlCache("budgets", cost.SCOPE_SECONDS)
@@ -363,6 +479,16 @@ def create_blueprint(client_for, settings, url_prefix="", config_file=None, star
         return jsonify(summary_history.record(summary_path(client()), summary_history.scope_key(subscriptions, groups),
                                               body["items"], cfg["compare_hours"], cfg["keep_days"]))
 
+    @blueprint.get("/api/summary/baseline")
+    def summary_baseline():
+        """What What changed will compare against for this scope, read before any card answers; keeps nothing."""
+        subscriptions, groups = scope_args(request.args)
+        if not subscriptions:
+            abort(400, "Pick at least one subscription.")
+        cfg = settings["summary"]
+        return jsonify(summary_history.baseline(summary_path(client()), summary_history.scope_key(subscriptions, groups),
+                                                cfg["compare_hours"], cfg["keep_days"]))
+
     @blueprint.get("/api/cost/totals")
     def cost_totals():
         """The scope's costs in one management-group query, when readable; {"available": false} otherwise."""
@@ -371,7 +497,8 @@ def create_blueprint(client_for, settings, url_prefix="", config_file=None, star
             abort(400, "Pick at least one subscription.")
         arm_client = client()
         kind = cost_type_arg()
-        found = cost.totals(arm_client, subscriptions, cost_store_of(arm_client, kind), cost_type=kind)
+        found = cost.totals(arm_client, subscriptions, cost_store_of(arm_client, kind), cost_type=kind,
+                            spike_factor=settings["cost"]["spike_percent"] / 100)
         return jsonify(found or {"available": False})
 
     @blueprint.get("/api/cost/<job_id>/export")
@@ -433,7 +560,8 @@ def create_blueprint(client_for, settings, url_prefix="", config_file=None, star
         if body.get("check") != "aks":
             abort(400, "check must be 'aks' (Key Vault expiry is the Secrets tab: /api/secrets)")
         work = lambda bound, progress, publish: checks.aks_fleet(  # noqa: E731
-            bound, subscriptions, groups, bool(body.get("detectors")), progress, only_id or None)
+            bound, subscriptions, groups, bool(body.get("detectors")), progress, only_id or None,
+            settings["aks"]["leftover_hours"])
         return jsonify(job_id=start_job(arm_client, work, kind="aks-one" if only_id else "aks", replace=True)), 202
 
     @blueprint.get("/api/checks/<job_id>")
@@ -453,7 +581,8 @@ def create_blueprint(client_for, settings, url_prefix="", config_file=None, star
             peak_end = readiness.parse_peak_end(body.get("peak_end"))
         except ValueError as error:
             abort(400, str(error))
-        options = {**settings["health"], **settings["network"]}
+        options = {**settings["health"], **settings["network"],
+                   "secret_scan_max_vaults": settings["triage"]["secret_scan_max_vaults"]}
         deep, include_secrets = bool(body.get("deep", True)), bool(body.get("include_secrets"))
         work = lambda bound, progress, publish: readiness.run(  # noqa: E731
             bound, subscriptions, options, peak_end, groups, deep, include_secrets, settings["aks"], progress)
@@ -542,6 +671,8 @@ def create_blueprint(client_for, settings, url_prefix="", config_file=None, star
         if len(subscriptions) > user_access.MAX_SUBSCRIPTIONS and not body.get("force"):
             return jsonify(too_many=len(subscriptions), limit=user_access.MAX_SUBSCRIPTIONS)
         person = {k: str(user.get(k) or "") for k in ("id", "name", "upn", "mail")}
+        g.audit_detail = {"looked_up": person["upn"] or person["name"], "looked_up_id": person["id"],
+                          "subscriptions": len(subscriptions)}
         key = (owner(arm_client), person["id"].lower(), tuple(sorted(subscriptions)))
         reused = None if body.get("again") else reusable_job(("user access",) + key, arm_client)
         if reused:
@@ -553,6 +684,83 @@ def create_blueprint(client_for, settings, url_prefix="", config_file=None, star
         job_id = start_job(arm_client, work, kind="user-access", replace=True)
         reused_jobs.put(("user access",) + key, job_id)
         return jsonify(job_id=job_id)
+
+    @blueprint.get("/api/access/needs")
+    def access_needs():
+        """What each feature needs, and whether your roles give it in the scope (standing, or eligible through PIM)."""
+        subscriptions, _groups = scope_args(request.args)
+        arm_client = client()
+        return jsonify(requirements.check(arm_client, getattr(arm_client, "token_provider", None), subscriptions))
+
+    @blueprint.get("/api/access/custom-role")
+    def access_custom_role():
+        """A custom role definition with everything the console reads, to edit (AssignableScopes) and create yourself."""
+        body = json.dumps(requirements.CUSTOM_ROLE, indent=2) + "\n"
+        return send_file(io.BytesIO(body.encode()), as_attachment=True, download_name="azure-health-console-reader.json",
+                         mimetype="application/json")
+
+    @blueprint.post("/api/security/access-audit")
+    def access_audit_start():
+        """People who can do more than read without PIM in the scope, as a job (reused 10 min). The scope's saved
+        result (`audit.keep_days`) answers first, as a finished job, without asking about many subscriptions."""
+        body = request.get_json(silent=True) or {}
+        subscriptions, groups = scope_args(body)
+        if not subscriptions:
+            abort(400, "Pick at least one subscription in the Scope bar: role assignments are read per subscription.")
+        arm_client = client()
+        provider = getattr(arm_client, "token_provider", None)
+        if provider is None:
+            abort(400, "This session has no Azure CLI sign-in to read Microsoft Graph with.")
+        ignore = list(settings["audit"]["ignore_actions"])
+        keep_days = settings["audit"]["keep_days"]
+        key = ("access audit", owner(arm_client), tuple(sorted(subscriptions)), tuple(sorted(groups or ())), tuple(ignore))
+        reused = None if body.get("again") else reusable_job(key, arm_client)
+        if reused:
+            return jsonify(job_id=reused, cached=True, saved_at=saved_jobs.get(reused))
+        path, saved_key = audit_path(arm_client), audit_store.scope_key(subscriptions, groups, ignore)
+        saved = None if body.get("again") else audit_store.get(path, saved_key, keep_days)
+        if saved:
+            job_id = start_job(arm_client, lambda bound, progress, publish: saved["result"], kind="access-audit", replace=True)
+            reused_jobs.put(key, job_id)
+            saved_jobs.put(job_id, saved["at"])
+            return jsonify(job_id=job_id, saved_at=saved["at"])
+        if len(subscriptions) > access_audit.MAX_SUBSCRIPTIONS and not body.get("force"):
+            return jsonify(too_many=len(subscriptions), limit=access_audit.MAX_SUBSCRIPTIONS)
+
+        def work(bound, progress, publish):
+            result = access_audit.audit(bound, provider, subscriptions, groups, ignore, progress)
+            try:
+                audit_store.put(path, saved_key, result, keep_days)
+            except OSError as error:
+                logger.warning("Access audit not saved to %s: %s", path, error)
+            return result
+
+        job_id = start_job(arm_client, work, kind="access-audit", replace=True)
+        reused_jobs.put(key, job_id)
+        return jsonify(job_id=job_id)
+
+    @blueprint.get("/api/security/access-audit/<job_id>/export")
+    def access_audit_export(job_id):
+        job = _job(job_id)
+        if job["status"] != jobs.DONE:
+            abort(409, "The audit isn't finished yet.")
+        result, labels = job["result"], access_audit.LEVEL_LABELS
+        rows = [[p["name"], p.get("upn") or "", "guest" if p.get("guest") else "", labels[i["level"]], i["role"], i["scope_label"],
+                 i["type_label"], i["via"] or "direct", i["until"] or "standing", "yes" if i["eligible_too"] else "",
+                 i.get("condition") or "", i.get("note") or ("PIM status unknown: resource group not readable" if i.get("pim_unknown") else "")]
+                for p in result["people"] for i in p["items"]]
+        s = result["summary"]
+        return export_table({
+            "title": "Access audit",
+            "subtitle": f"{s['people']} people can do more than read without PIM ({s['assignments']} role assignments, "
+                        f"{s['subscriptions']} subscription(s)). Read-only, with your own access.",
+            "sections": [{"heading": "What each person can do without PIM",
+                          "columns": ["Person", "Sign-in name", "Guest", "Can", "Role", "Where", "Type", "How",
+                                      "Until", "Could use PIM instead", "Condition", "Note"], "rows": rows},
+                         {"heading": "Assignments to deleted users or groups", "columns": ["Object ID", "Type", "Role", "Can", "Where"],
+                          "rows": [[o["principal_id"], o["principal_type"], o["role"], labels[o["level"]], o["scope_label"]]
+                                   for o in result.get("orphaned") or []]},
+                         {"heading": "Notes", "columns": ["Note"], "rows": [[n] for n in result["notes"]]}]})
 
     @blueprint.get("/api/watchlist")
     def watchlist_items():
@@ -572,7 +780,7 @@ def create_blueprint(client_for, settings, url_prefix="", config_file=None, star
         return jsonify(live["watchlist"].remove(str(body.get("id", "")), client().identity.tenant_id))
 
     def watchlist_check(arm_client, items, health_options=None, options=None, progress=None):
-        health_options = health_options or HealthOptions(**{**settings["health"], "detectors": False})
+        health_options = health_options or HealthOptions(**{**settings["health"], "detectors": False, "aks_leftover_hours": settings["aks"]["leftover_hours"]})
         options = options or DiscoveryOptions(**{**settings["graph"], "depth": 0, "inbound": False})
         return watchlist.check(arm_client, items, options, health_options, live["profiles"], progress)
 
@@ -580,7 +788,7 @@ def create_blueprint(client_for, settings, url_prefix="", config_file=None, star
     def watchlist_check_now():
         arm_client = client()
         items = live["watchlist"].items(arm_client.identity.tenant_id)
-        health_options = HealthOptions(**{**settings["health"], "detectors": False})
+        health_options = HealthOptions(**{**settings["health"], "detectors": False, "aks_leftover_hours": settings["aks"]["leftover_hours"]})
         options = DiscoveryOptions(**{**settings["graph"], "depth": 0, "inbound": False})
 
         def work(bound, progress, publish):
@@ -599,7 +807,7 @@ def create_blueprint(client_for, settings, url_prefix="", config_file=None, star
         return alerts.Source(
             client=arm_client, rules=lambda: config.alert_rules(settings, tenant), saved_scope=saved_scope,
             watchlist_items=lambda: live["watchlist"].items(tenant_id),
-            triage_options=lambda: {**settings["health"], **settings["triage"], **settings["network"]},
+            triage_options=lambda: {**settings["health"], **settings["triage"], **settings["network"], **settings["security"]},
             check_watchlist=lambda bound, items: watchlist_check(bound, items),
             servicenow_records=servicenow_records, monitor_records=monitor_records)
 
@@ -754,7 +962,7 @@ def create_blueprint(client_for, settings, url_prefix="", config_file=None, star
 
     @blueprint.get("/api/alerts/export")
     def alerts_export():
-        """The last 24 hours of alerts as Markdown, CSV or PDF (13c)."""
+        """The kept alerts (`alerts.history_hours`) as Markdown, CSV or PDF (13c)."""
         arm_client = client()
         events = alert_runner.history(alert_owner(arm_client))
 
@@ -770,7 +978,8 @@ def create_blueprint(client_for, settings, url_prefix="", config_file=None, star
                  e.get("resource_id", "")] for e in events]
         return export_table({
             "title": "Alert history",
-            "subtitle": f"The last 24 hours of alerts for {arm_client.identity.name}, newest first, times in UTC. Kept in "
+            "subtitle": f"The last {settings['alerts']['history_hours']} hours of alerts for {arm_client.identity.name}, "
+                        "newest first, times in UTC. Kept in "
                         "the console's memory: a restart clears it.",
             "sections": [{"heading": f"{len(rows)} alert(s)", "columns": ["When (UTC)", "Status", "Alert", "Rule",
                                                                           "Detail", "State", "Resource"],
@@ -829,7 +1038,7 @@ def create_blueprint(client_for, settings, url_prefix="", config_file=None, star
         if body.get("inbound") is not None:
             graph["inbound"] = bool(body["inbound"])
         options = DiscoveryOptions(**graph)
-        health_options = HealthOptions(**settings["health"])
+        health_options = HealthOptions(**settings["health"], aks_leftover_hours=settings["aks"]["leftover_hours"])
         if body.get("resource_group"):
             subscription_id, _, group = body["resource_group"].partition("/")
             if not subscription_id or not group:
@@ -918,9 +1127,12 @@ def create_blueprint(client_for, settings, url_prefix="", config_file=None, star
         }
 
     def apply_settings(new):
+        logs_before = dict(settings.get("logs") or {})
         settings.clear()
         settings.update(new)
         reload_live()
+        if eventlog.enabled() and settings["logs"] != logs_before:  # a new folder or keep_days applies at once
+            eventlog.configure(settings["logs"]["dir"], settings["logs"]["keep_days"])
 
     @blueprint.get("/api/settings")
     def settings_view():
@@ -929,11 +1141,15 @@ def create_blueprint(client_for, settings, url_prefix="", config_file=None, star
     @blueprint.post("/api/settings")
     def settings_save():
         body = request.get_json(silent=True) or {}
+        g.audit_detail = {"changed": sorted(body["values"]) if isinstance(body.get("values"), dict) else []}
         try:
             new = settings_file.apply(config_file, values=body.get("values"))
         except config.ConfigError as error:
             return jsonify(error=str(error), kind="config"), 400
-        apply_settings(new)
+        try:
+            apply_settings(new)
+        except (OSError, profiles.ProfileError) as error:  # e.g. a log or profile folder another account can change
+            return jsonify(error=f"Saved, but not all of it is in use: {error}", kind="config"), 400
         return jsonify(saved=True, backup=str(config_file) + ".bak", settings=settings_payload(client()))
 
     @blueprint.post("/api/settings/reload")
@@ -942,7 +1158,10 @@ def create_blueprint(client_for, settings, url_prefix="", config_file=None, star
             new = config.load(config_file)
         except config.ConfigError as error:
             return jsonify(error=str(error), kind="config"), 400
-        apply_settings(new)
+        try:
+            apply_settings(new)
+        except (OSError, profiles.ProfileError) as error:
+            return jsonify(error=f"Reloaded, but not all of it is in use: {error}", kind="config"), 400
         return jsonify(settings_payload(client()))
 
     # ---------------------------------------------------------------- integrations (one tenant's each)
@@ -968,7 +1187,7 @@ def create_blueprint(client_for, settings, url_prefix="", config_file=None, star
                             "monitors": [m["name"] for m in legacy["monitors"]]} if legacy and key is None else None),
                 "servicenow_settings": integ["servicenow"], "servicenow_tables": config.SERVICENOW_TABLES,
                 "monitor_settings": [{k: v for k, v in m.items() if k != "tenant"} for m in integ["monitors"]],
-                "monitor_types": list(config.MONITOR_TYPES), "monitor_capabilities": monitors.capabilities()}
+                "monitor_types": [t for t in config.MONITOR_TYPES if t in integrations.SUPPORTED_MONITORS], "monitor_capabilities": monitors.capabilities()}
 
     def config_error(error):
         return jsonify(error=str(error), kind="config"), 400
@@ -1031,6 +1250,7 @@ def create_blueprint(client_for, settings, url_prefix="", config_file=None, star
         field = body.get("field")
         if field not in fields:
             abort(400, f"field must be one of {sorted(fields)}")
+        g.audit_detail = {"target": str(body.get("target") or ""), "field": field, "removed": bool(body.get("remove"))}
         try:
             if body.get("remove"):
                 integration_secrets.delete(target, scope, field)
@@ -1351,8 +1571,9 @@ def create_blueprint(client_for, settings, url_prefix="", config_file=None, star
         for kind in cost.COST_TYPES:
             cost_store_of(arm_client, kind).clear()
         summary_history.clear(summary_path(arm_client))
+        audit_store.clear(audit_path(arm_client))
         cleared = cache.forget_access_bound()
-        return jsonify(ok=True, cleared=["stored costs", "Summary's history", *cleared])
+        return jsonify(ok=True, cleared=["stored costs", "Summary's history", "saved access audits", *cleared])
 
     @blueprint.post("/api/refresh")
     def refresh():
@@ -1382,7 +1603,7 @@ def create_blueprint(client_for, settings, url_prefix="", config_file=None, star
         elif f"/providers/{appinsights.COMPONENT_TYPE}/" not in lowered:
             abort(400, "id must be an Application Insights component, a Web or Function App or an API Management service")
         if now_only:
-            now, error = appinsights.measure(arm_client, resource_id)
+            now, error = appinsights.measure(arm_client, resource_id, settings["appinsights"])
             return jsonify(available=True, link=link, component_id=resource_id, now=now, errors=[error] if error else [])
         try:
             return jsonify(available=True, link=link, **appinsights.insights(arm_client, resource_id, args.get("window", "1h")))
@@ -1407,6 +1628,13 @@ def create_blueprint(client_for, settings, url_prefix="", config_file=None, star
         except ValueError as error:
             abort(400, str(error))
 
+    def log_spread():
+        """Minutes either side of `at` that a pod's logs cover (Investigate 2; an OOM kill 5)."""
+        spread = request.args.get("spread", "2")
+        if not spread.isdigit() or not 1 <= int(spread) <= 30:
+            abort(400, "spread must be 1 to 30 minutes")
+        return int(spread)
+
     def investigate_answer(read):
         try:
             return jsonify(read())
@@ -1422,7 +1650,16 @@ def create_blueprint(client_for, settings, url_prefix="", config_file=None, star
     @blueprint.get("/api/investigate/components")
     def investigate_components():
         subscriptions, groups = investigate_scope()
-        return jsonify(investigate.components(client(), subscriptions, rg_clause(groups)))
+        return jsonify(investigate.components(client(), subscriptions, rg_clause(groups),
+                                              measure_now=request.args.get("measure") != "0"))
+
+    @blueprint.get("/api/investigate/measure")
+    def investigate_measure():
+        """The last hour of up to MEASURE_BATCH components, for the start list to fill in as each batch answers."""
+        ids = list(dict.fromkeys(request.args.getlist("id")))
+        if not ids or len(ids) > investigate.MEASURE_BATCH or not all(investigate.COMPONENT_ID.fullmatch(i) for i in ids):
+            abort(400, f"id must be 1 to {investigate.MEASURE_BATCH} Application Insights component IDs")
+        return jsonify(components=investigate.measure(client(), [{"id": i} for i in ids], settings["appinsights"]))
 
     @blueprint.get("/api/investigate/gateways")
     def investigate_gateways():
@@ -1455,7 +1692,13 @@ def create_blueprint(client_for, settings, url_prefix="", config_file=None, star
         source = investigate_source()
         return investigate_answer(lambda: source.samples(request.args.get("operation", ""), request.args.get("role", ""),
                                                          request.args.get("window", "1h"),
-                                                         failed=request.args.get("all") != "1"))
+                                                         failed=request.args.get("all") != "1",
+                                                         code=request.args.get("code") or None))
+
+    @blueprint.get("/api/investigate/codes")
+    def investigate_codes():
+        source = investigate_source()
+        return investigate_answer(lambda: source.codes(request.args.get("window", "1h")))
 
     @blueprint.get("/api/investigate/trace")
     def investigate_trace():
@@ -1477,7 +1720,8 @@ def create_blueprint(client_for, settings, url_prefix="", config_file=None, star
         service_id, at = _resource_id(), investigate_at()
         if f"/providers/{inv_gateway.APIM_TYPE}/" not in service_id.lower():
             abort(400, "id must be an API Management service")
-        return investigate_answer(lambda: inv_gateway.logs(client(), service_id, at, request.args.get("path", "")))
+        dedicated = {"1": True, "0": False}.get(request.args.get("dedicated", ""))
+        return investigate_answer(lambda: inv_gateway.logs(client(), service_id, at, request.args.get("path", ""), dedicated))
 
     @blueprint.get("/api/investigate/pod")
     def investigate_pod():
@@ -1490,7 +1734,258 @@ def create_blueprint(client_for, settings, url_prefix="", config_file=None, star
         cluster_id, at = _resource_id(), investigate_at()
         return jsonify(aks.logs(client(), cluster_id, request.args.get("namespace", ""), request.args.get("pod") or None,
                                 request.args.get("container") or None, request.args.get("lines", 200),
-                                request.args.get("source", "auto"), settings["aks"], around=at))
+                                request.args.get("source", "auto"), settings["aks"], around=at, spread=log_spread(),
+                                previous=request.args.get("previous") == "1"))
+
+    def monitor_cluster_read(capability, what, default_hours, read):
+        """A cluster read from the scope's monitoring connection (`connection=`) by capability, whichever tool it is:
+        (monitor, source, hours, found) or (None, None, None, the answer to send)."""
+        resource_id = _resource_id()
+        hours = request.args.get("ci_hours") or str(default_hours)
+        if not hours.isdigit() or int(hours) not in aks.CI_HOURS:
+            abort(400, f"ci_hours must be one of {list(aks.CI_HOURS)}")
+        monitor, blocked = chosen_monitor()
+        if blocked:
+            return None, None, None, jsonify(blocked)
+        source = monitors.provider_for(monitor)
+        if source is None or capability not in source.capabilities:
+            return None, None, None, jsonify(available=False, reason=f"{monitor['name']} can't give a cluster's {what} here yet.")
+        try:
+            found = read(source, resource_id.rstrip("/").split("/")[-1], int(hours),
+                         bool(getattr(client(), "is_fresh", False)))
+        except ServiceError as error:
+            return None, None, None, jsonify(available=False, reason=str(error).splitlines()[0][:400])
+        return monitor, source, int(hours), found
+
+    @blueprint.get("/api/explore/oom-kills-monitor")
+    def explore_oom_kills_monitor():
+        """A cluster's OOM kills from the scope's monitoring connection (`connection=`), for clusters whose Container
+        Insights has none: the same rows and causes as Workloads' OOMKilled."""
+        monitor, source, hours, found = monitor_cluster_read(
+            OOM_KILLS, "OOM kills", settings["aks"]["oom_look_back_hours"],
+            lambda source, cluster, hours, fresh: source.oom_kills(cluster, hours, refresh=fresh))
+        if monitor is None:
+            return found
+        rows = aks.oom_rows(found["rows"], aks.oom_thresholds(settings["aks"]))
+        by_workload = [{"namespace": o["Namespace"], "workload": workload_problems.workload_of(o["OwnerKind"], o["Owner"]),
+                        "pods": o["Pods"], "kills": o["Kills"]} for o in found.get("by_owner") or []]
+        return jsonify(available=True, connection=monitor["name"], label=source.label, hours=hours,
+                       found=found["found"], rows=rows, total=found.get("total", len(rows)), by_workload=by_workload,
+                       detailed=found.get("detailed", len(rows)), queries=found["queries"], notes=found["notes"])
+
+    @blueprint.get("/api/explore/warning-events-monitor")
+    def explore_warning_events_monitor():
+        """A cluster's Kubernetes Warning events from the scope's monitoring connection, any tool with WARNING_EVENTS:
+        rows shaped like Container Insights' warning events."""
+        monitor, source, hours, found = monitor_cluster_read(
+            WARNING_EVENTS, "warning events", settings["aks"].get("events_look_back_hours", 1),
+            lambda source, cluster, hours, fresh: source.warning_events(cluster, hours, refresh=fresh))
+        if monitor is None:
+            return found
+        return jsonify(available=True, connection=monitor["name"], label=source.label, hours=hours, found=found["found"],
+                       rows=found["rows"], total=found.get("total", len(found["rows"])), queries=found["queries"],
+                       notes=found["notes"])
+
+    # ---------------------------------------------------------------- workload path (decision 150)
+
+    apim_apis = TtlCache("API Management APIs", 3600)
+
+    def path_workload(source):
+        """The workload a path request names: an AKS one (cluster, namespace, kind, workload) or an App Service (site).
+        {key, name, cluster_id, namespace, kind} or {key, name, site_id}; 400 when it isn't one."""
+        site = (source.get("site") or "").rstrip("/")
+        if site:
+            if not workload_path.SITE_ID.match(site):
+                abort(400, "site must be an App Service ID")
+            return {"key": site.lower(), "name": site.rsplit("/", 1)[-1], "site_id": site}
+        cluster, namespace = (source.get("cluster") or "").rstrip("/"), source.get("namespace") or ""
+        kind, name = source.get("kind") or "", source.get("workload") or ""
+        try:
+            workload_path.check_workload(cluster, namespace, kind, name)
+        except ValueError as error:
+            abort(400, str(error))
+        return {"key": workload_path.workload_key(cluster, namespace, kind, name), "name": name, "cluster_id": cluster,
+                "namespace": namespace, "kind": kind}
+
+    def path_tool():
+        """(the Scope bar's monitoring tool as a provider, its capabilities, why not) for this request."""
+        monitor, blocked = chosen_monitor()
+        source = None if blocked else monitors.provider_for(monitor)
+        return source, (getattr(source, "capabilities", ()) if source else ()), (blocked or {}).get("reason", "")
+
+    def saved_link(workload):
+        tenant, _ = tenant_of(client())
+        return next((x for x in config.workload_links(settings, tenant) if x["key"].lower() == workload["key"]), None)
+
+    @blueprint.get("/api/path/candidates")
+    def path_candidates():
+        """What could be this workload's front doors, app and component, best first with why; and its saved link."""
+        workload, arm_client = path_workload(request.args), client()
+        subscriptions, _ = scope_args(request.args)
+        source, can, tool_reason = path_tool()
+        paths, apps, notes = [], [], []
+        if source is not None and REQUESTS in can:
+            try:
+                names = source.app_names()["names"]
+                apps = workload_path.app_candidates(names, workload["name"])
+                picked = (saved_link(workload) or {}).get("app") or (apps[0]["app"] if apps and apps[0]["score"] >= 10 else "")
+                paths = source.request_paths(picked)["paths"] if picked else []
+            except ServiceError as error:
+                notes.append(f"{source.label}: {str(error).splitlines()[0][:200]}")
+        elif tool_reason:
+            notes.append(f"Monitoring tool: {tool_reason}")
+        site_hosts, component = [], []
+        if workload.get("site_id"):
+            site = arm_client.get(workload["site_id"], "2023-12-01", tolerate=(403, 404)) or {}
+            site_hosts = (site.get("properties") or {}).get("hostNames") or []
+            found = appinsights.link(arm_client, workload["site_id"])
+            if found.get("component_id"):
+                component = [{"component": found["component_id"], "name": found["component_name"], "score": 10,
+                              "why": ["the app reports to it"]}]
+        apim, apim_notes = workload_path.apim_candidates(arm_client, subscriptions, workload["name"], paths, apim_apis)
+        agw, agw_notes = workload_path.agw_candidates(arm_client, subscriptions, workload["name"],
+                                                      workload.get("cluster_id", ""), site_hosts)
+        components = component or workload_path.component_candidates(arm_client, subscriptions, workload["name"])
+        return jsonify(workload=workload, link=saved_link(workload), apim=apim, agw=agw, apps=apps, components=components,
+                       request_paths=paths[:10], tool=getattr(source, "label", ""), notes=notes + apim_notes + agw_notes)
+
+    @blueprint.post("/api/path/link")
+    def path_link_save():
+        """Saves the front doors the viewer confirmed for one workload (an empty pick removes the link)."""
+        body = request.get_json(silent=True) or {}
+        workload = path_workload(body)
+        link = {**{k: v for k, v in workload.items()}, "apim": [{"service_id": a.get("service_id", ""), "api": a.get("api", "")}
+                                                                for a in body.get("apim") or [] if isinstance(a, dict)],
+                "agw": [{"gateway_id": g.get("gateway_id", ""), "listener": g.get("listener", ""), "pool": g.get("pool", "")}
+                        for g in body.get("agw") or [] if isinstance(g, dict)],
+                "app": str(body.get("app") or ""), "component": str(body.get("component") or "")}
+        return save_for_tenant(settings_file.apply_workload_link, link) or jsonify(link=saved_link(workload))
+
+    @blueprint.get("/api/path/read")
+    def path_read():
+        """Each hop of the workload's saved link (or just its pods and requests when none is saved), and the verdict."""
+        workload = path_workload(request.args)
+        link = {**workload, **(saved_link(workload) or {})}
+        source, can, _ = path_tool()
+        return jsonify(**workload_path.read(client(), link, source, can, settings["path"], settings["appinsights"]),
+                       link=link, tool=getattr(source, "label", ""))
+
+    @blueprint.get("/api/workload/detail")
+    def workload_detail_read():
+        """One workload's details from the Kubernetes API, read when its line is opened on the Workloads tab."""
+        workload = path_workload(request.args)
+        if "cluster_id" not in workload:
+            abort(400, "cluster, namespace, kind and workload are needed")
+        return jsonify(workload_detail.read(client(), workload["cluster_id"], workload["namespace"], workload["kind"],
+                                            workload["name"], kube_settings=settings["aks"]))
+
+    @blueprint.get("/api/pod/detail")
+    def pod_detail_read():
+        """One pod as `kubectl describe pod` and `-o yaml` show it: the Kubernetes API, else Container Insights."""
+        cluster = (request.args.get("cluster") or "").rstrip("/")
+        if not workload_path.CLUSTER_ID.match(cluster):
+            abort(400, "cluster must be an AKS cluster ID")
+        try:
+            return jsonify(pod_detail.read(client(), cluster, request.args.get("namespace", ""), request.args.get("pod", ""),
+                                           kube_settings=settings["aks"]))
+        except ValueError as error:
+            abort(400, str(error))
+
+    @blueprint.get("/api/kube/yaml")
+    def kube_yaml_read():
+        """One object's YAML read now; env values only with values=1 (Show values), never in the page's first read."""
+        cluster = (request.args.get("cluster") or "").rstrip("/")
+        if not workload_path.CLUSTER_ID.match(cluster):
+            abort(400, "cluster must be an AKS cluster ID")
+        try:
+            return jsonify(kube_yaml.read(client(), cluster, request.args.get("namespace", ""), request.args.get("kind", ""),
+                                          request.args.get("name", ""), values=request.args.get("values") == "1",
+                                          kube_settings=settings["aks"]))
+        except ValueError as error:
+            abort(400, str(error))
+
+    @blueprint.get("/api/workload/history")
+    def workload_history_read():
+        """Its CPU and memory over 30 days and its runtime's memory; `target_cpu` and `target_memory` are its HPA's %."""
+        workload = path_workload(request.args)
+        if "cluster_id" not in workload:
+            abort(400, "cluster, namespace, kind and workload are needed")
+        targets = {}
+        for resource in ("cpu", "memory"):
+            value = request.args.get(f"target_{resource}", "")
+            if value:
+                if not value.isdigit() or not 0 < int(value) <= 1000:
+                    abort(400, f"target_{resource} must be a whole percent")
+                targets[resource] = int(value)
+        link = {**workload, **(saved_link(workload) or {})}
+        source, can, _ = path_tool()
+        names = (lambda: source.app_names()["names"]) if source is not None and REQUESTS in can else None
+        return jsonify(workload_detail.history(client(), link, targets, source, can, names))
+
+    @blueprint.get("/api/workload/fit")
+    def workload_fit_read():
+        """Would new requests fit: `container` is `name:cpu millicores:memory MiB`, once per container changed;
+        `replicas` replaces the HPA's arithmetic. Reads only (the nodes and every live pod on them)."""
+        workload = path_workload(request.args)
+        if "cluster_id" not in workload:
+            abort(400, "cluster, namespace, kind and workload are needed")
+        new = {}
+        for item in request.args.getlist("container"):
+            match = re.fullmatch(r"([a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?):([0-9]{1,7}):([0-9]{1,8})", item)
+            if not match or not int(match.group(3)) and not int(match.group(4)):
+                abort(400, "container must be name:cpu millicores:memory MiB")
+            new[match.group(1)] = (int(match.group(3)), int(match.group(4)))
+        if not new:
+            abort(400, "at least one container with its new requests is needed")
+        replicas = request.args.get("replicas", "")
+        if replicas and (not replicas.isdigit() or not 0 < int(replicas) <= 10000):
+            abort(400, "replicas must be a whole number from 1 to 10000")
+        return jsonify(workload_fit.read(client(), workload["cluster_id"], workload["namespace"], workload["kind"],
+                                         workload["name"], new, int(replicas) if replicas else None, kube_settings=settings["aks"]))
+
+    @blueprint.get("/api/explore/workload-names")
+    def explore_workload_names():
+        """One namespace's Deployments, StatefulSets and DaemonSets for Dependencies' pickers, when Workloads' cluster-wide
+        lists couldn't be read: the Kubernetes API in that namespace, Container Insights, then the scope's monitoring
+        connection (`connection=`, optional)."""
+        resource_id = _resource_id()
+        namespace = request.args.get("namespace", "")
+        if not aks.NAMESPACE.fullmatch(namespace):
+            abort(400, "namespace isn't a Kubernetes namespace name")
+        arm_client = client()
+        result = aks.namespace_workloads(arm_client, resource_id, namespace, kube_settings=settings["aks"])
+        if result["workloads"] or not request.args.get("connection"):
+            return jsonify(result)
+        monitor, blocked = chosen_monitor()
+        source = None if blocked else monitors.provider_for(monitor)
+        if source is None or WORKLOADS not in source.capabilities:
+            return jsonify(result)
+        try:
+            found = source.workload_names(resource_id.rstrip("/").split("/")[-1], namespace,
+                                          refresh=bool(getattr(arm_client, "is_fresh", False)))
+        except ServiceError as error:
+            return jsonify({**result, "notes": result["notes"] + [str(error).splitlines()[0][:200]]})
+        if found["found"]:
+            return jsonify({"source": monitor["name"], "workloads": found["workloads"], "notes": result["notes"]})
+        return jsonify({**result, "notes": result["notes"] + [f"{monitor['name']} has nothing for {namespace} in the last hour."]})
+
+    @blueprint.get("/api/explore/dependencies")
+    def explore_dependencies():
+        """What an AKS workload depends on in Azure: host names in its env and ConfigMaps (Kubernetes API) and its
+        workload identity's roles (Azure). `pod=`, or `kind=` and `workload=`; values are never returned."""
+        cluster_id = _resource_id()
+        subscriptions, _ = investigate_scope()
+        pod, name = request.args.get("pod") or None, request.args.get("workload") or None
+        if not (pod or name):
+            abort(400, "pod or workload is required")
+        workload = (request.args.get("kind") or "Deployment", name) if name and not pod else None
+        return investigate_answer(lambda: dependencies.dependencies(
+            client(), subscriptions, cluster_id, request.args.get("namespace", ""), pod, workload, settings["aks"]))
+
+    @blueprint.get("/api/investigate/pod-oom")
+    def investigate_pod_oom():
+        cluster_id, at = _resource_id(), investigate_at()
+        return investigate_answer(lambda: aks.oom_kills(client(), cluster_id, request.args.get("pod", ""), at, settings["aks"]))
 
     @blueprint.get("/api/investigate/changes")
     def investigate_changes():
@@ -1531,7 +2026,7 @@ def create_blueprint(client_for, settings, url_prefix="", config_file=None, star
     @blueprint.get("/api/vulnerabilities/platform")
     def vulnerabilities_platform():
         subscriptions, groups = vuln_scope()
-        return jsonify(cards=vulnerabilities.platform(client(), subscriptions, groups))
+        return jsonify(cards=vulnerabilities.platform(client(), subscriptions, groups, settings=settings))
 
     @blueprint.get("/api/vulnerabilities/software")
     def vulnerabilities_software():
@@ -1590,7 +2085,7 @@ def create_blueprint(client_for, settings, url_prefix="", config_file=None, star
         arm_client = client()
         filters = vuln_filters(request.args)
         found = vulnerabilities.findings(arm_client, subscriptions, groups, filters)
-        cards = vulnerabilities.platform(arm_client, subscriptions, groups)
+        cards = vulnerabilities.platform(arm_client, subscriptions, groups, settings=settings)
         gaps = vulnerabilities.coverage(arm_client, subscriptions, groups)
         names = sub_names(arm_client)
         s = found["summary"]
@@ -1628,7 +2123,7 @@ def create_blueprint(client_for, settings, url_prefix="", config_file=None, star
         subscriptions, groups = scope_args(request.args)
         if not subscriptions:
             abort(400, "Pick at least one subscription.")
-        return jsonify(appinsights.spikes(client(), subscriptions, rg_clause(groups)))
+        return jsonify(appinsights.spikes(client(), subscriptions, rg_clause(groups), settings["appinsights"]))
 
     @blueprint.get("/api/explore/<view>")
     def explore(view):
@@ -1646,8 +2141,8 @@ def create_blueprint(client_for, settings, url_prefix="", config_file=None, star
             return monitors_resource()
         if view == "activity":
             hours = args.get("hours", "24")
-            if hours not in ("6", "24", "168"):
-                abort(400, "hours must be 6, 24 or 168")
+            if not hours.isdigit() or int(hours) not in activity.HOURS:
+                abort(400, f"hours must be one of {list(activity.HOURS)}")
             result = activity.activity(arm_client, resource_id, int(hours))
             health = settings["health"]
             for alert in result["alerts"]:
@@ -1656,7 +2151,7 @@ def create_blueprint(client_for, settings, url_prefix="", config_file=None, star
                                    else "warning" if sev <= health["warning_max_severity"] else "info")
             return jsonify(result)
         if view == "security":  # its settings, and its vulnerability totals so a clean config isn't read as all clear
-            out = security.for_resource(arm_client, resource_id)
+            out = security.for_resource(arm_client, resource_id, settings["security"]["risky_ports"])
             try:
                 out["vulnerabilities"] = vulnerabilities.counts_for(arm_client, resource_id)
             except ArmError as error:
@@ -1693,14 +2188,18 @@ def create_blueprint(client_for, settings, url_prefix="", config_file=None, star
             return jsonify(details.details(arm_client, resource_id, settings["health"]["expiry_warning_days"],
                                            settings["health"]["expiry_critical_days"]))
         if view == "workloads":
+            ci_hours = args.get("ci_hours")
+            if ci_hours is not None and (not ci_hours.isdigit() or int(ci_hours) not in aks.CI_HOURS):
+                abort(400, f"ci_hours must be one of {list(aks.CI_HOURS)}")
             return jsonify(aks.workloads(arm_client, resource_id, include_system=args.get("system") == "1",
-                                         kube_settings=settings["aks"]))
+                                         kube_settings=settings["aks"], ci_hours=int(ci_hours) if ci_hours else None))
         if view == "nodes":
             return jsonify(aks.nodes(arm_client, resource_id, kube_settings=settings["aks"]))
         if view == "logs":
             return jsonify(aks.logs(arm_client, resource_id, args.get("namespace", ""), args.get("pod") or None,
                                     args.get("container") or None, args.get("lines", 200),
-                                    args.get("source", "auto"), settings["aks"]))
+                                    args.get("source", "auto"), settings["aks"], around=investigate_at(required=False),
+                                    spread=log_spread(), previous=args.get("previous") == "1"))
         abort(404)
 
     def resource_vulnerabilities(arm_client, resource_id):
@@ -1712,9 +2211,9 @@ def create_blueprint(client_for, settings, url_prefix="", config_file=None, star
         sub, group = lowered.split("/")[2], lowered.split("/")[4]
         try:
             if "/providers/microsoft.web/sites/" in lowered:
-                out["checks"] = vulnerabilities.site_runtime(arm_client, resource_id)
+                out["checks"] = vulnerabilities.site_runtime(arm_client, resource_id, eol_days=settings["vulnerabilities"]["eol_warning_days"])
             else:
-                cards = vulnerabilities.platform(arm_client, [sub], [f"{sub}/{group}"])
+                cards = vulnerabilities.platform(arm_client, [sub], [f"{sub}/{group}"], settings=settings)
                 out["checks"] = [{"name": c["title"], "value": "", "status": i["status"], "detail": i["detail"]}
                                  for c in cards for i in c["items"] if i["id"].lower() == lowered]
         except ArmError as error:
@@ -1769,25 +2268,29 @@ def add_signin(app, login):
         return jsonify(ok=True)
 
 
-LAUNCH_COOKIE = "ahc_key"
-LAUNCH_COOKIE_SECONDS = 30 * 86400  # a browser opened once with the key keeps it this long, across restarts
-NO_KEY_PAGE = ("<!doctype html><title>Azure Health Console</title><p style=\"font-family:sans-serif;margin:2em\">"
-               "Open the console from the address <code>azure-health-console</code> printed when it started: it carries a "
-               "key, so only your browser can use it. Once opened that way, this address works for 30 days.</p>")
+LAUNCH_HEADER = "X-AHC-Key"
+LAUNCH_COOKIE = "ahc_key"  # 1.1.x kept the key in a cookie; a browser still holding it is handed the key once
+NO_KEY_TEXT = ("Open the console from the address azure-health-console printed when it started: it carries a key, so "
+               "only your browser can use it. Once opened that way, this address keeps working in this browser.")
+
+
+LAUNCH_KEY_SHAPE = re.compile(r"^[A-Za-z0-9_-]{32,128}$")
 
 
 def _launch_key(path):
-    """This user's key: read from `path` (only they can read it), or made and saved there the first time. If it can't
-    be saved, a key for this start only."""
+    """This user's key: read from `path`, or made and saved there the first time. Only a private regular file of this
+    user's in a folder only they can write is trusted; anything else is replaced. Unsaveable: a key for this start."""
     try:
-        key = path.read_text().strip()
-        if len(key) >= 32:
+        private_dir(path.parent)
+        key = read_private_text(path).strip()
+        if LAUNCH_KEY_SHAPE.match(key):
             return key
     except OSError:
         pass
     key = secrets.token_urlsafe(32)
     try:
-        private_dir(path.parent)
+        if path.is_symlink() or (path.exists() and not path.is_file()):
+            path.unlink()
         write_private_text(path, key)
     except OSError:
         pass
@@ -1795,8 +2298,9 @@ def _launch_key(path):
 
 
 def launch_url(app, port):
-    """The address to open: it hands the browser this start's key once, then redirects to a clean URL."""
-    return f"http://127.0.0.1:{port}/?key={app.config['AHC_LAUNCH_KEY']}"
+    """The address to open: the key is in the fragment, which the browser never sends; the page keeps it and cleans
+    the address."""
+    return f"http://127.0.0.1:{port}/#key={app.config['AHC_LAUNCH_KEY']}"
 
 
 def create_local_app(settings, port, config_file=None, start_alerts=False):
@@ -1812,28 +2316,38 @@ def create_local_app(settings, port, config_file=None, start_alerts=False):
             return clients[key]
 
     allowed_hosts = {f"127.0.0.1:{port}", f"localhost:{port}"}
-    # Only a browser holding this key (from `launch_url`, once) can use the console, not another user or program on
-    # 127.0.0.1. Kept in a private file so bookmarks survive restarts; Lax because ServiceNow's sign-in returns cross-site.
+    # Only a page holding this key (from `launch_url`, once) can use the console, not another user or program on
+    # 127.0.0.1. Kept in a private file so bookmarks survive restarts; the page sends it as `LAUNCH_HEADER`.
     launch_key = _launch_key(Path(settings["cache_dir"]).expanduser() / "launch-key")
     app.config["AHC_LAUNCH_KEY"] = launch_key
 
     @app.before_request
-    def loopback_only():
+    def launch_key_holder():
         # Blocks DNS rebinding: a page elsewhere can't reach this server under another name.
         if request.host not in allowed_hosts:
             abort(403)
-        if hmac.compare_digest(request.cookies.get(LAUNCH_COOKIE, ""), launch_key):
-            if request.method == "POST" and not request.is_json:
-                abort(415)
+        if hmac.compare_digest(request.headers.get(LAUNCH_HEADER, ""), launch_key):
+            refuse_other_sites("/api/")  # the sign-in routes are the app's own, not the blueprint's
             return None
-        if request.path == "/" and hmac.compare_digest(request.args.get("key", ""), launch_key):
-            response = redirect("/")
-            response.set_cookie(LAUNCH_COOKIE, launch_key, httponly=True, samesite="Lax", path="/", max_age=LAUNCH_COOKIE_SECONDS)
-            return response
         if request.path == "/":
-            return NO_KEY_PAGE, 401, {"Content-Type": "text/html; charset=utf-8"}
-        abort(401)
+            if hmac.compare_digest(request.cookies.get(LAUNCH_COOKIE, ""), launch_key):
+                response = redirect(f"/#key={launch_key}")
+                response.delete_cookie(LAUNCH_COOKIE, path="/")
+                return response
+            return None  # the page carries no data; without a key its first call gets the message below
+        if request.method == "GET" and request.path.startswith(LOCAL_OPEN_PATHS):
+            return None  # static files; ServiceNow's sign-in comes back here and is checked by its one-time state
+        if request.path.startswith("/api/"):  # another program or browser without the key: worth knowing
+            eventlog.audit("no_launch_key", kind="refused", outcome=401, detail={"path": request.path})
+        return jsonify(error=NO_KEY_TEXT, kind="launch-key"), 401
+
+    @app.after_request
+    def audit_signin(response):
+        if request.method == "POST" and request.endpoint in ("signin_start", "signin_cancel", "signout"):
+            eventlog.audit(request.endpoint, kind="change", outcome=response.status_code)
+        return response
 
     add_signin(app, AzLogin(on_success=lambda: [c.refresh() for c in list(clients.values())]))
-    app.register_blueprint(create_blueprint(client_for, settings, config_file=config_file, start_alerts=start_alerts))
+    app.register_blueprint(create_blueprint(client_for, settings, config_file=config_file, start_alerts=start_alerts,
+                                            authorize=lambda: None))  # every request already passed launch_key_holder
     return app

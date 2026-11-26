@@ -3,11 +3,11 @@ a persona picks the home page, which views lead the menu (the rest stay under Mo
 tabs come first, and how much detail pages show. Built in below, in the app's own view, card and tab names; a user or
 team overrides or adds personas in the config file (`personas:`)."""
 
-VIEWS = ("summary", "triage", "browse", "investigate", "readiness", "security", "cost", "secrets", "network", "tools",
+VIEWS = ("summary", "triage", "investigate", "readiness", "security", "cost", "browse", "secrets", "network", "tools",
          "watchlist", "access")
 CARDS = ("alerts", "appinsights", "service_health", "failed", "aks", "autoscale", "private_endpoints", "public_access",
          "subnets")
-TABS = ("overview", "timeline", "metrics", "workloads", "nodes", "appinsights", "details", "scaling", "diagnostics",
+TABS = ("overview", "timeline", "metrics", "workloads", "nodes", "kubectl", "appinsights", "details", "scaling", "diagnostics",
         "vulnerabilities", "recommendations", "cost", "security")
 SUMMARY = ("problems", "changes", "cost", "security", "readiness", "access")  # Summary's cards; empty means all
 DETAIL = ("full", "summary")

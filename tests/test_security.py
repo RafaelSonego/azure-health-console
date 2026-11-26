@@ -129,7 +129,7 @@ def test_one_resource_gets_its_settings_and_a_vm_its_public_ip():
 
 def test_route_needs_a_subscription():
     app = Flask("test")
-    app.register_blueprint(create_blueprint(lambda tenant: posture_client(), config.load("/nonexistent")))
+    app.register_blueprint(create_blueprint(lambda tenant: posture_client(), config.load("/nonexistent"), authorize=lambda: None))
     http = app.test_client()
     assert http.get("/api/security").status_code == 400
     assert http.get(f"/api/security?subscription={SUB}").get_json()["counts"]["exposure"]["warning"] == 2

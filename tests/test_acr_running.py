@@ -119,7 +119,7 @@ def test_routes_answer_refusals(monkeypatch):
     monkeypatch.setattr(kube, "client_for", lambda *a, **k: (_ for _ in ()).throw(
         kube.KubeUnavailable("Couldn't read the Kubernetes API (HTTP 403)")))
     app = Flask("test")
-    app.register_blueprint(create_blueprint(lambda tenant: client, config.load("/nonexistent")))
+    app.register_blueprint(create_blueprint(lambda tenant: client, config.load("/nonexistent"), authorize=lambda: None))
     http = app.test_client()
     tags = http.get(f"/api/vulnerabilities/image-tags?registry={REGISTRY}&repository=team/api&digest={DIGEST}").get_json()
     assert tags["kind"] == "network" and "public network access is off" in tags["error"]

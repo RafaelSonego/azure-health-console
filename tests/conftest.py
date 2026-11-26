@@ -91,3 +91,12 @@ class FakeClient:
 @pytest.fixture
 def fake_client():
     return FakeClient
+
+
+@pytest.fixture(autouse=True)
+def _no_real_log_folder(tmp_path, monkeypatch):
+    """No test may write the console's log under the real home folder: the default points at this test's tmp."""
+    from healthconsole.core import config, eventlog
+    monkeypatch.setitem(config.DEFAULTS, "logs", {"dir": str(tmp_path / "default-logs"), "keep_days": 30})
+    yield
+    eventlog.configure(None)

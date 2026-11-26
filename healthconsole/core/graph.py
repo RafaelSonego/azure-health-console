@@ -1,5 +1,5 @@
-"""Microsoft Graph, read-only and narrow, for the Access tab: your own groups, finding a user by name, and that
-user's groups. GET only, on an allow-list of paths; anything else is refused before it is sent."""
+"""Microsoft Graph, read-only and narrow, for the Access tab and the access audit: your own groups, finding a user by
+name, that user's groups, and a group's users. GET only, on an allow-list of paths; anything else is refused before it is sent."""
 import re
 from urllib.parse import urlsplit
 
@@ -17,8 +17,11 @@ GUID = re.compile(f"^{_GUID}$")
 _ALLOWED = [re.compile(r"^/v1\.0/me/transitiveMemberOf/microsoft\.graph\.group$"),
             re.compile(r"^/v1\.0/users$"),
             re.compile(f"^/v1\\.0/users/{_GUID}$"),
-            re.compile(f"^/v1\\.0/users/{_GUID}/transitiveMemberOf/microsoft\\.graph\\.group$")]
-USER_FIELDS = "id,displayName,userPrincipalName,mail,accountEnabled"
+            re.compile(f"^/v1\\.0/users/{_GUID}/transitiveMemberOf/microsoft\\.graph\\.group$"),
+            re.compile(f"^/v1\\.0/groups/{_GUID}/transitiveMembers/microsoft\\.graph\\.user$"),
+            re.compile(f"^/v1\\.0/groups/{_GUID}$"),
+            re.compile(f"^/v1\\.0/directoryObjects/{_GUID}$")]
+USER_FIELDS = "id,displayName,userPrincipalName,mail,accountEnabled,userType"
 TIMEOUT = 20
 MAX_PAGES = 20
 CACHE_SECONDS = 300
@@ -91,7 +94,8 @@ def my_groups(token_provider, session=None, refresh=False):
 
 def _user(row):
     return {"id": row.get("id"), "name": row.get("displayName") or "", "upn": row.get("userPrincipalName") or "",
-            "mail": row.get("mail") or "", "enabled": row.get("accountEnabled") is not False}
+            "mail": row.get("mail") or "", "enabled": row.get("accountEnabled") is not False,
+            "guest": (row.get("userType") or "").lower() == "guest" or "#ext#" in (row.get("userPrincipalName") or "").lower()}
 
 
 def search_users(token_provider, text, session=None):
@@ -123,6 +127,46 @@ def user_groups(token_provider, user_id, session=None, refresh=False):
     path = f"/v1.0/users/{user_id.lower()}/transitiveMemberOf/microsoft.graph.group"
     return _cache.get_or_load(f"{_viewer(token_provider)}|groups|{user_id.lower()}",
                               lambda: _groups(token_provider, path, session), refresh)
+
+
+def user(token_provider, user_id, session=None):
+    """One user by object ID: name, sign-in name, mail, enabled, guest; cached like the other reads."""
+    if not GUID.match(user_id or ""):
+        raise ValueError("A user's object ID is needed.")
+    return _cache.get_or_load(f"{_viewer(token_provider)}|user|{user_id.lower()}",
+                              lambda: _user(_get(token_provider, f"/v1.0/users/{user_id.lower()}", {"$select": USER_FIELDS}, session)))
+
+
+def group(token_provider, group_id, session=None):
+    """One group's name by object ID (404 when it was deleted); cached."""
+    if not GUID.match(group_id or ""):
+        raise ValueError("A group's object ID is needed.")
+
+    def load():
+        row = _get(token_provider, f"/v1.0/groups/{group_id.lower()}", {"$select": "id,displayName"}, session)
+        return {"id": row.get("id"), "name": row.get("displayName") or ""}
+    return _cache.get_or_load(f"{_viewer(token_provider)}|group|{group_id.lower()}", load)
+
+
+def directory_object(token_provider, object_id, session=None):
+    """{"type": "user"|"group"|"servicePrincipal"|…, "id", "name", "upn", "guest", "enabled"} for any object ID, as an
+    access policy names it (404 when it was deleted); cached."""
+    if not GUID.match(object_id or ""):
+        raise ValueError("An object ID is needed.")
+
+    def load():
+        row = _get(token_provider, f"/v1.0/directoryObjects/{object_id.lower()}", {}, session)
+        return {**_user(row), "type": (row.get("@odata.type") or "").rsplit(".", 1)[-1]}
+    return _cache.get_or_load(f"{_viewer(token_provider)}|object|{object_id.lower()}", load)
+
+
+def group_users(token_provider, group_id, session=None):
+    """Every user in a group, nested groups included (not ones only eligible to join through PIM for Groups)."""
+    if not GUID.match(group_id or ""):
+        raise ValueError("A group's object ID is needed.")
+    path = f"/v1.0/groups/{group_id.lower()}/transitiveMembers/microsoft.graph.user"
+    return _cache.get_or_load(f"{_viewer(token_provider)}|members|{group_id.lower()}",
+                              lambda: [_user(r) for r in _get(token_provider, path, {"$select": USER_FIELDS, "$top": "999"}, session)])
 
 
 def forget():

@@ -171,7 +171,7 @@ def run(client, resource_id, hours=24, only_health=True, words=_HEALTH_WORDS):
     params = _window(hours)
     with ThreadPoolExecutor(max_workers=MAX_PARALLEL) as pool:
         results = list(pool.map(lambda d: _run_detector(client, resource_id, version, d, params), planned["detectors"]))
-    order = {CRITICAL: 0, WARNING: 1, UNKNOWN: 2, INFO: 3, HEALTHY: 4}
+    order = {CRITICAL: 0, WARNING: 1, INFO: 2, HEALTHY: 3, UNKNOWN: 4}
     results.sort(key=lambda r: (order.get(r["status"], 5), r["category"], r["title"] or ""))
     return {"supported": True, "results": results, "total": planned["total"], "ran": len(results),
             "skipped": planned["skipped"]}

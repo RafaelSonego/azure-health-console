@@ -6,9 +6,17 @@ from ..alert_check import AlertHistory
 from ..guarded import ServiceError
 from .matching import match
 
-ALERTS, ENTITIES, LOGS, ALERT_HISTORY = "alerts", "entities", "logs", "alert history"
-CAPABILITY_LABELS = {ALERTS: "alerts", ENTITIES: "entities", LOGS: "logs", ALERT_HISTORY: "alert history"}
-LOG_WINDOWS = (15, 30, 60, 360)  # minutes
+ALERTS, ENTITIES, LOGS, ALERT_HISTORY, OOM_KILLS = "alerts", "entities", "logs", "alert history", "oom kills"
+WORKLOADS = "kubernetes workloads"
+REQUESTS, WORKLOAD_PODS = "app requests", "workload pods"
+WORKLOAD_USAGE, RUNTIME_MEMORY = "workload usage", "runtime memory"
+WARNING_EVENTS = "warning events"
+CAPABILITY_LABELS = {ALERTS: "alerts", ENTITIES: "entities", LOGS: "logs", ALERT_HISTORY: "alert history",
+                     OOM_KILLS: "Kubernetes OOM kills", WORKLOADS: "Kubernetes workloads by namespace",
+                     REQUESTS: "an app's requests per minute", WORKLOAD_PODS: "a workload's pod restarts",
+                     WORKLOAD_USAGE: "a workload's CPU and memory over 30 days", RUNTIME_MEMORY: "an app's heap and process memory",
+                     WARNING_EVENTS: "Kubernetes warning events"}
+LOG_WINDOWS = (15, 30, 60, 360, 1440, 10080)  # minutes, up to 7 days; the tool's own retention still applies
 LOG_LIMIT = 100
 # Questions about one resource besides its logs; a provider lists the ones it answers in `reports`.
 REPORTS = {"errors": "Errors", "slow": "Slow transactions"}
@@ -95,6 +103,61 @@ class Provider(AlertHistory):
 
     def alert_series(self, rule, days):
         raise ProviderError(f"{self.label or 'This tool'} can't give an alert's history here yet.")
+
+    # A Kubernetes cluster's OOM kills, for clusters without Container Insights (OOM_KILLS in `capabilities`).
+    def oom_kills(self, cluster_name, hours):
+        """{"found", "rows", "total", "by_owner", "queries", "notes"}: `found` False when the tool has no data for this
+        cluster; `rows` the newest kills, each KilledAt, Namespace, Pod, Container, Node, OwnerKind, Owner, MemBytes,
+        LimitBytes, NodeMemBytes, NodeAllocBytes, Kernel, SystemOom (`aks.oom_rows` turns them into the page's rows);
+        `total` every kill in the look-back and `by_owner` all of them counted per [{Namespace, OwnerKind, Owner, Pods,
+        Kills}], so a list cut for length never hides how many there were. A read that hit the tool's own limit is in
+        `notes`."""
+        raise ProviderError(f"{self.label or 'This tool'} can't give a cluster's OOM kills here yet.")
+
+    # A Kubernetes cluster's Warning events (WARNING_EVENTS in `capabilities`): kept longer than the cluster's own hour.
+    def warning_events(self, cluster_name, hours):
+        """{"found", "rows", "total", "queries", "notes"}: one row per reason and object, shaped like Container
+        Insights' (Reason, Namespace, Object, ObjectKind, Count, Last, Message), most first; `total` every row before
+        the list was cut for length. A read that hit the tool's own limit is in `notes`."""
+        raise ProviderError(f"{self.label or 'This tool'} can't give a cluster's warning events here yet.")
+
+    # A namespace's Deployments, StatefulSets and DaemonSets, when the cluster can't be asked (WORKLOADS in `capabilities`).
+    def workload_names(self, cluster_name, namespace):
+        """{"found", "workloads": [{kind, name}], "queries"}: what ran in that namespace over the last hour."""
+        raise ProviderError(f"{self.label or 'This tool'} can't list a cluster's workloads here yet.")
+
+    # Workload path (REQUESTS): an app's requests, for the hop behind the gateways; and its names and paths, to suggest
+    # which app and which gateway routes are a workload's.
+    def app_names(self):
+        """{"names", "queries"}: the apps that sent requests over the last day."""
+        raise ProviderError(f"{self.label or 'This tool'} can't list apps here yet.")
+
+    def request_paths(self, app):
+        """{"paths", "queries"}: the app's busiest request paths over the last day."""
+        raise ProviderError(f"{self.label or 'This tool'} can't give an app's request paths here yet.")
+
+    def requests(self, app):
+        """{"found", "now", "week", "minutes", "queries"}: the app's last hour and the same hour last week, each
+        {total, errors, p95_ms}; `minutes` is [[time, total, errors]] over the last hour."""
+        raise ProviderError(f"{self.label or 'This tool'} can't give an app's requests here yet.")
+
+    # Workload path (WORKLOAD_PODS), for clusters without Container Insights.
+    def workload_pods(self, cluster_name, namespace, kind, name):
+        """{"found", "now", "week", "minutes", "queries"}: restarts in the last hour and the same hour last week
+        (`errors` = restarts), pods and pods not ready now; `minutes` is [[time, None, restarts]] per 5 minutes."""
+        raise ProviderError(f"{self.label or 'This tool'} can't give a workload's pods here yet.")
+
+    # Workload details (WORKLOAD_USAGE), for clusters without Container Insights.
+    def workload_usage(self, cluster_name, namespace, kind, name):
+        """{"found", "containers": [{container, cpu: {p95, p99, max_7d, max_30d}, memory: {…}}], "queries"}: per
+        container, CPU in cores and memory (working set) in bytes over 7 days, and the 30-day max."""
+        raise ProviderError(f"{self.label or 'This tool'} can't give a workload's CPU and memory over time here yet.")
+
+    # Workload details (RUNTIME_MEMORY): what the app's runtime holds, against what the pod's memory shows.
+    def runtime_memory(self, app):
+        """{"found", "heap_used", "heap_max", "heap_committed", "non_heap_used", "process", "heap_daily": [[time, MB]],
+        "queries"}: the last 15 minutes in MB, and heap used per day over 30 days."""
+        raise ProviderError(f"{self.label or 'This tool'} can't give an app's runtime memory here yet.")
 
 
 def whole_name(name, matches):

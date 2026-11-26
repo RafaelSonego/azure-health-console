@@ -31,6 +31,8 @@ triage:
   include_system_changes: false  # changes made by Azure itself are noisy
   secret_scan_max_vaults: 200    # the Secrets tab scans automatically up to this many vaults
   azure_status_feed: true        # read azure.status.microsoft's public feed for Azure-wide outages
+  capacity_near_max_percent: 80  # autoscale at this share of its maximum is listed (at the maximum is red)
+  resolved_hours: 24             # resolved Service Health issues stay listed this long
 
 # ---------------------------------------------------------------- summary
 summary:
@@ -39,6 +41,10 @@ summary:
   budget_warn_percent: 80      # a budget spent past this share turns yellow (spent past 100% is red)
   compare_hours: 24            # What changed compares with the summary from at least this long ago
   keep_days: 8                 # summaries kept on this machine for What changed
+
+# ---------------------------------------------------------------- alerts
+alerts:
+  history_hours: 24            # the Alerts bar keeps the console's own alerts this long (1 to 168), in memory
 
 # ---------------------------------------------------------------- graphs
 graph:
@@ -61,6 +67,28 @@ health:
   expiry_warning_days: 30      # Key Vault secrets/keys and certificates: yellow within this many days
   expiry_critical_days: 7      # ...and red within this many (expired is always red)
   detectors: true              # run Azure's health/risk detectors (AKS, App Service, Redis...) in each snapshot
+  baseline_change_percent: 200 # a group's metric "moved" at this share of last week (200 = doubled) or its inverse
+
+# ---------------------------------------------------------------- cost and security
+# ---------------------------------------------------------------- App Insights and Path
+appinsights:                   # one failure rule: Triage's spike card, Investigate and Path's requests hop
+  failed_min: 5                # failing more: at least this many failed requests in the hour...
+  failed_rate_points: 1        # ...and the failure rate this many points above the same hour last week
+  exceptions_min: 10           # throwing more: at least this many exceptions...
+  exceptions_percent: 200      # ...at this share of the same hour last week or more
+  critical_rate_percent: 20    # failing turns red at this failure rate...
+  critical_failed_min: 20      # ...with at least this many failed requests
+path:
+  drop_percent: 50             # a hop's traffic under this share of the same hour last week is a drop...
+  drop_min: 100                # ...when that hour had at least this many requests
+  restarts_min: 3              # pods restarting this many times in the hour (and twice last week) are rising
+  restarts_critical: 10        # ...red from this many
+security:
+  risky_ports: [22, 3389, 1433, 3306, 5432, 6379, 27017, 5985, 5986]   # a warning when open to the internet
+cost:
+  spike_percent: 200           # a day at this share of the usual day (median of the 7 before) is a spike
+vulnerabilities:
+  eol_warning_days: 90         # an App Service runtime turns yellow this many days before its end of support
 
 # ---------------------------------------------------------------- network
 network:
@@ -74,6 +102,61 @@ aks:
   kubeconfig_paths: []
   # When no local context matches, fetch the cluster *user* credential from Azure (kept in memory).
   fetch_credentials: true
+  # Workloads' rules of thumb; each check names the one it used. Kubernetes' own rules aren't settings.
+  # System namespaces aren't a setting either: they're found in the cluster (Kubernetes' own, and those whose
+  # every workload carries a label AKS or its add-on manager sets).
+  memory_near_limit_percent: 85  # memory at this share of the limit or more: near an OOM kill (red)
+  cpu_near_limit_percent: 80     # CPU at this share of the limit or more: throttled (red)
+  cpu_above_request_percent: 90  # CPU above this share of the request: relies on spare node CPU (yellow)
+  cpu_idle_percent: 30           # CPU below this share of the request: reserved and unused (a setup note)
+  hpa_target_high_percent: 85    # an HPA utilization target above this is high
+  hpa_near_max_percent: 80       # an HPA at this share of maxReplicas has little room (at the maximum is red)
+  hpa_overshoot_percent: 150     # an HPA metric at this share of its target: the request is too low
+  pool_requests_percent: 80      # a node pool with this share of allocatable requested has little room
+  restarts_warning: 5            # restarts from this many on are a warning
+  leftover_hours: 24             # a Failed pod older than this is listed apart as left over
+  rollout_hours: 24              # a rollout this recent shows on its workload
+  node_image_warning_days: 60    # a node pool's OS image this old turns yellow (Nodes and Security)
+  node_image_critical_days: 180  # ...and red
+  # Workloads' Look back on "default": each list's own window (1, 6, 24, 72, 168, 336 or 720 hours)
+  restarts_look_back_hours: 1
+  oom_look_back_hours: 24        # Container Insights and the monitoring tool
+  events_look_back_hours: 1
+  oom_near_limit_percent: 90     # an OOM kill is probably its own limit when memory was this close to it...
+  oom_node_full_percent: 95      # ...and probably the node when the node was this full (no kernel message)
+
+# ---------------------------------------------------------------- access audit
+audit:
+  keep_days: 7                 # the last result per scope is kept on this machine (readable only by you); 0 = never
+  # Security → Access audit lists people who can change things or see data without PIM. Actions and data actions
+  # here don't count (wildcards allowed). Reads Azure names as actions (checkNameAvailability, getBgpPeerStatus,
+  # backendHealth, exportTemplate…) never count, by their verb. By default, also:
+  # - harmless writes: support requests, downloads, retired classic alert rules, deployments (they run with the
+  #   caller's own rights), operation results, resource provider registration, Service Health events, the blob
+  #   user-delegation key (a SAS from it can't exceed the person's own blob rights);
+  # - reads that show no data: secret, key and certificate metadata (Key Vault Reader);
+  # - logs and metrics (Log Analytics Reader, Monitoring Data Reader) and Kubernetes objects other than secrets (AKS
+  #   RBAC Reader); remove these lines if logs should count as data;
+  # - the AKS user credential (Cluster User Role): with Entra ID it only hands out the kubeconfig. On a cluster
+  #   without Entra ID it's admin, so there it still counts.
+  ignore_actions:
+    - Microsoft.Support/*
+    - "*/*download*/action"
+    - Microsoft.Insights/alertRules/*
+    - Microsoft.Resources/deployments/*
+    - "*/operationResults/*"
+    - "*/register/action"
+    - Microsoft.ResourceHealth/*/action
+    - Microsoft.Storage/storageAccounts/blobServices/generateUserDelegationKey/action
+    - "*/readMetadata/action"
+    - Microsoft.KeyVault/vaults/*/read
+    - Microsoft.OperationalInsights/*/read
+    - Microsoft.OperationalInsights/workspaces/jobs/export/action
+    - Microsoft.Insights/*/read
+    - Microsoft.Monitor/*/read
+    - "*/logstream/action"
+    - Microsoft.ContainerService/managedClusters/*/read
+    - Microsoft.ContainerService/managedClusters/listClusterUserCredential/action
 
 # ---------------------------------------------------------------- integrations
 # Per tenant, inside its entry under `tenants:` (by domain or ID; "*" is never used for integrations, so one
@@ -147,5 +230,9 @@ watchlist_file: ~/.config/azure-health-console/watchlist.yaml
 profiles_dir: ~/.config/azure-health-console/profiles
 exports_dir: exports
 cache_dir: ~/.cache/azure-health-console  # the cost store: one file per tenant and account, readable only by you
+# This machine's log (Settings → Logs): errors, what was done, requests sent. Never tokens or secret values.
+logs:
+  dir: ~/.local/state/azure-health-console/logs
+  keep_days: 30  # 1 to 365; older days are deleted
 # PDF uses built-in Latin fonts. For names in other scripts, point this at any .ttf (e.g. DejaVuSans.ttf).
 pdf_font: null

@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 
 from . import alert_check
 from .alert_detail import DURATION
-from .arm import ArmError
+from .arm import ArmError, kql_string
 from .explore import metrics
 
 RULE_API = "2018-03-01"
@@ -29,7 +29,7 @@ def _literal(value):
     return "'" + str(value).replace("'", "''") + "'"
 
 
-_ALERT = ("AlertsManagementResources | where type =~ 'microsoft.alertsmanagement/alerts' | where id =~ '{id}'"
+_ALERT = ("AlertsManagementResources | where type =~ 'microsoft.alertsmanagement/alerts' | where id =~ {id}"
           " | extend e = properties.essentials | project rule=tostring(e.alertRule), target=tostring(e.targetResource),"
           " started=tostring(e.startDateTime)")
 
@@ -60,7 +60,7 @@ class AzureMetricAlerts(alert_check.AlertHistory):
         """`ref` is a fired alert's ID (Alerts Management) or a metric alert rule's ID."""
         rule_id, target = ref, None
         if "/providers/microsoft.alertsmanagement/alerts/" in ref.lower():
-            rows = self.client.query(_ALERT.format(id=ref.replace("'", "")))
+            rows = self.client.query(_ALERT.format(id=kql_string(ref)))
             if not rows:
                 raise CheckError("That alert isn't in Azure's alert history any more.")
             rule_id, target = rows[0]["rule"], rows[0]["target"]

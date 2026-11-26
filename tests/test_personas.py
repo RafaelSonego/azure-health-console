@@ -34,7 +34,7 @@ def test_config_mistakes_are_named(entry, words):
 def test_route(tmp_path):
     app = Flask("t", static_folder=None)
     app.register_blueprint(create_blueprint(lambda t: None, config.from_data({"personas": {"sre": {"home": "investigate"}}}),
-                                            config_file=tmp_path / "c.yaml"))
+                                            config_file=tmp_path / "c.yaml", authorize=lambda: None))
     body = app.test_client().get("/api/personas").get_json()
     assert body["default"] == "everything" and next(p for p in body["personas"] if p["name"] == "sre")["home"] == "investigate"
     assert body["configured"] == ""
@@ -46,14 +46,14 @@ def test_the_persona_to_open_with_is_a_defined_one(tmp_path):
     with pytest.raises(config.ConfigError, match="persona 'nobody' isn't defined"):
         config.from_data({"persona": "nobody"})
     app = Flask("t", static_folder=None)
-    app.register_blueprint(create_blueprint(lambda t: None, config.from_data({"persona": "sre"}), config_file=tmp_path / "c.yaml"))
+    app.register_blueprint(create_blueprint(lambda t: None, config.from_data({"persona": "sre"}), config_file=tmp_path / "c.yaml", authorize=lambda: None))
     assert app.test_client().get("/api/personas").get_json()["configured"] == "sre"
 
 
 def test_settings_saves_the_persona_and_refuses_an_unknown_one(tmp_path):
     from tests.conftest import FakeClient
     app = Flask("t", static_folder=None)
-    app.register_blueprint(create_blueprint(lambda t=None: FakeClient(), config.from_data({}), config_file=tmp_path / "c.yaml"))
+    app.register_blueprint(create_blueprint(lambda t=None: FakeClient(), config.from_data({}), config_file=tmp_path / "c.yaml", authorize=lambda: None))
     web = app.test_client()
     field = next(f for f in web.get("/api/settings").get_json()["fields"] if f["name"] == "persona")
     assert field["value"] == "" and field["type"] == "text"

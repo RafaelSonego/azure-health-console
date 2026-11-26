@@ -83,6 +83,17 @@ class NewRelicClient(GuardedClient):
             raise NewRelicError("New Relic said: " + "; ".join(self.last_errors)[:300], "access")
         return value or {}
 
+    def nrql_many(self, account_id, nrqls):
+        """Rows of each NRQL query in one account, in one request (one aliased field per query)."""
+        if not nrqls:
+            return []
+        params = ", ".join(f"$q{i}: Nrql!" for i in range(len(nrqls)))
+        fields = " ".join(f"q{i}: nrql(query: $q{i}) {{ results }}" for i in range(len(nrqls)))
+        text = f"query($id: Int!, {params}) {{ actor {{ account(id: $id) {{ {fields} }} }} }}"
+        variables = {"id": int(account_id), **{f"q{i}": q for i, q in enumerate(nrqls)}}
+        account = (self.query(text, variables).get("actor") or {}).get("account") or {}
+        return [self._partial(account.get(f"q{i}")).get("results") or [] for i in range(len(nrqls))]
+
     def test(self):
         """Who the key belongs to, and which configured account IDs it can read."""
         data = self.query("{ actor { user { name email } accounts { id name } } }")

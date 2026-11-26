@@ -184,6 +184,10 @@ def test_gateway_logs_fall_back_to_azure_diagnostics(monkeypatch):
     with pytest.raises(ValueError):
         gateway.log_queries(APIM, AT, "orders\" | take 1")
 
+    sent.clear()  # known to log to AzureDiagnostics: the empty dedicated table isn't asked
+    assert gateway.logs(FakeClient(), APIM, AT, "/orders/7", dedicated=False)["table"] == "AzureDiagnostics"
+    assert len(sent) == 1 and sent[0].startswith("AzureDiagnostics")
+
 
 # ---------------------------------------------------------------- the pod
 
@@ -250,7 +254,7 @@ def web():
         ("microsoft.insights/components", lambda kql: [{"id": APP, "name": "shop-appi", "resourceGroup": "shop",
                                                        "subscriptionId": SUB}])])
     app = Flask("test")
-    app.register_blueprint(create_blueprint(lambda tenant: client, config.load("/nonexistent")))
+    app.register_blueprint(create_blueprint(lambda tenant: client, config.load("/nonexistent"), authorize=lambda: None))
     return app.test_client(), client
 
 
@@ -264,7 +268,10 @@ def test_routes_check_their_inputs_and_say_why(web):
              (f"/api/investigate/dependencies?component={APP}&window=2d", "window must be"),
              ("/api/investigate/recent-changes?id=/subscriptions/x/evil", "resource IDs"),
              (f"/api/investigate/gateway-logs?id={AKS}&at={AT_Z}", "API Management"),
-             ("/api/investigate/components", "subscription")]
+             ("/api/investigate/components", "subscription"),
+             ("/api/investigate/measure", "component IDs"),
+             ("/api/investigate/measure?id=/subscriptions/x/evil", "component IDs"),
+             ("/api/investigate/measure?" + "&".join(f"id={APP}{i}" for i in range(26)), "component IDs")]
     for url, why in cases:
         reply = http.get(url)
         assert reply.status_code == 400 and why in reply.get_json()["error"], url
@@ -287,7 +294,7 @@ def test_overview_line_reads_the_last_hour_of_a_gateway_component():
     metrics = {"value": [{"name": {"value": "requests/failed"}, "timeseries": [{"data": [{"count": 1}, {"count": 7}]}]}]}
     client = FakeClient(gets={"/loggers": loggers, "/metrics": metrics})
     app = Flask("test")
-    app.register_blueprint(create_blueprint(lambda tenant: client, config.load("/nonexistent")))
+    app.register_blueprint(create_blueprint(lambda tenant: client, config.load("/nonexistent"), authorize=lambda: None))
     data = app.test_client().get(f"/api/explore/appinsights-now?id={APIM}").get_json()
     assert data["available"] and data["component_id"] == APIM_AI and data["link"]["how"] == "logger"
     assert data["now"]["failed"] == 7 and data["now"]["trend"] == [1, 7] and "roles" not in data
@@ -312,7 +319,7 @@ def test_server_errors_count_only_5xx_and_ask_for_the_result_code_split():
     from healthconsole.core.explore import appinsights as ai
     sent = []
     client = FakeClient(gets={"/metrics": lambda params: sent.append(params) or split_series(("500", 30), ("503", 12), ("404", 900))})
-    assert ai.server_errors(client, [{"id": APP}]) == {APP: (42, None)}
+    assert ai.server_errors(client, [{"id": APP}]) == {APP: (42, None, {"500": 30, "503": 12, "404": 900})}
     assert sent[0]["$filter"] == "request/resultCode eq '*'" and sent[0]["metricnames"] == "requests/failed"
 
 
@@ -332,7 +339,7 @@ def test_quiet_components_sort_by_5xx_with_their_share_of_scope(monkeypatch):
     steady = {"requests/count": (1000, 1000), "requests/failed": (15, 19), "exceptions/count": (0, 0),
               "trend": {"requests/failed": [19, 15]}}
     monkeypatch.setattr(ai, "last_hour", lambda c, rows: [(r, steady, None) for r in rows])
-    monkeypatch.setattr(ai, "server_errors", lambda c, rows: {small: (10, None), big: (30, None)})
+    monkeypatch.setattr(ai, "server_errors", lambda c, rows: {small: (10, None, {"500": 10}), big: (30, None, {"502": 30})})
     found = investigate.components(client, [SUB])
     assert [c["name"] for c in found["components"]] == ["edge-appi", "shop-appi"]
     assert [c["share"] for c in found["components"]] == [75.0, 25.0] and found["components"][0]["status"] is None
@@ -344,7 +351,7 @@ def test_an_unreadable_5xx_split_leaves_the_column_empty_and_says_so(monkeypatch
     from healthconsole.core import investigate
     from healthconsole.core.explore import appinsights as ai
     monkeypatch.setattr(ai, "last_hour", lambda c, rows: [(r, {}, None) for r in rows])
-    monkeypatch.setattr(ai, "server_errors", lambda c, rows: {APP: (None, ArmError("400"))})
+    monkeypatch.setattr(ai, "server_errors", lambda c, rows: {APP: (None, ArmError("400"), {})})
     found = investigate.components(client, [SUB])
     assert found["components"][0]["server_errors"] is None and "5xx count couldn't be read" in found["notes"][0]
 
@@ -359,15 +366,32 @@ def test_dependencies_keep_one_failed_trace_and_the_failure_rate():
 
 
 def test_recent_changes_read_every_target_in_their_subscriptions():
+    from datetime import datetime, timedelta, timezone
     other = f"/subscriptions/{'1' * 8}-1111-1111-1111-{'1' * 12}/resourceGroups/web/providers/Microsoft.Web/sites/shop-api"
+    recent = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
     seen = {}
     client = FakeClient(query_handlers=[("resourcechanges", lambda kql: seen.update(kql=kql) or [
-        {"at": "2026-11-12T14:02:00Z", "target": other.lower(), "change": "Update", "by": "someone",
-         "client": "portal", "changes": {"properties.siteConfig.appSettings": {}, "tags.x": {}}}])])
+        {"at": recent, "target": other.lower(), "change": "Update", "by": "someone", "client": "portal",
+         "changes": {"sku.capacity": {"previousValue": "3", "newValue": "4"}, "tags.x": {}}}])])
     from healthconsole.core import investigate
     found = investigate.recent_changes(client, [APP, other, APP.upper()], "6h")
-    assert found["hours"] == 7 and "ago(7h)" in seen["kql"] and APP.lower() in seen["kql"] and other.lower() in seen["kql"]
-    assert found["rows"][0]["name"] == "shop-api" and found["rows"][0]["fields"] == ["properties.siteConfig.appSettings", "tags.x"]
+    assert found["hours"] == 7 and "ago(336h)" in seen["kql"] and APP.lower() in seen["kql"] and other.lower() in seen["kql"]
+    row = found["rows"][0]
+    assert row["name"] == "shop-api" and found["before"] is None
+    assert row["fields"] == [{"name": "sku.capacity", "before": "3", "after": "4"}, {"name": "tags.x", "before": "", "after": ""}]
+
+
+def test_an_empty_window_says_when_the_last_change_was():
+    from datetime import datetime, timedelta, timezone
+    from healthconsole.core import investigate
+    old = lambda hours: (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()  # noqa: E731
+    client = FakeClient(query_handlers=[("resourcechanges", lambda kql: [
+        {"at": old(7), "target": APP.lower(), "change": "Update", "changes": {"sku.capacity": {"previousValue": 4, "newValue": 3}}},
+        {"at": old(30), "target": APP.lower(), "change": "Update", "changes": {}}])])
+    found = investigate.recent_changes(client, [APP], "1h")
+    assert found["rows"] == [] and found["before"]["fields"] == [{"name": "sku.capacity", "before": "4", "after": "3"}]
+    day = investigate.recent_changes(client, [APP], "24h")
+    assert len(day["rows"]) == 1 and day["rows"][0]["fields"][0]["after"] == "3" and day["before"]["fields"] == []
 
 
 @pytest.mark.parametrize("ids,window", [([], "1h"), (["/subscriptions/x/evil"], "1h"), ([APP], "2d")])
@@ -393,3 +417,89 @@ def test_the_start_list_puts_the_failing_app_first_with_its_last_hour(monkeypatc
     assert first["status"] == "warning" and first["failed_pct"] == 10.0 and first["week"]["failed_pct"] == 0.5
     assert first["causes"] == ["failed", "exceptions"]
     assert first["apps"] == ["shop-api"] and found[1]["status"] is None and found[1]["causes"] == []
+
+
+def test_each_component_keeps_its_failed_requests_by_code_with_cut_short_ones(monkeypatch):
+    from healthconsole.core.explore import appinsights as ai
+    cut = "0 [not sent in full (see exception telemetries)]"
+    client = FakeClient(gets={"/metrics": lambda params: split_series(("502", 8), (cut, 3), ("404", 90))})
+    fives, error, codes = ai.server_errors(client, [{"id": APP}])[APP]
+    assert (fives, error, codes) == (8, None, {"502": 8, cut: 3, "404": 90})  # code 0 isn't counted as 5xx
+
+    from healthconsole import core
+    found_client = FakeClient(query_handlers=[("microsoft.insights/components", lambda kql: [{"id": APP, "name": "shop-appi"}])])
+    monkeypatch.setattr(core.investigate, "_apps", lambda c, s: {})
+    monkeypatch.setattr(ai, "last_hour", lambda c, rows: [(r, {}, None) for r in rows])
+    monkeypatch.setattr(ai, "server_errors", lambda c, rows: {APP: (8, None, {"502": 8, cut: 3})})
+    assert core.investigate.components(found_client, [SUB])["components"][0]["codes"] == {"502": 8, cut: 3}
+
+
+def test_codes_give_each_code_its_share_and_its_own_busiest_endpoints():
+    from healthconsole.core.explore import appinsights as ai
+    from healthconsole.core.investigate.appinsights import CODES, CUT_REASONS
+    cut = "0 [not sent in full (see exception telemetries)]"
+    cols = ["code", "operation", "role", "failed", "last_seen", "code_failed", "trace_id", "endpoints"]
+
+    def answer(c, q):
+        if q == CODES:  # one pass: totals rows carry code_failed, endpoint rows don't
+            assert "materialize(" in q and "row_number(1, prev(code) != code)" in q
+            return table(cols, [["404", "GET /a", "api", 60, "x", None, None, None], ["404", "GET /b", "api", 20, "y", None, None, None],
+                                ["502", "POST /pay", "api", 10, "z", None, None, None],
+                                ["404", None, None, None, "t1", 80, "t404", 7], ["502", None, None, None, "t2", 10, "t502", 1],
+                                [cut, None, None, None, "t3", 10, "tcut", 1]])
+        assert q == CUT_REASONS and "resultCode has 'not sent in full' or resultCode == '0'" in q
+        return table(["code", "type", "problem", "requests", "message", "trace_id", "last_seen"],
+                     [[cut, "ClientConnectionFailure", "ClientConnectionFailure at forward-request", 9, "closed", "tc", "x"]])
+
+    sent = []
+    client = Insights(answer)
+    real_get = client.get
+    client.get = lambda path, v, params=None, tolerate=(), timeout=None: sent.append(timeout) or real_get(path, v, params)
+    out = AppInsightsSource(client, APP).codes("24h")
+    rows = {r["code"]: r for r in out["rows"]}
+    assert [r["code"] for r in out["rows"]] == ["404", "502", cut]  # most first
+    assert rows["502"]["failed_pct"] == 10.0 and rows["502"]["trace_id"] == "t502" and rows["404"]["endpoints"] == 7
+    assert [e["operation"] for e in rows["404"]["top"]] == ["GET /a", "GET /b"] and rows["502"]["top"][0]["role"] == "api"
+    assert rows[cut]["reasons"][0]["problem"].endswith("forward-request") and rows["404"]["reasons"] == []
+    assert [q["label"] for q in out["queries"]] == ["by code", "why: no usable status"] and out["errors"] == []
+    assert sent == [ai.QUERY_TIMEOUT_SECONDS] * 2  # KQL gets the longer limit
+
+
+def test_samples_can_be_only_one_http_code():
+    src = AppInsightsSource(Insights(lambda c, q: table(["timestamp"], [])), APP)
+    assert 'resultCode == "502"' in src.samples_queries("GET /a", "api", "1h", code="502")[0]["query"]
+    assert "resultCode ==" not in src.samples_queries("GET /a", "api", "1h")[0]["query"]
+
+
+def test_the_start_list_comes_at_once_and_each_batch_is_measured_on_its_own(monkeypatch):
+    """424 components took 21 s to measure: the list shows A–Z first, then the page measures it a batch at a time."""
+    quiet = APP.replace("shop-appi", "a-quiet-appi")
+    client = FakeClient(query_handlers=[("microsoft.insights/components", lambda kql: [
+        {"id": quiet, "name": "a-quiet-appi"}, {"id": APP, "name": "shop-appi"}])])
+    from healthconsole.core import investigate
+    from healthconsole.core.explore import appinsights as ai
+    measured = []
+    counts = {"requests/count": (400, 380), "requests/failed": (40, 2), "exceptions/count": (0, 0)}
+    monkeypatch.setattr(ai, "last_hour", lambda c, rows: measured.extend(r["id"] for r in rows) or [(r, counts, None) for r in rows])
+    monkeypatch.setattr(ai, "server_errors", lambda c, rows: {r["id"]: (3, None, {"502": 3}) for r in rows})
+    listed = investigate.components(client, [SUB], measure_now=False)
+    assert [c["name"] for c in listed["components"]] == ["a-quiet-appi", "shop-appi"] and not measured
+    assert all(c["pending"] and not c["measured"] for c in listed["components"]) and listed["batch"] == investigate.MEASURE_BATCH
+    one = investigate.measure(client, [{"id": APP}])
+    assert measured == [APP] and one[APP]["measured"] and one[APP]["failed"] == 40 and one[APP]["server_errors"] == 3
+    app = Flask("test")
+    app.register_blueprint(create_blueprint(lambda tenant: client, config.load("/nonexistent"), authorize=lambda: None))
+    reply = app.test_client().get(f"/api/investigate/measure?id={APP}&id={quiet}").get_json()["components"]
+    assert set(reply) == {APP, quiet} and reply[quiet]["status"] == "warning"
+
+
+def test_request_counts_weigh_each_sampled_row_by_its_item_count():
+    import re
+    from healthconsole.core.explore import appinsights as explore_ai
+    from healthconsole.core.investigate import appinsights as inv_ai
+    queries = {name: getattr(inv_ai, name) for name in ("OPERATIONS", "CODES", "CUT_REASONS", "EXCEPTIONS", "DEPENDENCIES")}
+    queries["roles"] = explore_ai.QUERIES["roles"]
+    for name, kql in queries.items():  # a sampled row stands for itemCount calls
+        counted = re.findall(r"\w+=(?:count|countif|dcount)\(", kql)
+        assert counted in ([], ["endpoints=count("]), f"{name} counts rows: {counted}"
+        assert "itemCount" in kql, name

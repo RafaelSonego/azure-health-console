@@ -68,13 +68,36 @@ def _from_keychain(target, scope, field):
     return value
 
 
+SERVICENOW_INSTANCE_ENV = "AHC_SERVICENOW_INSTANCE"  # the one instance ServiceNow's environment secrets are for
+
+
+def env_instance():
+    """The host AHC_SERVICENOW_INSTANCE names ("dev123", a URL or a host), or "" when it isn't set."""
+    from .servicenow import host_of  # servicenow imports this module
+    return host_of(os.environ.get(SERVICENOW_INSTANCE_ENV) or "")
+
+
+def _from_env(target, scope, field):
+    """An environment secret; ServiceNow's only for the instance (`scope`) AHC_SERVICENOW_INSTANCE names, so it never
+    goes to another connection or to an instance changed in Settings."""
+    value = os.environ.get(env_name(target, field))
+    if value and target == "servicenow" and (not scope or env_instance() != scope):
+        return None
+    return value or None
+
+
+def env_unbound(target, scope, field):
+    """True when a ServiceNow environment secret is set but held back, for Settings to say why."""
+    return bool(os.environ.get(env_name(target, field))) and _from_env(target, scope, field) is None
+
+
 def get(target, scope, field):
-    return os.environ.get(env_name(target, field)) or _from_keychain(target, scope, field)
+    return _from_env(target, scope, field) or _from_keychain(target, scope, field)
 
 
 def source(target, scope, field):
     """"environment", "keychain" or None: for the status shown in Settings."""
-    if os.environ.get(env_name(target, field)):
+    if _from_env(target, scope, field):
         return "environment"
     return "keychain" if _from_keychain(target, scope, field) else None
 

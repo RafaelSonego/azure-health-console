@@ -4,6 +4,437 @@ All notable changes to this project are documented here. The format is based
 on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] - 2026-11-26
+
+### Security
+
+- **The page sends its key as a header, not a cookie.** Opening the launch address once per browser still works the
+  same, restarts included, and no longer expires after 30 days. The key is kept for the console's own address only, so
+  a program on another port of 127.0.0.1 never receives it, and another site can't send it. A browser still holding
+  1.1.x's cookie is handed the key on its next visit and the cookie is deleted; the cookie alone opens nothing.
+- The API answers only its own page: requests another site or another local port starts (`Sec-Fetch-Site`, `Origin`)
+  are refused, and actions take JSON only, so a plain form can't reach them.
+- **Embedding the blueprint needs your own sign-in check:** `create_blueprint(..., authorize=fn)` is required; `fn()`
+  runs before every request, None lets it through, a response refuses it.
+- Dependencies have upper bounds (next major; next minor for 0.x), and the release carries `requirements-release.txt`
+  with every dependency's exact version and hashes. Homebrew installs from it with `--require-hashes`.
+- The README's *Check what you install* compares PyPI's files with the GitHub release's `SHA256SUMS.txt` before
+  installing.
+- Links built from outside data (an alert condition's runbook, ServiceNow records, Advisor, monitoring tools) open
+  only when they are `http`/`https`; a `javascript:` or `data:` address is no longer a link.
+- *Is this alert right?* reads a New Relic condition only in the connection's own accounts; another account the key
+  can see is refused, on the page and in `alert-check`.
+- `export`, `readiness` and `bench` write their reports readable by you only (0600) and refuse to write through a
+  symlink or a non-file at the report's path.
+- A health profile's `warn` / `crit` must be a finite number: `.nan`, `.inf`, `true` or text no longer loads (NaN
+  compared false, so the metric read as healthy).
+- **Releases are signed.** `SHA256SUMS.txt` lists every file of a release (wheel, sdist, `constraints.txt`) and
+  `SHA256SUMS.txt.sig` is its signature, made with a key that never leaves Azure Key Vault. The pipx install in the
+  README checks it with openssl and installs with `--require-hashes -c constraints.txt`, which names every package's
+  exact version and hash, the console's own wheel included. **`azure-health-console verify [folder]`** checks a
+  downloaded release with the key built into the version you have, before upgrading. The *new version* notice links
+  to these steps instead of `pipx upgrade`, which checks nothing.
+- The launch address carries the key after `#` (`/#key=…`), which the browser never sends, so it can't end up in a
+  request log; a key in the query (`/?key=…`) no longer opens anything.
+- The launch key is trusted only as a private regular file of yours, never through a symlink; anything else is
+  replaced (in a folder others can change, the key lasts one start).
+- Settings, health profiles, the Watchlist, the caches and the log are used only from files and folders no other
+  account can change (macOS, Linux: yours or root's, folders above included). Yours lose others' write access; a
+  folder of someone else's stops with the `chmod` to run. Settings over 1 MB and profiles over 256 KB aren't read.
+- A health profile whose `crit` comes before its `warn` (e.g. `GreaterThan` with `crit` below `warn`) no longer loads.
+- **ServiceNow:** a secret from the environment (`AHC_SERVICENOW_PASSWORD`, `AHC_SERVICENOW_CLIENT_SECRET`) is sent
+  only to the instance `AHC_SERVICENOW_INSTANCE` names; it used to go to every ServiceNow connection, including an
+  instance changed in Settings. The console never connects ServiceNow to an address on this machine or its link
+  (`localhost`, `127.x`, `169.254.x`, checked on the connected socket, so a name that resolves there gets nothing);
+  `user:password@` in an instance URL is dropped.
+- Resource Graph values that come from a request (an AKS cluster's ID in dependency lookups, an alert's ID, a VNet)
+  are quoted as KQL literals, and the cluster ID must be an AKS resource ID.
+- Limits on work a caller can start: at most 8 checks run at once per person (24 per console); more answer "N checks
+  are already running" instead of starting. A Kubernetes answer over 128 MB is refused while it's read. Readiness's
+  certificate check reads at most `triage.secret_scan_max_vaults` vaults and names the ones left out, and lists keys
+  only with *include secrets*.
+
+### Added
+
+- **Warning events without Container Insights** (AKS Workloads → Pods & events, and What's wrong now): from the
+  cluster's own events (Kubernetes API, about its last hour, cluster-wide, Warning only) and from the monitoring
+  tool over the look-back. Monitoring tools answer it through a new capability, `warning events` (New Relic first),
+  so another tool can answer it too.
+- **Layout: Classic or Panes** (account menu, kept in this browser). Panes keeps the top bars in place and gives each
+  part of the window one scrollbar: a view's header stays pinned, table headers stick under it, and lists and tables no
+  longer scroll inside their own boxes (Browse's tree and right side each scroll once). Classic is the page as before.
+- **Settings → Logs: errors, what was done, and every request sent.** The console keeps a log on this machine (one
+  file per kind and day, readable only by you, 30 days by default: `logs.dir`, `logs.keep_days`), never with tokens,
+  keys or secret values. *Errors*: bugs in the console, failed checks and errors in the page itself (which only the
+  browser saw before), each with an ID the page now shows ("error ID 7f3a2c1d"), a stack trace and *Copy for a bug
+  report*. *What was done*: settings and connections changed, keychain secrets, Watchlist and alert rules, sign-in,
+  reads started, Check someone's access (who was looked up), and requests refused for lacking the console's key.
+  *Requests sent* answers first whether only reads left, then lists every request by service (its address and total),
+  method and path, each POST named by the read it is (a Resource Graph query, GraphQL…), with refusals.
+- **All workloads lists every kind, like the portal's Workloads:** one picker for Deployments, Stateful sets, Daemon
+  sets, Cron jobs, Jobs and Pods (or All kinds), with counts, remembered in this browser; a kind the cluster doesn't have
+  is greyed out, and the Namespace box narrows each. Pods shows
+  every pod with its status and reason, ready containers, restarts, since when, node and workload, not-ready first and
+  left-over Failed pods last; Jobs shows how each ended, its cron job, pods succeeded and failed, and how long it took.
+  The Workloads list gains a Kind column.
+- **Workload details** (AKS Workloads: click a workload on any line, or pick it and press Details): its HPA with
+  each metric against its target and the pods that metric alone asks for, requests and limits against use, probes,
+  scratch volumes, runtime memory flags (only the flags are kept), pods by node and zone, events; then its CPU and
+  memory over 7 and 30 days (Container Insights, else the monitoring tool) with the request each HPA target needs,
+  and the app's heap against the pod's memory when the tool reports it. Two new monitoring-tool questions
+  (`workload usage`, `runtime memory`), answered by New Relic; five more namespaced reads on the Kubernetes guard.
+- **Would a change fit?** (Workload details): new requests per container, or what its HPA targets need, checked
+  against the nodes its pods run on: the replicas its HPA would ask for, the pools' requests before and after, the
+  nodes missing and whether the autoscaler can add them, and the room a rolling update has next to the old pods.
+- **AKS Workloads toolbar:** a namespace picker (namespaces with problems first, with counts; matches the Namespace
+  column exactly; kept per cluster) and **Go to workload** (type part of a name, pick it, its details open under the
+  toolbar).
+- Lists over 15 rows scroll in their own box with the header row kept in view, and each cell's tooltip names its
+  column.
+- **Path of a workload** (AKS Workloads next to Dependencies, Investigate → pod, an App Service's App Insights tab):
+  each hop in front of it (App Gateway routes, API Management APIs), its requests and its pods, the last hour against
+  the same hour last week, per minute on one strip, and where it breaks (errors up, or traffic below half). Each hop
+  is read from where its data is: gateway logs in Log Analytics, requests from the monitoring tool or App Insights,
+  pods from Container Insights or the monitoring tool; a hop that can't be read says why. **Link front doors**
+  suggests the routes, APIs, app and component from data, with why, and keeps what you confirm per tenant
+  (`workload_links`). Monitoring tools answer two new questions for it (`app requests`, `workload pods`); New Relic
+  answers both.
+
+- Security → **Access audit**: the people (not apps or managed identities) who can change things or **see data
+  without PIM** in the scope, directly or through a group: one row per person with their widest access (manages
+  access, changes everything, gets keys or secrets or signs in, changes data, sees data, changes some things), worked
+  out from each role's permissions so custom roles count; where each role applies and how they got it; who is also
+  PIM-eligible for the same role (the standing one isn't needed); guests; an assignment's condition. Reader roles that
+  show no data don't count: reads Azure names as actions are told apart by their verb, and `audit.ignore_actions`
+  lists the rest (harmless writes, metadata, logs and metrics, Kubernetes objects, the AKS user credential except on
+  clusters without Entra ID). The resource type each role is on; filters by name, role, group and type; tiles;
+  Markdown/CSV/PDF export.
+- Access audit **saved on this machine**: the last result per scope (and `audit.ignore_actions`) is kept in
+  `cache_dir`, readable only by you, for `audit.keep_days` (default 7, 0 keeps nothing). The audit opens at once,
+  even for a whole tenant, under a *Saved result from …* line with its age; Refresh reads it again. Clear cached data
+  removes it.
+- Investigate, HTTP codes: step 1's **Server errors (5xx)** shows the top three 5xx codes and, in amber, responses
+  **not sent in full** (code 0, usually timeouts, which aren't 5xx); hovering **Last hour** lists the 4xx codes. Step 2
+  opens with **By HTTP code**: each code with its count, share, endpoints and last seen, 5xx and cut-short first; a
+  code opens to its busiest endpoints, whose **Samples** read only that code, and **Follow one** opens a request that
+  failed with it. No extra reads in step 1 (the per-code split was already read for the 5xx count). Code 0 is told
+  apart: *not sent in full* (API Management, the caller hung up) or *failed runs (no HTTP status)* (a function or job
+  not called over HTTP); both groups show **Why**, the exceptions on those requests by reason and where it broke.
+- `alerts.history_hours` (Settings → General → Alerts, default 24, 1 to 168): how long the Alerts bar and its export
+  keep the console's own alerts. Still in memory; a change applies without a restart.
+- Browse: a Refresh link next to Open in portal reads the open tab again from Azure (Workloads, Nodes and every other
+  tab), instead of waiting for the cache.
+- AKS Workloads: each section folds. Sections with problems open, quiet ones start closed, and your own open/close is
+  kept in this browser. One filter searches every section (hiding the ones with no match), plus Expand all / Collapse
+  all. The "include system namespaces" choice now survives a Refresh.
+- AKS: a **kubectl** tab with the commands to run in your own terminal, in folding sections, this cluster's name,
+  group and subscription filled in: connect (`az aks get-credentials`, kubelogin, contexts, `auth can-i`, `az aks
+  command invoke` for private clusters), what each Workloads and Nodes section reads, finding your way, looking closer at
+  one pod, deployment, HPA or node, network, config/secrets/storage, jobs, debugging inside a container or node, the
+  cluster in Azure (`az aks`), and the usual changes (restart, roll back, pause, image, scale, HPA range, requests and
+  limits, run a CronJob, clean up Failed pods, cordon/drain, node pool autoscaler, upgrade). The console still only
+  reads. An ⓘ next to each Workloads and Nodes section shows its command, with copy.
+- Vulnerabilities: a **By CVE** view, one row per CVE however many packages, images and image versions have it; an
+  **Open Defender for Cloud** link, and a **Defender ↗** link on every finding to its page in Defender.
+
+- Access audit reads **two sources**: Azure's PIM records and Resource Graph's role assignments, so subscriptions
+  where you lack Reader at subscription level are covered (read resource group by resource group, where Reader on the
+  group is enough) and so are the few assignments the PIM records leave out. Also: **Key Vault access policies**
+  (vaults not on Azure RBAC), and
+  **assignments to deleted users or groups** listed separately.
+- **Longer history:** Investigate and the Application Insights tab look back up to 30 days (were 24 h); Timeline 3,
+  14 and 30 days; Metrics 30 and 90 days; AKS Workloads' Container Insights gets a **Look back** (1 hour to 30 days)
+  for restarts, OOMKilled and warning events; monitoring-tool logs 24 hours and 7 days. Changes stop at 14 days,
+  which is all Azure keeps, and the page says so. README: *How far back you can look*, measured per source.
+- Access → **What the console needs**: each feature's needs checked against your roles in the scope, by what they
+  allow (custom roles count): what you have, what a PIM-eligible role would give, what neither does. **Download the
+  custom role**: one role definition with everything the console reads.
+- The kubectl tab remembers which sections you opened.
+- AKS **OOMKilled**: one row per kill (was one per container) with its pod, owner, **node** and when it was killed,
+  and its **cause**: *Container limit* (the container hit its own memory limit) or *Node memory* (the node ran out),
+  from the kernel's own message on the node (*Memory cgroup out of memory* or *Out of memory*), else from memory just
+  before the kill (*probable*), else *Can't tell* and why. Memory used against the limit (or *no limit*), the node's
+  memory, and the kernel's line. A **logs** button reads the killed instance (`--previous`), 5 minutes either side of
+  the kill, from Container Insights when the pod or that instance is gone.
+- Investigate → pod: the pod's **OOM kills** from 30 minutes before the request to 5 after, the same way, with
+  their logs.
+- AKS Workloads: **OOM kills from the monitoring tool** picked in the Scope bar (New Relic with its Kubernetes
+  integration), for clusters that don't send Container Insights: the node's OOM events (with the kernel's line)
+  matched to the container that restarted just after, memory just before, the same causes. Kills Container Insights
+  already lists aren't repeated. A kill with no container restart (a child process) says so. If the tool knows no
+  cluster by this name, it lists the names it does know.
+- AKS **Dependencies of a workload** (Workloads; Investigate → pod → *Depends on*): the Azure resources a workload
+  uses, from Azure and the cluster, no monitoring tool needed. Its configuration: host names in its env and the
+  ConfigMaps it reads, matched to resources by Azure's own DNS names (Redis, Cosmos DB, SQL, Storage, Service Bus, Key
+  Vault, …) or by the custom domains of API Management, App Service and Front Door. Values are scanned on your machine
+  and never shown; Secrets are only named, never read. And its workload identity (service account → managed identity
+  through the cluster's OIDC issuer): the roles it holds on each resource, including Cosmos DB's own data roles.
+  Without the Kubernetes API (a private cluster off VPN) the list comes from the identity alone and says so. Services
+  in the cluster and other hosts are listed apart.
+
+### Changed
+
+- **Network:** a VNet without subnets (info) is listed after the healthy ones, not before them.
+- **Sign out is its own item in the account menu**, under the account's name, one confirmation away. It was at the
+  bottom of the *Sign in or out* panel, under the tenant choices; that panel is now **Switch account or tenant** and
+  only signs in.
+- **The page's script is 33 files instead of one** (`web/static/js/`, one per area: Triage, Investigate, AKS
+  Workloads, Cost, Settings…), loaded in order. Nothing the page does changed: joined, they are the old `app.js`.
+  A test fails if code that runs at load uses something only a later file declares.
+- **Unknown sorts last.** Lists that go worst first now read critical, warning, info, healthy, then unknown (couldn't
+  be read: no access, a timeout), so what's really wrong is no longer pushed down by what couldn't be checked. A
+  resource's own status is unchanged: unknown still outranks healthy there. A pod in Kubernetes' Unknown phase (its
+  node lost) stays with the warnings.
+- **AKS Workloads opens on "What's wrong now":** one row per workload across the Kubernetes API, Container
+  Insights, platform metrics and the monitoring tool's OOM kills, with the sources that saw each signal, ready
+  replicas, its pods (with logs) and a recent rollout (when, revision, images changed). A verdict line on top counts
+  the workloads with problems, names the cluster's own, rollouts in the last 24 h and Failed pods over a day old, and
+  says which sources were read and how long each took. The per-source lists stay below, closed. Container Insights'
+  lists now carry each pod's controller, so rows group by workload without the Kubernetes API too.
+- One panel per workload with **Details · Dependencies · Path**, from Go to workload or a workload's name on any row;
+  the separate Dependencies picker is gone. Go to workload also lists workloads other sources named, reads a picked
+  namespace's names when the cluster-wide list can't be read, and takes a typed namespace/name.
+- **Pod details:** any pod name on AKS Workloads opens the pod under its row: phase, node, pool and zone, owner,
+  conditions, each container's state, last exit, requests, limits, use and probes (init and sidecars too), events,
+  scheduling and volumes (names and types only), with current and previous logs. Without the Kubernetes API it comes
+  from Container Insights and says what that leaves out.
+- **Real YAML** for the pod, the workload and its HPA, as `kubectl get -o yaml` shows them, with Copy and the command.
+  Env values come hidden; **Show values** reads them on request, for that fold only.
+- A resource's tabs are folder tabs, like Triage's and Investigate's.
+- AKS Workloads toolbar: every control has its label (Namespace, Go to workload, Filter, Look back, System namespaces,
+  Sections). An opened panel (a workload, a pod, logs) starts with where it was opened (*What's wrong now ›*), and the
+  toolbar names the open panel with **Back to it** and **Close**, which returns to the row it came from.
+- AKS Workloads: **All workloads** replaces the HPAs section: every Deployment, StatefulSet, DaemonSet and CronJob,
+  problems or not, with ready replicas, its HPA (min–max, now, targets), last rollout and its checks; each name opens
+  its Details, Dependencies and Path. *What's wrong now* folds like the other sections (its verdict stays).
+- **Each AKS check says what it rests on:** a Kubernetes rule, a recommended practice, or the console's threshold
+  (with its value and setting), and links the official Kubernetes or AKS page that explains it. Advisor
+  recommendations link Microsoft's own page (else Advisor's reference list for their category), and Defender
+  findings their page in the portal.
+- **The console's rules of thumb are settings:** Settings → AKS (memory and CPU near limits, CPU against the request,
+  HPA target, near max and overshoot, node pool requests, restarts, leftover pods, recent rollouts, node image age)
+  and Settings → Thresholds (cost spike, metric baseline, runtime end of support); Triage's autoscale near max and
+  how long resolved Service Health issues stay are under General. Node image age was defined twice and now has one
+  setting for Nodes and Security.
+- **System namespaces are found in the cluster**, not listed in the code: Kubernetes' own, and those whose every
+  workload carries a label AKS or its add-on manager sets. The tab names what it hid and why, and hides them in
+  every source's rows, not only the Kubernetes API's.
+- Actions written as links (a workload, a pod, logs, Reset…) look like small buttons.
+- **AKS Workloads is split into pages**, with the toolbar (namespace, Go to workload, filter, Look back) above them
+  all: *What's wrong now*, *All workloads*, *Capacity* (node pools and the cluster's own findings), *Setup risks* and
+  *Evidence* (each source's raw lists: Container Insights, the monitoring tool's OOM kills, the Kubernetes API's
+  Pods not running and Happening now). Each page shows its count; the last one opened is kept in this browser. The
+  platform-metrics *Pods* section is gone: a bare count per namespace said less than *What's wrong now* (it still
+  answers there when nothing else can be read).
+- **Settings say where they're used, and the page says where to change them:** where a setting decides what the
+  page concludes (a check's threshold, a Triage card, budget and node colours, an OOM kill's probable cause, Path's
+  rising and drop, Security's ports) a link opens Settings on that setting, highlighted.
+- **More of the console's judgement is settings:** App Insights' failure rule (Triage's spike card, Investigate, and
+  Path's requests, which now share it), Path's traffic drop and pod restarts, an OOM kill's probable cause, and the
+  ports that are a warning when open to the internet (now any list; known ones keep their names).
+- Path matches front doors to workloads by the words their names share, ignoring the words most names carry (an
+  environment, a company prefix, a region code) as found in the names themselves, not from a fixed list.
+- AKS Workloads: Look back's first choice is **default**, and says what it means (restarts 1 h · OOM kills 24 h ·
+  warning events 1 h) in its tooltip and the Showing line. Those windows are settings now (Settings → AKS), chosen
+  from Look back's own list; New Relic's OOM kills follow the OOM one too.
+- AKS Workloads → Capacity: requested and used now say they're shares of the nodes running **now**, and where a
+  pool can still grow they add the same requests **at its maximum** ("80% of 8 nodes now · 32% at max 20"). A full
+  pool is amber, and a finding, only when it can't grow (fixed, or at its maximum); while the autoscaler has room it
+  isn't, since it adds nodes as pods need them.
+- AKS Workloads → Capacity: **Top consumers**: the workloads using the most CPU or memory now (metrics-server), each
+  against what it requests and its share of the cluster, with its busiest pods.
+- AKS Workloads: *Evidence* is now **Pods & events**, grouped by what happened instead of by source: pods not running
+  (the Kubernetes API's and Container Insights' merged, one row per pod with who saw it), OOM kills (Container
+  Insights, then the monitoring tool's), restarts, containers near their limits and warning events. Happening now
+  is gone: every line of it is in What's wrong now. Each line there has **details ›**, which opens Pods & events
+  filtered to that workload.
+- AKS Workloads → Capacity reads as sentences: each pool shows its VM size and spec once ("Standard_D32s_v5 · 32 vCPU ·
+  64 GiB per node", the reserve kept for Kubernetes in its tooltip), and CPU and memory as amounts ("150 of 190 cores
+  requested (79%)", used now, "if it grows to 20 nodes: 24% requested"). Top consumers say what they add up (every
+  pod of a workload, wherever it runs), "24 cores used (2% of the cluster)", "70% of the 34 cores its pods request",
+  and the pools it runs on. Small amounts keep their decimals (0.04 cores, not 0).
+- AKS Workloads → Capacity: each pool's **N nodes ›** opens the Nodes tab filtered to that pool, and a *Not ready*
+  count opens it on that pool's nodes that need a look; **← back to Capacity** returns.
+- AKS Workloads → Capacity: each node pool shows its **VM size**, what one node has (CPU, memory) and what pods can use
+  of it, with the same spelled out in the tooltip, and its **autoscaler range** (or *fixed*), flagged *at max*. Sizes
+  come from the nodes themselves; the range from the cluster's own record, read alongside the rest.
+- Notes about partial results (subscriptions Azure didn't answer for, lists that were cut) have a **×**. A closed note
+  stays closed until its text changes (Refresh brings another answer) or the page reloads.
+- Browse: **«** folds the list of groups and resources to a strip on the left for more room, kept in this browser.
+  The strip reads *In scope (N groups)* down its length, plus *● filter: …* when the list is filtered, and the
+  whole strip brings the list back.
+- The **Top** button shows on every page as soon as its header has scrolled away (200 px); it waited for 900 px, so
+  on most pages it showed only near the end.
+- AKS Workloads with only platform metrics says "Only pod counts could be read" and why each other source wasn't,
+  and counts them amber instead of critical (a bare count can't tell new failures from leftovers).
+- AKS Workloads: Failed pods over a day old fold apart in *Pods not running*; node pools show requested and used as a
+  share of allocatable; findings lists no longer stop at 200 rows.
+- Investigate reads every API Management service in scope (it stopped at 10), and asks only the log table the
+  service writes to.
+- **Menu order:** Browse moved after Cost; it's where rows open, so Investigate now sits next to Triage.
+- **Summary's What changed fills in as each card answers** instead of waiting for all of them, so a slow Cost on
+  a big scope holds up only Cost's part; it says what's still being read. A scope with no earlier summary says so
+  straight away.
+- **Settings: Save and Discard sit at the top**, next to **Reload from file**, and stay there as you scroll, with the
+  unsaved changes listed beside them (they were in a bar at the bottom that appeared only after a change).
+  Integrations and Alerts say that they save as you make changes, since their switches and cards never used Save.
+- **Logs open under the row you clicked** (AKS Workloads, Investigate → pod's OOM kills, the monitoring-tool tabs),
+  one at a time, with **✕ Close**; Esc or the same button closes it too. Log lines are easier to read: a JSON line
+  (structured logging) shows as time · level · message with its other fields folded under **fields**, errors and
+  warnings are tinted, and each panel has a filter, **errors and warnings only**, **wrap** (remembered) and **copy**.
+  Investigate → pod shows its logs the same way.
+- AKS Workloads: one **toolbar that stays at the top** as you scroll, with the filter, **Look back**, *include system
+  namespaces* (moved up from the Kubernetes section) and Expand/Collapse; a **Showing:** line says what's in effect,
+  with **Reset**; a **jump bar** lists every section with its count (problems outlined) and opens and scrolls to it.
+  Empty sections are one grey line saying *none*. Look back is hidden when neither Container Insights nor a monitoring
+  tool can use it.
+- AKS Workloads → Pods: `Succeeded` pods (finished Jobs) are no longer a warning; they're counted as *completed*,
+  and the table lists only Failed, Pending and Unknown, by namespace.
+- AKS Workloads → **Dependencies of a workload**: pick the namespace, kind and workload from lists of the cluster's
+  own Deployments, StatefulSets and DaemonSets (with counts per kind) instead of typing them. They come from the
+  Kubernetes read Workloads already does, so no extra call. When that read can't list them (a private cluster off VPN,
+  or a role on some namespaces only), picking a namespace reads just that namespace: the Kubernetes API in it, else
+  Container Insights' pods, else the monitoring tool (New Relic's container samples), each over the last hour; the
+  page says where the names came from. Only when none can list them is the name typed, and the page says why.
+- **Every page's sections are boxes** with a header bar: the title, where the data comes from as a small label
+  (*Kubernetes API*, *platform metrics*), an **ⓘ** that opens the longer explanation (it no longer sits above every
+  table), and the section's own controls on the right (Dependencies' pickers). A section with a critical or warning row
+  has that colour down its side. Folds inside a section are rows with an arrow. Cards (Triage, Summary), Investigate's
+  steps and Settings' panes have the same header bar, so a section always shows where it starts and ends. Pages with
+  four or more sections get a jump bar to them. New colours for section headers, table headers and row hover, in light
+  and dark.
+- A resource's tabs are grouped **Health**, **Tools** and **Configuration**.
+- A **↑ Top** button appears once a long page has scrolled.
+- Settings → Integrations offers only New Relic under *Add connection*: Datadog and Grafana are hidden until they
+  connect. A Datadog or Grafana connection already in the config file still loads and shows its card.
+- Access audit: *Also PIM-eligible* is now **Could use PIM instead** (column, tile, filter, export), and a row says
+  "yes: they can also activate this role through PIM, so this standing assignment can be removed".
+- Access → Check someone's access: an **Order** choice for the subscription headings of both role lists, by
+  subscription name or most roles first, remembered in this browser.
+- Vulnerabilities opens on **only running + has a fix + High**, what to act on now; **Show everything** clears the
+  filters, and your own choice is kept in this browser. Exports follow the filters on the page.
+- AKS: a Failed pod is a warning, as on Triage (it was critical in Browse). Pods not running show **In this state
+  since**: for a Failed pod, when it stopped (it was when it started), and one that stopped over a day ago is marked
+  *leftover*.
+- Rows and cards no longer open Browse on any click (a misclick or selecting text used to jump away). Each has an
+  **Open in Browse** button instead (Summary's view links say **Show**): Triage cards and the AKS sweep, Secrets,
+  Readiness, Summary, Watchlist and the alert history. Links and buttons that were already explicit stay as they were.
+
+### Fixed
+
+- **AKS Workloads → OOM kills said "none" above the monitoring tool's kills.** The header counted Container Insights
+  only; it now counts every source. New Relic's kills were cut at the newest 25 without a word: every kill in the
+  look-back is counted now (header, What's wrong now per workload), the newest 200 listed, the newest 25 with memory
+  readings, and a read that reaches New Relic's limit (5,000) says so. Two OOMKilling events on one node seconds apart
+  were taken for one kill; only an OOMKilling and its SystemOOM are.
+- A Key Vault item that expires at Unix time 0, or whose expiry isn't a number, no longer stops the Secrets scan and
+  Readiness with an error; the first reads as long expired, the second as an expiry Azure returned that isn't a date.
+- **Signing in no longer loops when `az login` skips your tenant.** Without `--tenant`, `az login` can't show a
+  tenant's multi-factor prompt: it warns, saves no account and still succeeds, so the page said "Signed in." and came
+  back to the sign-in screen. The console now reads the skipped tenants: with nothing saved it says so, and each
+  skipped tenant gets a **Sign in to …** button that signs in to it directly. The sign-in screen has a **Tenant** box
+  too (it was only in **Switch account or tenant**). A page refused for its key no longer keeps sending error reports.
+- **AKS Failed pods no longer warn forever.** Kubernetes keeps a Failed pod until someone deletes it, so Check and the
+  AKS card warned about pods that failed weeks ago. Both now read the platform metric's last `aks.leftover_hours`
+  (24 h): only pods that failed within it are a warning ("4 failed, 1 in the last 24 h"); the rest are info, left
+  over, as on Workloads. When that history can't be read, every Failed pod stays a warning. Pending and Unknown pods
+  are unchanged. *Pods not running* folds them apart at the same age, and says it (it always read "over a day old").
+- Browse → a checked resource group: the way back to its page (cost, access) was a small *group summary* link easy to
+  miss, so the cost seemed gone after **Check this group**. It's a button, **‹ Group page (cost, access)**.
+- Browse → a resource group's **Check** list sorts by any column (click its header), remembered in this browser like
+  every other list. It was fixed at worst first.
+- Investigate's list of components: a row listed for its server errors alone showed a bare "–" where the status goes.
+  It reads "no worse than last week · listed for its 5xx", and step 1's intro says how the list is ordered (status,
+  then most 5xx) and that a column header re-sorts it.
+- Investigate's list of components: one component with dozens of reporting apps widened *Apps that report to it* for
+  every row and crushed the number columns. It shows three names and "+N more" (all on hover; the filter still finds
+  every name), and so does the *Investigating* line.
+- **Investigate counted sampled requests once each.** App Insights keeps one row for many requests when telemetry is
+  sampled (API Management, for one, can send a share of requests but every failure), so totals came out low and
+  failure rates high in Failing endpoints, Dependencies, Exceptions and requests by service. Every count now weighs
+  each row by its `itemCount`, as Azure's own metrics do (checked live: the counts now match the request metric).
+- An App Insights component's **warning** or **critical** says why under it, with a *change* link to the setting that
+  decided it: "failing more: 60.0% of requests vs 20.0% last week (60 of 100 failed)", "exceptions 3.0× last week
+  (300 vs 100)". A component **failing a lot as it did last week** (at the critical rate and count) is now amber with
+  "failing a lot, as last week …" instead of showing nothing; Triage's spike card still lists only what got worse.
+- Investigate, step 1 is **Pick the app**: it lists the components that need a look (a red or amber status, or server
+  errors in the last hour) with the quiet ones counted and one click away (*Show all*), and **Go to a component or app
+  by name** searches every component and the apps that report to them.
+- Investigate, after **Follow** on a sample: the sample list folds to "you're following …", and **Back to the
+  samples** (there and on the request's step) reopens it at that row. Samples already opened are marked ✓ followed.
+- Investigate keeps a trail in the sticky bar (app › what you picked › its latest failures › the request › the pod);
+  each crumb jumps back to its step. Going deeper from step 2 folds it to one line saying what you picked, so the next
+  step opens right below; *Show all again* reopens it at the row you came from, still marked.
+- Investigate's *Recent changes* shows each changed field before → after ("sku.capacity 3 → 4", API Management
+  scaling), and an empty window says when the last change was and what it was, from the same single read of the 14
+  days Azure keeps.
+- Investigate's counts say their window: "500s in the last 30 days", "Failed in the last 7 days", and *Last* became
+  *Most recent*, so a count beside "3 min ago" no longer reads as 3 minutes' worth. A code's share reads "of all
+  failures".
+- *Moved against last week at* (`health.baseline_change_percent`) had no effect: a group's comparison and the "N×
+  last week" note on a metric still used a fixed 2×. Both follow the setting now, and the page says "moved 3× either
+  way" instead of "doubled or halved" when it isn't 200%.
+- *Against last week* names a metric the way the portal does ("Overall Vault Saturation", not "SaturationShoebox";
+  the raw name on hover) and shows both values ("0.4% now, 0% last week").
+- Checking a resource group, and the Watchlist's check of one, failed with `'int' object has no attribute
+  'window_minutes'`: both still passed the old argument to last week's comparison after its change became a setting.
+- Settings kept saying "1 unsaved change: Ports that are a warning when open to the internet" after saving: a list
+  setting was compared by reference, so it never matched what was saved. Lists compare by their contents now.
+- Settings → Thresholds never drew the cost spike, metric baseline and runtime end-of-support settings (they
+  worked from the file only); the pane now draws every section it holds, and a test keeps it so.
+- Lists cut short without saying so: Triage's cards stop at 100 and now say there are more; AKS Workloads' Container
+  Insights lists stopped at 25 or 50 silently, now read up to 200 (500 pods not running) and say when cut, on What's
+  wrong now and Pods & events.
+- The Cost page turned a budget yellow at a fixed 80% while Summary used `summary.budget_warn_percent`; both use the
+  setting now (and a forecast past 100%). The Nodes tab's requested colour follows `aks.pool_requests_percent`, as
+  Capacity does.
+- A panel opened under a row (logs, a pod, a workload) no longer widens its table or the page: a long log line
+  (a token, a URL, JSON) wraps anywhere, or with *wrap* off scrolls sideways inside the log box only.
+- A resource's Recommendations: Advisor's newer recommendations (mostly reliability) came with an empty problem
+  and solution, because they carry a label and description instead; they're read now. A solution that only repeats
+  the problem is shown once.
+- AKS Workloads: there was no way back to the default section folds once you opened or closed one, and **Collapse
+  all** kept everything closed on every later visit. **Reset** now shows as soon as a section was opened or closed by
+  hand and puts the folds back to the default (sections with problems open) along with the namespace, filter, look
+  back and system namespaces; **Expand all** and **Collapse all** last for that visit only.
+- Paged Azure reads whose next-page link names port 443 (API Management's API and backend lists) were refused by the
+  read-only guard as another host; `management.azure.com:443` is accepted now, any other port still isn't.
+- Investigate: API Management services without an App Insights logger showed as checkboxes that couldn't be ticked.
+  The line now splits them by what a request can use: spans to tick, gateway logs in a workspace (step 4's
+  **Gateway logs**), or nothing readable.
+- Investigate and Triage's *App Insights: failure spikes* measured only the first 50 components A–Z, so on a big scope
+  every busy one could be left out. Every component is measured now; Investigate shows the list at once and fills it
+  in, 25 components at a time, re-sorting as numbers arrive.
+- AKS OOMKilled counted kills from any time: a pod reports OOMKilled as its last state until it stops again, so a
+  kill from months ago showed in *last 24 h*. The look back now counts kills by when they happened.
+- Investigate: **Look back** never changed step 1, which is always the last hour. There is now one Look back at the
+  top for steps 2 to 4 and Search logs, a *Showing:* line saying what each step covers, step 1's heading says *last
+  hour, always*, and step 2's heading shows the window in use.
+- AKS Workloads: with no Container Insights the notice said *no data in the last 30 minutes* under a Look back of 30
+  days. It now says Container Insights isn't sending for this cluster (checked over the last 30 minutes).
+- App Insights queries (Investigate, a resource's Application Insights tab) may take 90 seconds instead of 30: a first
+  query over 30 days of a busy component timed out. Other Azure reads keep 30 seconds.
+- Investigate step 2 said "✓ No failed requests" (or exceptions, dependency calls) under a read that had just failed,
+  e.g. timed out: the all-clear now shows only when every read worked, and a failed section has its own **Try
+  again** button that reads only that section again.
+- Application Insights (a resource's tab, Investigate): a few failures among many requests read as **0%** (220 of
+  671,061 rounded to 0.0); they now read *under 0.1%*. Durations past a second show in seconds, past a minute in
+  minutes and seconds (91,136 ms is *1 min 31 s*), and still sort by their value. The same in Investigate: its
+  share of 5xx in scope and the request timeline's offsets.
+- The **Last 24 h** sparkline (Investigate, a resource's Application Insights tab) was red even with no failures in the
+  last hour, and drawn against its own peak with no number. It's grey now, with its peak beside it; the newest point
+  turns red only when the last hour had failures.
+- About's PyPI numbers on machines behind a company proxy that inspects HTTPS: HTTPS is now checked against the
+  operating system's trusted certificates (`truststore`), as the browser does, so the company's root certificate is
+  trusted.
+- Access audit at 850 px wide scrolled sideways; its tables now scroll inside their box.
+- Refresh access (top menu) keeps the scope you're using and reloads the page you're on. Before, it applied
+  Settings → Open with again (so a changed Open with replaced your scope), and only reloaded Triage or the resource
+  open in Browse, so on Settings and other pages nothing changed, or it jumped to Browse.
+- About: when PyPI or pypistats.org can't be reached, it says why Python couldn't (an HTTPS certificate it doesn't
+  trust, as behind a company proxy that inspects HTTPS; the proxy; a timeout; DNS). A browser on the same machine can
+  still open the page, because it has its own certificates and proxy settings.
+
 ## [1.1.2] - 2026-11-18
 
 ### Added

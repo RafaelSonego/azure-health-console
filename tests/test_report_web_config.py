@@ -61,47 +61,99 @@ def local_app(monkeypatch):
     from flask import Flask
     flask_app = Flask("test")
     flask_app.before_request_funcs = app.before_request_funcs
-    flask_app.register_blueprint(create_blueprint(lambda tenant: client, settings))
+    flask_app.register_blueprint(create_blueprint(lambda tenant: client, settings, authorize=lambda: None))
     key = app.config["AHC_LAUNCH_KEY"]
 
     from flask.testing import FlaskClient
 
-    class Keyed(FlaskClient):  # the browser the console opened: it holds this start's key
+    class Keyed(FlaskClient):  # the page the console opened: it sends this start's key
         def __init__(self, *args, **kwargs):
             super().__init__(*args, **kwargs)
-            self.set_cookie("ahc_key", key, domain="127.0.0.1")
+            self.environ_base["HTTP_X_AHC_KEY"] = key
     flask_app.test_client_class = Keyed
     return flask_app
 
 
-def test_only_a_browser_holding_the_key_can_use_the_api_and_it_survives_restarts():
+def test_only_a_page_holding_the_key_can_use_the_api_and_it_survives_restarts():
     from healthconsole.web import launch_url
     app = create_local_app(config.load("/nonexistent"), port=8765)
     host = {"Host": "127.0.0.1:8765"}
     other = app.test_client()  # another user or program reaching 127.0.0.1
-    assert other.get("/api/signin", headers=host).status_code == 401
+    refused = other.get("/api/signin", headers=host)
+    assert refused.status_code == 401 and refused.get_json()["kind"] == "launch-key"  # the page shows how to open it
     assert other.post("/api/settings", json={"values": {}}, headers=host).status_code == 401
-    page = other.get("/", headers=host)
-    assert page.status_code == 401 and b"printed when it started" in page.data
-    assert other.get("/?key=guess", headers=host).status_code == 401
+    assert other.get("/", headers=host).status_code == 200  # the page itself carries no data
+    assert other.get(f"/?key={app.config['AHC_LAUNCH_KEY']}", headers=host).status_code == 200  # a query opens nothing
+    assert other.get("/api/signin", query_string={"key": app.config["AHC_LAUNCH_KEY"]}, headers=host).status_code == 401
+    assert other.get("/api/signin", headers={**host, "X-AHC-Key": "guess"}).status_code == 401
     key = app.config["AHC_LAUNCH_KEY"]
     assert len(key) >= 32 and create_local_app(config.load("/nonexistent"), port=8765).config["AHC_LAUNCH_KEY"] == key
     key_file = Path(config.load("/nonexistent")["cache_dir"]).expanduser() / "launch-key"
     assert key_file.read_text() == key and oct(key_file.stat().st_mode & 0o777) == "0o600"  # only this user reads it
     url = launch_url(app, 8765)
-    assert url.startswith("http://127.0.0.1:8765/?key=")
+    assert url == f"http://127.0.0.1:8765/#key={key}"  # a fragment: the browser never sends it to the server
+    page = app.test_client()
+    opened = page.get("/", headers=host)
+    assert opened.status_code == 200 and "Set-Cookie" not in opened.headers  # the page keeps the key, not a cookie
+    keyed = {**host, "X-AHC-Key": key}
+    assert page.get("/api/signin", headers=keyed).status_code == 200
+    assert page.get("/api/signin", headers=host).status_code == 401  # a cookie or nothing: no key
+
+
+def test_a_browser_with_the_old_cookie_is_handed_the_key_once_and_the_cookie_alone_opens_nothing():
+    app = create_local_app(config.load("/nonexistent"), port=8765)
+    key, host = app.config["AHC_LAUNCH_KEY"], {"Host": "127.0.0.1:8765"}
     browser = app.test_client()
-    opened = browser.get(url.split("8765", 1)[1], headers=host)
-    assert opened.status_code == 302 and opened.headers["Location"] == "/"  # the key leaves the address bar at once
-    cookie = opened.headers["Set-Cookie"]
-    assert "HttpOnly" in cookie and "SameSite=Lax" in cookie and "Max-Age=2592000" in cookie  # kept 30 days
-    assert browser.get("/api/signin", headers=host).status_code == 200
+    browser.set_cookie("ahc_key", key, domain="127.0.0.1")
+    assert browser.get("/api/signin", headers=host).status_code == 401
+    moved = browser.get("/", headers=host)
+    assert moved.status_code == 302 and moved.headers["Location"] == f"/#key={key}"
+    assert "ahc_key=;" in moved.headers["Set-Cookie"] and "Max-Age=0" in moved.headers["Set-Cookie"]
+
+
+def test_other_sites_and_ports_are_refused_even_with_the_key():
+    app = create_local_app(config.load("/nonexistent"), port=8765)
+    keyed = {"Host": "127.0.0.1:8765", "X-AHC-Key": app.config["AHC_LAUNCH_KEY"]}
+    page = app.test_client()
+    for site in ("cross-site", "same-site"):  # same-site: a page on another port of 127.0.0.1
+        assert page.get("/api/signin", headers={**keyed, "Sec-Fetch-Site": site}).status_code == 403
+    assert page.get("/api/signin", headers={**keyed, "Sec-Fetch-Site": "same-origin"}).status_code == 200
+    evil = page.post("/api/signin/cancel", json={}, headers={**keyed, "Origin": "http://127.0.0.1:9999"})
+    assert evil.status_code == 403
+    assert page.post("/api/signin/cancel", json={}, headers={**keyed, "Origin": "http://127.0.0.1:8765"}).status_code == 200
+    assert page.get("/integrations/servicenow/callback?state=x", headers={"Host": "127.0.0.1:8765"}).status_code == 400
+
+
+def test_the_blueprint_needs_the_hosts_check_and_runs_it_first():
+    from flask import Flask, jsonify
+    with pytest.raises(TypeError):
+        create_blueprint(lambda tenant: FakeClient(), config.load("/nonexistent"))
+    hosted = Flask("hosted")
+    hosted.register_blueprint(create_blueprint(lambda tenant: FakeClient(), config.load("/nonexistent"),
+                                               authorize=lambda: (jsonify(error="sign in"), 401)))
+    web = hosted.test_client()
+    assert web.get("/api/subscriptions").status_code == 401
+    assert web.post("/api/cache/clear", data="x").status_code == 415  # a form can't reach an action
 
 
 def test_loopback_guard(local_app):
     test = local_app.test_client()
     assert test.get("/", headers={"Host": "evil.example.com"}).status_code == 403
     assert test.post("/api/refresh", data="x", headers={"Host": "127.0.0.1:8765"}).status_code == 415
+
+
+def test_a_resource_group_check_finishes_with_its_baseline(local_app):
+    from tests.conftest import SUB
+    test = local_app.test_client()
+    host = {"Host": "127.0.0.1:8765"}
+    job_id = test.post("/api/snapshots", json={"resource_group": f"{SUB}/app-rg"}, headers=host).get_json()["job_id"]
+    for _ in range(50):
+        body = test.get(f"/api/snapshots/{job_id}", headers=host).get_json()
+        if body["status"] != "running":
+            break
+        time.sleep(0.05)
+    assert body["status"] == "done", body  # compare_last_week is on by default, so the baseline runs
+    assert body["snapshot"]["baseline"]["window_minutes"] == config.load("/nonexistent")["health"]["window_minutes"]
 
 
 def test_snapshot_job_and_markdown_export(local_app):
@@ -273,7 +325,7 @@ def test_settings_tab_saves_and_applies_live(tmp_path):
                                                                     {"subscriptionId": "s2", "displayName": "other",
                                                                      "state": "Enabled"}]}})
     app = Flask("test")
-    app.register_blueprint(create_blueprint(lambda tenant: client, settings, config_file=file))
+    app.register_blueprint(create_blueprint(lambda tenant: client, settings, config_file=file, authorize=lambda: None))
     test = app.test_client()
 
     view = test.get("/api/settings").get_json()
@@ -304,7 +356,7 @@ def test_open_with_and_moving_old_favourites_from_the_page(tmp_path):
                                        "/subscriptions": {"value": [{"subscriptionId": "s1", "displayName": "app-dev-002",
                                                                      "state": "Enabled"}]}})
     app = Flask("test")
-    app.register_blueprint(create_blueprint(lambda tenant: client, settings, config_file=file))
+    app.register_blueprint(create_blueprint(lambda tenant: client, settings, config_file=file, authorize=lambda: None))
     test = app.test_client()
     context = test.get("/api/context").get_json()
     assert context["open_with"] == "Favourites" and context["legacy_scope"]["keys"] == ["favourite_subscriptions", "triage.scope"]
@@ -331,7 +383,7 @@ def test_context_reports_the_version():
     from tests.conftest import FakeClient
     client = FakeClient(gets={"/tenants": {"value": []}, "/subscriptions": {"value": []}})
     app = Flask("test")
-    app.register_blueprint(create_blueprint(lambda tenant: client, config.load("/nonexistent")))
+    app.register_blueprint(create_blueprint(lambda tenant: client, config.load("/nonexistent"), authorize=lambda: None))
     version = app.test_client().get("/api/context").get_json()["version"]
     assert version == healthconsole.__version__ == open("VERSION").read().strip()
 

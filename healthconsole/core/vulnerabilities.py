@@ -8,7 +8,7 @@ from datetime import date, datetime, timezone
 from . import cards
 from .arm import AccessDenied, ArmError, kql_list, rg_clause
 from .cache import TtlCache
-from .explore.aks_checks import node_image_age
+from .explore.aks_checks import NODE_IMAGE_CRIT_DAYS, NODE_IMAGE_WARN_DAYS, node_image_age
 from .model import CRITICAL, HEALTHY, INFO, WARNING
 
 MAX_ROWS = 300
@@ -18,7 +18,6 @@ CACHE_SECONDS = 24 * 3600
 SEVERITIES = ("High", "Medium", "Low")
 AKS_VERSIONS_API = "2024-02-01"
 STACKS_API = "2023-12-01"
-NODE_IMAGE_WARN_DAYS, NODE_IMAGE_CRIT_DAYS = 60, 180
 EOL_WARN_DAYS = 90
 # Microsoft's assessment keys for "this machine isn't being scanned for vulnerabilities" (the same in every tenant).
 NOT_SCANNED_KEYS = ("152f2a79-cfb0-5dcb-9aad-84b53398424f", "ffff0522-1e88-47fc-8382-2a80ba848f5d")
@@ -158,10 +157,18 @@ def findings(client, subscriptions, groups=None, filters=None):
         " fixedIn=make_set_if(fixed, isnotempty(fixed), 3), types=make_set(rtype, 4),"
         " running=countif(childKind =~ 'K8s-container')"
         f" by software | order by maxCvss desc, resources desc | take {MAX_ROWS + 1}", subscriptions=scope)
+    cves = client.query(
+        f"{base} | extend list = parse_json(tostring(add.CvesDetails)) | mv-expand item = list"
+        " | extend cve = toupper(tostring(item.CveId)), cveSeverity = tostring(item.Severity) | where isnotempty(cve)"
+        " | summarize resources=dcount(parent), findings=count(), packages=make_set(software, 3), maxCvss=max(cvss),"
+        " severity=take_any(cveSeverity), fixable=countif(hasFix), running=countif(childKind =~ 'K8s-container'),"
+        " images=dcountif(child, childKind =~ '.containerimage')"
+        f" by cve | order by maxCvss desc, resources desc | take {MAX_ROWS + 1}", subscriptions=scope)
     counts = {k: summary.get(k) or 0 for k in ("findings", "resources", "high", "medium", "low", "fixable", "running", "images")}
     return {"summary": {**counts, "maxCvss": summary.get("maxCvss")},
-            "types": types, "resources": resources, "software": software[:MAX_ROWS],
-            "truncated": {"resources": len(resources) >= MAX_ROWS, "software": len(software) > MAX_ROWS}}
+            "types": types, "resources": resources, "software": software[:MAX_ROWS], "cves": cves[:MAX_ROWS],
+            "truncated": {"resources": len(resources) >= MAX_ROWS, "software": len(software) > MAX_ROWS,
+                          "cves": len(cves) > MAX_ROWS}}
 
 
 def headline(client, subscriptions, groups=None, top=3):
@@ -244,17 +251,24 @@ def counts_for(client, resource_id):
             "maxCvss": row.get("maxCvss")}
 
 
+def _portal_link(link):
+    """Defender's own page for a finding: the assessment's portal link, which Azure gives without a scheme."""
+    if not link:
+        return ""
+    return link if link.startswith("https://") else "https://" + link.removeprefix("http://").lstrip("/")
+
+
 def for_resource(client, resource_id):
     """One resource's findings (and those on containers or images inside it), with their CVEs."""
     target = resource_id.lower().rstrip("/")
     rows = client.query(
         f"{_base()} | where parent == {json.dumps(target)}"
         " | project title=tostring(properties.displayName), software, severity, cvss, fixed, detected, hasFix, child, childKind,"
-        " rid, native=tostring(properties.resourceDetails.NativeResourceId),"
+        " rid, native=tostring(properties.resourceDetails.NativeResourceId), portal=tostring(properties.links.azurePortal),"
         f" cves=tostring(add.CvesDetails) | order by cvss desc | take {MAX_ROWS + 1}")
     out = [{**{k: r.get(k) for k in ("title", "software", "severity", "cvss", "fixed", "hasFix", "child")},
             "where": _where(r.get("childKind")), "detected": _versions(r.get("detected")), "cves": _cves(r.get("cves")),
-            "image": _image_ref(r)}
+            "image": _image_ref(r), "defender": _portal_link(r.get("portal"))}
            for r in rows[:MAX_ROWS]]
     return {"findings": out, "truncated": len(rows) > MAX_ROWS, "resource_id": resource_id}
 
@@ -336,7 +350,7 @@ def aks_versions(client, subscription_id, location):
     return _reference.get_or_load(("aks", client.identity.tenant_id, location.lower()), load)
 
 
-def aks_checks(client, subscriptions, groups=None, today=None):
+def aks_checks(client, subscriptions, groups=None, today=None, warn_days=NODE_IMAGE_WARN_DAYS, crit_days=NODE_IMAGE_CRIT_DAYS):
     """Two cards: Kubernetes version support (from Azure's own list per region) and node image age."""
     today = today or datetime.now(timezone.utc).date()
     clusters = client.query(
@@ -371,9 +385,9 @@ def aks_checks(client, subscriptions, groups=None, today=None):
                                            "is available (patches carry security fixes).", "AKS cluster"))
         for pool in c.get("pools") or []:
             age = node_image_age(pool.get("nodeImageVersion"), today)
-            if age is None or age < NODE_IMAGE_WARN_DAYS:
+            if age is None or age < warn_days:
                 continue
-            image_items.append({**_item(c, CRITICAL if age >= NODE_IMAGE_CRIT_DAYS else WARNING,
+            image_items.append({**_item(c, CRITICAL if age >= crit_days else WARNING,
                                         f"Node pool {pool.get('name')}: node image {pool.get('nodeImageVersion')}, "
                                         f"{age} days old (Azure ships updated images weekly).", "AKS node pool"),
                                 "age": age})
@@ -382,7 +396,7 @@ def aks_checks(client, subscriptions, groups=None, today=None):
                   "Clusters out of support, on a version only Long Term Support covers, or behind on patches",
                   version_items, errors),
             _card("aks_node_images", "AKS node images",
-                  f"Node pools whose OS image is over {NODE_IMAGE_WARN_DAYS} days old (red over {NODE_IMAGE_CRIT_DAYS})",
+                  f"Node pools whose OS image is over {warn_days} days old (red over {crit_days})",
                   image_items, [])]
 
 
@@ -406,7 +420,7 @@ def runtime_stacks(client):
     return _reference.get_or_load(("stacks", client.identity.tenant_id), load)
 
 
-def judge_runtime(runtime, os_type, stacks, today):
+def judge_runtime(runtime, os_type, stacks, today, eol_days=EOL_WARN_DAYS):
     """(status, detail) for one app's runtime, or None when there's nothing to say (a container, or current)."""
     if not runtime or runtime.split("|")[0].upper() in ("DOCKER", "COMPOSE", "KUBE"):
         return None
@@ -418,14 +432,14 @@ def judge_runtime(runtime, os_type, stacks, today):
         days = (ends - today).days
         if days < 0:
             return CRITICAL, f"{runtime} reached end of life on {info['eol']}: no more security fixes."
-        if days <= EOL_WARN_DAYS:
+        if days <= eol_days:
             return WARNING, f"{runtime} reaches end of life on {info['eol']} ({days} days)."
     if info["deprecated"]:
         return WARNING, f"{runtime} is deprecated in Azure."
     return None
 
 
-def app_runtime_checks(client, subscriptions, groups=None, today=None):
+def app_runtime_checks(client, subscriptions, groups=None, today=None, eol_days=EOL_WARN_DAYS):
     """Linux Web and Function apps whose runtime is past or near end of life (Windows apps: on each app's page, since
     their runtime isn't in Resource Graph)."""
     today = today or datetime.now(timezone.utc).date()
@@ -444,7 +458,7 @@ def app_runtime_checks(client, subscriptions, groups=None, today=None):
         if "linux" not in (app.get("kind") or "").lower():
             windows += 1
             continue
-        verdict = judge_runtime(app.get("fx"), "linux", stacks or {}, today) if stacks is not None else None
+        verdict = judge_runtime(app.get("fx"), "linux", stacks or {}, today, eol_days) if stacks is not None else None
         if verdict:
             kind = "Function App" if "functionapp" in (app.get("kind") or "").lower() else "Web App"
             items.append(_item(app, verdict[0], verdict[1], kind))
@@ -485,18 +499,23 @@ def _card(key, title, description, items, errors):
     return cards.card(key, title, description, items[:MAX_ROWS], "; ".join(errors))
 
 
-def platform(client, subscriptions, groups=None, today=None):
+def platform(client, subscriptions, groups=None, today=None, settings=None):
+    """`settings`: the console's, for the ages and days that turn a check yellow or red (aks.*, vulnerabilities.*)."""
+    aks, vuln = (settings or {}).get("aks") or {}, (settings or {}).get("vulnerabilities") or {}
+    days = {aks_checks: {"warn_days": aks.get("node_image_warning_days", NODE_IMAGE_WARN_DAYS),
+                         "crit_days": aks.get("node_image_critical_days", NODE_IMAGE_CRIT_DAYS)},
+            app_runtime_checks: {"eol_days": vuln.get("eol_warning_days", EOL_WARN_DAYS)}}
     cards = []
     for check in (aks_checks, app_runtime_checks, tls_checks):
         try:
-            found = check(client, subscriptions, groups, today) if check is not tls_checks else check(client, subscriptions, groups)
+            found = check(client, subscriptions, groups, today, **days[check]) if check is not tls_checks else check(client, subscriptions, groups)
         except AccessDenied as error:
             found = _card(check.__name__, check.__name__, "", [], [str(error).splitlines()[0]])
         cards += found if isinstance(found, list) else [found]
     return cards
 
 
-def site_runtime(client, resource_id, today=None):
+def site_runtime(client, resource_id, today=None, eol_days=EOL_WARN_DAYS):
     """One App Service app's runtime and TLS from its configuration (a GET; Windows apps' runtime lives only here)."""
     today = today or datetime.now(timezone.utc).date()
     config = (client.get(f"{resource_id}/config/web", STACKS_API) or {}).get("properties") or {}
@@ -505,7 +524,7 @@ def site_runtime(client, resource_id, today=None):
     if not runtime and config.get("netFrameworkVersion"):
         runtime = config["netFrameworkVersion"]
     stacks = runtime_stacks(client)
-    verdict = judge_runtime(runtime, "linux" if linux else "windows", stacks, today) if runtime else None
+    verdict = judge_runtime(runtime, "linux" if linux else "windows", stacks, today, eol_days) if runtime else None
     checks = [{"name": "Runtime", "value": runtime or "not set",
                "status": verdict[0] if verdict else HEALTHY, "detail": verdict[1] if verdict else "Current in Azure's list."}]
     tls = config.get("minTlsVersion") or ""

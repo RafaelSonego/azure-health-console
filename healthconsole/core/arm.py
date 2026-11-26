@@ -90,7 +90,8 @@ _READ_POSTS = (
 
 def check_read_only(method, url):
     parts = urlsplit(url)
-    if parts.scheme != "https" or parts.netloc.lower() != ARM_HOST:
+    host = parts.netloc.lower().removesuffix(":443")  # some nextLinks (API Management's) name the port
+    if parts.scheme != "https" or host != ARM_HOST:
         raise WriteBlocked(f"Only {ARM_HOST} is allowed, not '{parts.netloc or url}'.")
     if method == "GET":
         return
@@ -101,6 +102,11 @@ def check_read_only(method, url):
         f"{method} {parts.path} is not a read. Only GETs, Resource Graph, Log Analytics and "
         f"Cost Management queries, and AKS user credentials are allowed."
     )
+
+
+def kql_string(text):
+    """A KQL string literal; JSON string escaping is valid KQL."""
+    return json.dumps(str(text))
 
 
 def kql_list(values):

@@ -280,7 +280,7 @@ def test_routes(tmp_path):
     app = Flask("test", static_folder=None)
     settings = config.load(tmp_path / "none.yaml")
     assert str(tmp_path) in settings["cache_dir"]  # the test fixture's folder, never the real one
-    app.register_blueprint(create_blueprint(lambda tenant: fake, settings, config_file=tmp_path / "c.yaml"))
+    app.register_blueprint(create_blueprint(lambda tenant: fake, settings, config_file=tmp_path / "c.yaml", authorize=lambda: None))
     web = app.test_client()
     assert web.get("/api/cost/summary?id=/subscriptions/x/resourceGroups/rg/providers/a/b/c").status_code == 400
     assert web.get(f"/api/cost/summary?id=/subscriptions/{SUB}").get_json()["error"] is None
@@ -297,7 +297,7 @@ def test_routes(tmp_path):
     assert web.get(f"/api/cost/summary?id=/subscriptions/{SUB}&cost_type=amortized").get_json()["error"] is None
     assert {body["type"] for _, body, _ in fake.posted} == {"AmortizedCost"}
     assert len(list((tmp_path / "cache").glob("costs-*-amortized.json.gz"))) == 1
-    assert web.post("/api/cache/clear").get_json()["cleared"][0] == "stored costs"
+    assert web.post("/api/cache/clear", json={}).get_json()["cleared"][0] == "stored costs"
     assert not stored[0].exists() and not list((tmp_path / "cache").glob("costs-*.json.gz"))  # both kinds cleared
 
 
