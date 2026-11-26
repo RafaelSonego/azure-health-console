@@ -73,17 +73,35 @@ def test_install_method_from_where_python_lives(prefix, method):
     assert pypi_stats.install_method(prefix, checkout=True) == "source"
 
 
+def test_a_pipx_venv_outside_the_default_pipx_home_is_still_pipx(tmp_path):
+    assert pypi_stats.install_method(tmp_path, checkout=False) == "pip"
+    (tmp_path / "pipx_metadata.json").write_text("{}")
+    assert pypi_stats.install_method(tmp_path, checkout=False) == "pipx"
+
+
 def test_update_says_how_to_upgrade_and_reads_once(monkeypatch):
     calls = []
     monkeypatch.setattr(pypi_stats, "install_method", lambda: "pipx")
     monkeypatch.setattr(pypi_stats, "fetch", lambda name, session=None: calls.append(name) or PYPI)
+    monkeypatch.setattr(pypi_stats.os, "name", "posix")
     found = pypi_stats.update("1.1.0")
-    assert found["newer"] and found["latest"] == "1.1.1" and found["command"] == ""  # pipx upgrade checks nothing
-    assert found["steps"].endswith("#pipx-windows-linux-or-a-mac-without-homebrew")
+    assert found["newer"] and found["latest"] == "1.1.1"
+    assert (found["command"], found["stop_first"], found["steps"]) == ("azure-health-console upgrade", False, "")
     assert found["notes"].endswith("/releases/tag/v1.1.1")
     pypi_stats.update("1.1.0")
     assert calls == ["pypi"]
     assert pypi_stats.update("1.1.0", enabled=False)["checked"] is False
+
+
+@pytest.mark.parametrize("method, windows, command, stop_first", [
+    ("brew", False, "brew upgrade azure-health-console", False),
+    ("pipx", False, "azure-health-console upgrade", False),
+    ("pip", False, "azure-health-console upgrade", False),
+    ("pipx", True, "irm https://raw.githubusercontent.com/RafaelSonego/azure-health-console/main/install.ps1 | iex", True),
+    ("source", False, "", False),
+])
+def test_every_install_gets_one_line_that_checks_what_it_installs(method, windows, command, stop_first):
+    assert pypi_stats.upgrade_command(method, windows) == (command, stop_first)
 
 
 def test_a_checkout_never_asks(monkeypatch):

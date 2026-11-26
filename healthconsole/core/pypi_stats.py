@@ -1,5 +1,6 @@
 """This console's public numbers on PyPI, for About: the latest release and its downloads (pypistats.org, without
 mirrors). Three GETs of public pages, read only when About opens; no token and nothing about the viewer sent."""
+import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -12,8 +13,10 @@ from .guarded import GuardedClient, ServiceError, WriteBlocked
 
 PACKAGE = "azure-health-console"
 RELEASE_NOTES = "https://github.com/RafaelSonego/azure-health-console/releases/tag/v{version}"
-UPGRADE = {"brew": f"brew upgrade {PACKAGE}"}  # pipx and pip: the README's steps, which check the files first
-UPGRADE_STEPS = "https://github.com/RafaelSonego/azure-health-console#pipx-windows-linux-or-a-mac-without-homebrew"
+INSTALL_SCRIPT = "https://raw.githubusercontent.com/RafaelSonego/azure-health-console/main/install"
+INSTALL_SH = f"curl -fsSL {INSTALL_SCRIPT}.sh | sh"
+INSTALL_PS1 = f"irm {INSTALL_SCRIPT}.ps1 | iex"
+UPGRADE_STEPS = "https://github.com/RafaelSonego/azure-health-console#upgrade"
 PROJECT_PAGE = f"https://pypi.org/project/{PACKAGE}/"
 STATS_PAGE = f"https://pypistats.org/packages/{PACKAGE}"
 URLS = {
@@ -116,11 +119,22 @@ def install_method(prefix=None, checkout=None):
     if checkout:
         return "source"
     path = str(prefix or sys.prefix).replace("\\", "/").lower()
-    if "/pipx/venvs/" in path:
+    if "/pipx/venvs/" in path or (Path(prefix or sys.prefix) / "pipx_metadata.json").is_file():  # any PIPX_HOME
         return "pipx"
     if "/cellar/" in path or "/homebrew/" in path or "/linuxbrew/" in path:
         return "brew"
     return "pip"
+
+
+def upgrade_command(method, windows=None):
+    """The one line that upgrades this copy, and whether the console must be stopped first (Windows can't replace a
+    running program's files). pipx and pip check the release's signed files before installing."""
+    windows = os.name == "nt" if windows is None else windows
+    if method == "brew":
+        return f"brew upgrade {PACKAGE}", False
+    if method in ("pipx", "pip"):
+        return (INSTALL_PS1, True) if windows else (f"{PACKAGE} upgrade", False)
+    return "", False
 
 
 def update(current, enabled=True, refresh=False):
@@ -139,6 +153,7 @@ def update(current, enabled=True, refresh=False):
         except ServiceError as failure:
             hit = _cache.put("latest", {"latest": "", "error": str(failure)}, FAILURE_SECONDS)
     latest = hit["latest"]
+    command, stop_first = upgrade_command(method)
     return {**base, "checked": True, "latest": latest, "newer": newer(latest, current), "error": hit["error"],
-            "command": UPGRADE.get(method, ""), "steps": "" if method in UPGRADE else UPGRADE_STEPS,
+            "command": command, "stop_first": stop_first, "steps": "" if command else UPGRADE_STEPS,
             "notes": RELEASE_NOTES.format(version=latest) if latest else ""}

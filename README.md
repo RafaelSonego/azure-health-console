@@ -41,13 +41,14 @@ What changed in each version is in [`CHANGELOG.md`](CHANGELOG.md). MIT licensed 
 **To run it:**
 
 - The **Azure CLI** (`az`), signed in with `az login` (or the console's **Sign in** button runs it for you).
-- **Python 3.11 or later** and **pipx**, unless you install with Homebrew, which brings its own Python. See
-  [Prerequisites](#prerequisites) for the commands on macOS, Windows and Linux.
+- **Python 3.11 or later** and **pipx**, unless you install with Homebrew, which brings its own Python. The
+  [install line](#install) says what's missing; [Prerequisites](#prerequisites) has the commands per system.
 - An Azure account with **Reader** on what you want to look at (see [Permissions](#permissions)). PIM roles work:
   activate them, then click **Refresh access** (in your account menu, top right).
 - A browser. The console runs on `127.0.0.1` and sends nothing about you anywhere else; besides Azure and the tools
   you connect, it reads only public pages: Azure's status feed, and this app's PyPI page (whether a newer version is
-  out, every 6 hours, `updates.check`; download numbers when About opens).
+  out, every 6 hours, `updates.check`; download numbers when About opens); `azure-health-console upgrade` reads this
+  app's GitHub release files when you run it.
 
 That's enough for most of the console. **What each feature needs** (roles, the exact actions for custom roles, and
 what the page shows without it) is in [Permissions](#permissions); **Access → What the console needs** checks your own
@@ -56,66 +57,96 @@ Insights, ServiceNow, New Relic); the console works there too, with the platform
 
 ## Install
 
-| Way | Use it when | You need first |
-|---|---|---|
-| [Homebrew](#homebrew-macos) | **macOS: the recommended way** | Homebrew, the Azure CLI |
-| [pipx](#pipx-windows-linux-or-a-mac-without-homebrew) | Windows, Linux, or a Mac without Homebrew | Python 3.11+, pipx, the Azure CLI |
-| [From the source](#from-the-source) | changing the console | Python 3.11+, this repo, the Azure CLI |
+One line installs it, and the same line upgrades it later. It checks the release's signature before anything is
+installed, and stops with the command to run if your computer is missing something.
 
-Windows and Linux are expected to work but haven't been tested yet; please open an issue if something breaks.
+**macOS or Linux** (Terminal):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/RafaelSonego/azure-health-console/main/install.sh | sh
+```
+
+**Windows** (PowerShell):
+
+```powershell
+irm https://raw.githubusercontent.com/RafaelSonego/azure-health-console/main/install.ps1 | iex
+```
+
+Then sign in and start it:
+
+```bash
+az login
+azure-health-console             # starts it and opens your browser
+```
+
+If it says *Open a new terminal*, do that first: the command was just added to your `PATH`.
+
+Tested on macOS and on Ubuntu 22.04 and 24.04. Windows hasn't been tested on a real machine yet; please
+[open an issue](https://github.com/RafaelSonego/azure-health-console/issues) if something breaks.
+
+**What the line does:** on a Mac with Homebrew it installs with Homebrew. Everywhere else it uses
+[pipx](https://pipx.pypa.io): it finds Python 3.11 or later (on Windows it installs pipx for your user if it's
+missing), downloads the release's signed list of files, checks the signature, then installs with pip refusing any
+file whose SHA-256 isn't on that list. [Check what you install](#check-what-you-install) has the details. To install
+a version other than the newest, set `AHC_VERSION` first: `curl … | AHC_VERSION=1.2.0 sh`, or
+`$env:AHC_VERSION = "1.2.0"` in PowerShell.
+
+**Would rather read it first?** Download it, read it, then run it:
+`curl -fsSLO https://raw.githubusercontent.com/RafaelSonego/azure-health-console/main/install.sh`, then
+`sh install.sh`. On Windows: `irm <the URL above> -OutFile install.ps1`, then
+`powershell -ExecutionPolicy Bypass -File .\install.ps1` (Windows blocks a downloaded script otherwise).
 
 ### Prerequisites
 
-The console signs in through the **Azure CLI** (`az`), and no install method installs it for you: Homebrew ships
-it as a cask, which a formula can't depend on, and pipx installs Python packages only. Without it the console
-still starts, and its page says *Install the Azure CLI to continue* with a link to Microsoft's instructions.
+The line installs the console, not these. If one is missing it stops and prints the command for your system.
 
 | | macOS | Windows (PowerShell) | Linux (Debian/Ubuntu) |
 |---|---|---|---|
 | Azure CLI | `brew install --cask azure-cli` | `winget install --exact --id Microsoft.AzureCLI` | `curl -sL https://aka.ms/InstallAzureCLIDeb \| sudo bash` |
-| Python 3.11+ (pipx only) | `brew install python` | `winget install --exact --id Python.Python.3.13` | `sudo apt install python3` |
-| pipx (pipx only) | `brew install pipx` | `py -m pip install --user pipx` | `sudo apt install pipx` |
+| Python 3.11+ | not needed with Homebrew; else `brew install python` | `winget install --exact --id Python.Python.3.13` | `sudo apt install python3` (22.04: `python3.11 python3.11-venv`) |
+| pipx | not needed with Homebrew; else `brew install pipx` | the line installs it | `sudo apt install pipx` |
 
-Other Linux distributions: see [Microsoft's Azure CLI instructions](https://learn.microsoft.com/cli/azure/install-azure-cli)
-and [pipx's](https://pipx.pypa.io/stable/installation/). Check `python3 --version` (`py --version` on Windows) says
-3.11 or later; older Ubuntu releases ship 3.10. After installing pipx, run `pipx ensurepath` once (`py -m pipx
-ensurepath` on Windows) and open a new terminal, so the commands pipx installs are on your `PATH`.
-
-### pip, pipx or brew?
-
-- **brew** installs the console with its own Python, and upgrades and removes it as one package.
-- **pipx** does the same for any system with Python: the console gets its own virtual environment and its command
-  goes on your `PATH`.
-- **pip** is only for a virtual environment you made yourself, such as the one [from the source](#from-the-source)
-  uses. Outside one, macOS has no `pip` command (`command not found`) and Homebrew's Python refuses
-  (`externally-managed-environment`); inside one that already has the console, `pip install azure-health-console`
-  says "Requirement already satisfied" and installs nothing new. Deactivate a virtual environment (`deactivate`)
-  before installing with brew or pipx.
+The console signs in through the **Azure CLI** (`az`). Without it the console still starts, and its page says
+*Install the Azure CLI to continue* with a link to Microsoft's instructions. Other Linux distributions: see
+[Microsoft's Azure CLI instructions](https://learn.microsoft.com/cli/azure/install-azure-cli) and
+[pipx's](https://pipx.pypa.io/stable/installation/).
 
 Your settings, saved scopes and Watchlist live in `~/.config/azure-health-console/` (`%USERPROFILE%\.config\azure-health-console\`
 on Windows), outside the install, so upgrades and an uninstall keep them; [Remove everything](#remove-everything)
 clears them too.
 
-### Homebrew (macOS)
+### Upgrade
+
+When a newer version is out, the console's account menu (top right) shows a dot, and the menu line gives the one
+command for how you installed it.
+
+| Installed with | Upgrade |
+|---|---|
+| Homebrew | `brew upgrade azure-health-console` |
+| pipx on macOS or Linux | `azure-health-console upgrade`, then restart the console |
+| pipx on Windows | stop the console (Ctrl+C in its window), then run the install line again |
+
+`azure-health-console upgrade` checks the new release's signature with the key inside the version you already have,
+so a key swapped on GitHub later wouldn't pass. The install line does the same when it finds the console installed.
+`--dry-run` downloads and checks but installs nothing; `--to 1.2.0` installs that version instead of the newest.
+Versions before 1.3.0 don't have `upgrade`: run the install line once. Don't use `pipx upgrade`: it doesn't check
+the files.
+
+### Install by hand
+
+What the line does, step by step: for a machine that won't run a downloaded script, or to see each check yourself.
+
+**Homebrew (macOS):**
 
 ```bash
 brew install --cask azure-cli    # once, if you don't have az yet
 brew install rafaelsonego/tools/azure-health-console
-az login
-azure-health-console             # starts it and opens your browser
 ```
 
-**Upgrade** with `brew upgrade azure-health-console`; **uninstall** with `brew uninstall azure-health-console`.
-
-### pipx (Windows, Linux, or a Mac without Homebrew)
-
-With the [prerequisites](#prerequisites) installed. These steps check every file before it's installed: the release's
-list of files is signed, and pip installs only files whose fingerprint (SHA-256) is on that list.
-
-**macOS or Linux** (Terminal):
+**pipx, macOS or Linux** (Terminal), with the [prerequisites](#prerequisites) installed:
 
 ```bash
-V=1.2.0   # the version to install: the newest is at the top of the Releases page
+V=1.3.0   # the version to install: the newest is at the top of the Releases page
 mkdir -p ~/Downloads/azure-health-console-$V && cd ~/Downloads/azure-health-console-$V
 R=https://github.com/RafaelSonego/azure-health-console/releases/download/v$V
 curl -fsSL -O $R/SHA256SUMS.txt -O $R/SHA256SUMS.txt.sig -O $R/constraints.txt
@@ -123,15 +154,13 @@ curl -fsSL -o release-signing.pem https://raw.githubusercontent.com/RafaelSonego
 openssl dgst -sha256 -verify release-signing.pem -signature SHA256SUMS.txt.sig SHA256SUMS.txt   # must say "Verified OK"
 shasum -a 256 -c SHA256SUMS.txt --ignore-missing                                                # must say "constraints.txt: OK"
 pipx upgrade-shared
-pipx install "azure-health-console==$V" --pip-args="--require-hashes -c constraints.txt"
-az login
-azure-health-console
+pipx install --force "azure-health-console==$V" --pip-args="--require-hashes -c constraints.txt"
 ```
 
-**Windows** (PowerShell; `openssl` comes with [Git for Windows](https://git-scm.com/download/win)):
+**pipx, Windows** (PowerShell; `openssl` comes with [Git for Windows](https://git-scm.com/download/win)):
 
 ```powershell
-$V = "1.2.0"   # the version to install: the newest is at the top of the Releases page
+$V = "1.3.0"   # the version to install: the newest is at the top of the Releases page
 New-Item -ItemType Directory -Force "$HOME\Downloads\azure-health-console-$V" | Set-Location
 $R = "https://github.com/RafaelSonego/azure-health-console/releases/download/v$V"
 foreach ($f in "SHA256SUMS.txt", "SHA256SUMS.txt.sig", "constraints.txt") { Invoke-WebRequest "$R/$f" -OutFile $f }
@@ -140,24 +169,17 @@ Invoke-WebRequest "https://raw.githubusercontent.com/RafaelSonego/azure-health-c
 $listed = (Select-String '  constraints\.txt$' SHA256SUMS.txt).Line.Split(' ')[0]
 if ((Get-FileHash constraints.txt).Hash.ToLower() -ne $listed) { throw "constraints.txt isn't the released file: stop here" }
 pipx upgrade-shared
-pipx install "azure-health-console==$V" --pip-args="--require-hashes -c constraints.txt"
-az login
-azure-health-console
-```
-
-If a check doesn't say what's shown, stop: don't install, and [open an issue](https://github.com/RafaelSonego/azure-health-console/issues).
-
-**Upgrade:** run the first four lines above (macOS/Linux) or three (Windows) with the new version, into a new folder.
-Then check the files with the version you already have, and install:
-
-```bash
-azure-health-console verify        # must end with "Verified": it checks with the key inside your installed version
-pipx upgrade-shared
 pipx install --force "azure-health-console==$V" --pip-args="--require-hashes -c constraints.txt"
 ```
 
-Don't use `pipx upgrade`: it doesn't check the files (and stops, because it reuses the last version's
-`constraints.txt`). **Uninstall** with `pipx uninstall azure-health-console`.
+If a check doesn't say what's shown, stop: don't install, and [open an issue](https://github.com/RafaelSonego/azure-health-console/issues).
+To upgrade by hand, download into a new folder as above, but replace the `openssl`/`shasum` lines with
+`azure-health-console verify` (it must end with "Verified": it checks with the key inside your installed version).
+
+**pip, pipx or brew?** brew and pipx each give the console its own Python environment and put its command on your
+`PATH`. pip is only for a virtual environment you made yourself, such as the one [from the source](#from-the-source)
+uses: outside one, macOS has no `pip` command and Homebrew's Python refuses (`externally-managed-environment`).
+Deactivate a virtual environment (`deactivate`) before installing with brew or pipx.
 
 ### Check what you install
 
@@ -167,11 +189,13 @@ that never leaves Azure Key Vault: `SHA256SUMS.txt.sig` on the
 names the exact version and SHA-256 of every package pip installs, the console's own wheel included, so
 `--require-hashes -c constraints.txt` refuses anything else, from PyPI or a company mirror alike.
 
-- **First install:** the public key comes from this repository. Its fingerprint is
+- **First install:** the public key comes from this repository. The install scripts carry the same key as
+  `healthconsole/release-signing.pem` (the tests check it). Its fingerprint is
   `873cc6a6353d51196dfa4fcb6b87fed1556897ec2cc79be0477e33429a65e8ab`; check it with
   `openssl pkey -pubin -in release-signing.pem -outform DER | openssl dgst -sha256`.
-- **Upgrades:** `azure-health-console verify [folder]` checks the signature with the key built into the version you
-  already have, so a key swapped on GitHub later wouldn't pass, then each file in the folder against the list.
+- **Upgrades:** `azure-health-console upgrade`, `azure-health-console verify [folder]` and the install line on a
+  machine that has the console check the signature with the key built into the version you already have, so a key
+  swapped on GitHub later wouldn't pass, then each file against the list.
 - **Homebrew** installs the dependencies from the release's `requirements-release.txt`, each one checked by its hash.
   To check the formula: download and verify `SHA256SUMS.txt` as above, then compare `grep tar.gz SHA256SUMS.txt` with
   `brew cat rafaelsonego/tools/azure-health-console | grep sha256`.

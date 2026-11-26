@@ -41,7 +41,8 @@ function showUpdate() {
   $("update-open").classList.toggle("hidden", !u.newer);
   if (u.newer) $("update-text").innerHTML = `${esc(u.latest)} is out<small>You have ${esc(u.current)} · how to upgrade</small>`;
   $("about-update").innerHTML = u.newer ? `<div class="about-update"><strong>${esc(u.latest)} is out</strong> <span class="muted">you have ${esc(u.current)}</span>
-      <p>${u.command ? `Upgrade with <code>${esc(u.command)}</code> <button type="button" class="link" data-copy-update>copy</button>, then restart the console.`
+      <p>${u.command && u.stop_first ? `Stop the console (Ctrl+C in its window), run <code>${esc(u.command)}</code> <button type="button" class="link" data-copy-update>copy</button> in PowerShell, then start it again. It checks the new version's files before installing them.`
+        : u.command ? `Upgrade with <code>${esc(u.command)}</code> <button type="button" class="link" data-copy-update>copy</button> in a terminal, then restart the console.`
         : `Upgrade with <a href="${safeHref(u.steps)}" target="_blank" rel="noopener">the upgrade steps</a>: they check the new version's files before installing them (<code>azure-health-console verify</code>). Then restart the console.`}</p>
       <p class="muted">${u.notes ? `<a href="${safeHref(u.notes)}" target="_blank" rel="noopener">What's new in ${esc(u.latest)}</a> · ` : ""}
         ${dismissed ? "Hidden from the menu until the next version." : '<button type="button" class="link" data-update-later>Not now</button> hides the dot until the next version.'}</p></div>` : "";

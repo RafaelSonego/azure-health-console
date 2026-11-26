@@ -13,7 +13,7 @@ from pathlib import Path
 from .core import config, health, localfiles, profiles, readiness, report, snapshot, tables, yamlio
 from .core.arm import ArmClient, ArmError
 from .core.credentials import AzureCliTokenProvider, CredentialError
-from .core.guarded import ServiceError
+from .core.guarded import ServiceError, WriteBlocked
 from .core.discovery import DiscoveryOptions
 from .core.health import HealthOptions
 
@@ -258,6 +258,17 @@ def cmd_verify(args):
           "the files marked ok are the released ones.")
 
 
+def cmd_upgrade(args):
+    from . import release, upgrade
+    try:
+        code = upgrade.run(args.to, args.dry_run)
+    except release.VerifyError as error:
+        sys.exit(f"NOT VERIFIED, nothing installed: {error}")
+    except (ServiceError, WriteBlocked) as error:
+        sys.exit(f"error: {error}")
+    sys.exit(code)
+
+
 def cmd_whoami(args, settings):
     identity = _client(args, settings).identity
     print(f"{identity.name}  tenant {identity.tenant_id}")
@@ -356,6 +367,11 @@ def main(argv=None):
                                                 "files) before upgrading to it")
     verify.add_argument("folder", nargs="?", default=".", help="The folder you downloaded the release into")
 
+    upgrade = commands.add_parser("upgrade", help="Install the newest release, after checking its signed files with "
+                                                  "the key in this version")
+    upgrade.add_argument("--to", metavar="VERSION", help="A release to install instead of the newest (e.g. 1.2.0)")
+    upgrade.add_argument("--dry-run", action="store_true", help="Download and check, show the commands, install nothing")
+
     if argv is None:
         argv = sys.argv[1:]
     if not argv:
@@ -363,8 +379,8 @@ def main(argv=None):
         argv = ["serve", "--open"]
     args = parser.parse_args(argv)
     _setup_logging(args.verbose, args.log_calls)
-    if args.command == "verify":  # needs no settings: a broken config.yaml mustn't stop it
-        cmd_verify(args)
+    if args.command in ("verify", "upgrade"):  # need no settings: a broken config.yaml mustn't stop them
+        cmd_verify(args) if args.command == "verify" else cmd_upgrade(args)
         return
     try:
         settings = config.load(args.config)

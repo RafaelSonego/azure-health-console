@@ -285,6 +285,8 @@ back to the page. `--log-calls` shows these requests as `SN GET /api/now/table/i
 | Request | Why |
 |---|---|
 | `GET https://azure.status.microsoft/en-us/status/feed/` | Triage's *Azure service status* card: the public Azure status feed (Azure-wide outages). No token, no cookie, nothing about you or your tenant; redirects not followed, at most 1 MB read, cached 2 minutes (a failure 1 minute). Any other host, path or method is refused before sending. Off with `triage.azure_status_feed: false` (`core/status_feed.py`) |
+| `GET https://pypi.org/pypi/azure-health-console/json`, `GET https://pypistats.org/api/packages/azure-health-console/…` | whether a newer version is out (an installed copy only, every 6 hours, off with `updates.check: false`) and About's download numbers. No token, nothing about you; any other host, path or method is refused before sending (`core/pypi_stats.py`) |
+| `GET https://github.com/RafaelSonego/azure-health-console/releases/…` and the asset host it redirects to | only when you run `azure-health-console upgrade`: the release's `SHA256SUMS.txt`, its signature and `constraints.txt`. Every redirect is checked against the same list; nothing else is fetched (`upgrade.py`) |
 | Browser → `127.0.0.1:8765` | the local web UI. It only answers requests addressed to `127.0.0.1`/`localhost`, and its `POST`s are for local jobs (start a snapshot, drop caches), never forwarded to Azure as writes |
 
 The graph and chart libraries ship with the console (`web/static/vendor/`), so the

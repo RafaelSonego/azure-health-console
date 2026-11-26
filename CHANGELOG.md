@@ -4,6 +4,31 @@ All notable changes to this project are documented here. The format is based
 on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.0] - 2026-11-26
+
+### Added
+
+- **One line installs it on macOS, Linux and Windows, and the same line upgrades it.** `install.sh`
+  (`curl -fsSL …/install.sh | sh`) and `install.ps1` (`irm …/install.ps1 | iex`) check the release's signature
+  before installing anything. With the console already installed they check it with the key inside that version
+  (`azure-health-console verify`); otherwise with the key the script carries, the same as
+  `healthconsole/release-signing.pem`. On a Mac with Homebrew the line uses Homebrew. Everywhere else it uses pipx,
+  with pip refusing any file that isn't in the signed `constraints.txt`. If Python 3.11+ or pipx is missing it says the
+  command for your system; on Windows it installs pipx for your user. No more `openssl` by hand, and no Git for
+  Windows. `AHC_VERSION` picks a version other than the newest.
+- **`azure-health-console upgrade`** downloads the newest release's signed file list from GitHub, checks it with the
+  key in the version you have, and installs it the way this copy was installed: Homebrew, pipx or pip. `--dry-run`
+  checks and shows the commands without installing; `--to 1.2.0` picks a version. A checkout is told to `git pull`.
+  On Windows it gives the PowerShell line instead, because Windows can't replace the files of a program that's running.
+
+### Changed
+
+- **The "new version" notice gives one command for every install**, not just Homebrew: `azure-health-console upgrade`
+  for pipx and pip on macOS and Linux, and on Windows the PowerShell line, with *stop the console first*.
+- A pipx install is recognised by pipx's own `pipx_metadata.json`, so a custom `PIPX_HOME` no longer reads as pip.
+- README *Install* starts with the one line per system, plus *Upgrade* per install method. The step-by-step commands
+  moved to *Install by hand*. AZURE-CALLS lists the PyPI and GitHub reads under *Outside Azure*.
+
 ## [1.2.0] - 2026-11-26
 
 ### Security

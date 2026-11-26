@@ -420,7 +420,7 @@ def test_the_readme_shows_the_release_key_s_fingerprint_for_a_first_install():
 def test_the_readme_installs_and_upgrades_only_through_checked_files():
     from pathlib import Path
     readme = (Path(__file__).resolve().parents[1] / "README.md").read_text()
-    section = readme[readme.index("### pipx (Windows"):readme.index("### From the source")]
+    section = readme[readme.index("### Install by hand"):readme.index("### Check what you install")]
     installs = [line for line in section.splitlines() if line.startswith("pipx install")]
     assert installs and all('--pip-args="--require-hashes -c constraints.txt"' in line for line in installs)
     assert section.count("-signature SHA256SUMS.txt.sig SHA256SUMS.txt") == 2 and "azure-health-console verify" in section
