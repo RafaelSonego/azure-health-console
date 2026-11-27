@@ -174,7 +174,7 @@ state.groupChecks = new Map();
 function keepGroupCheck(target, snapshot) {
   const key = target.group.toLowerCase();
   state.groupChecks.delete(key);
-  state.groupChecks.set(key, { target: { ...target }, snapshot });
+  state.groupChecks.set(key, { target: { ...target }, snapshot, at: Date.now() });
   while (state.groupChecks.size > GROUP_CHECKS_KEPT) state.groupChecks.delete(state.groupChecks.keys().next().value);
 }
 
@@ -183,6 +183,7 @@ function showGroupCheck(key) {
   hideGroupSummary();
   state.target = kept.target;
   state.snapshot = kept.snapshot;
+  state.graphCheckedAt = kept.at;  // the graph's clock (and its next re-check) count from when this check ran
   state.selectedResource = null;
   state.exploreNode = null;
   state.partialDrawn = false;

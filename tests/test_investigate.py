@@ -497,9 +497,62 @@ def test_request_counts_weigh_each_sampled_row_by_its_item_count():
     import re
     from healthconsole.core.explore import appinsights as explore_ai
     from healthconsole.core.investigate import appinsights as inv_ai
-    queries = {name: getattr(inv_ai, name) for name in ("OPERATIONS", "CODES", "CUT_REASONS", "EXCEPTIONS", "DEPENDENCIES")}
+    queries = {name: getattr(inv_ai, name) for name in ("OPERATIONS", "CODES", "CUT_REASONS", "EXCEPTIONS", "DEPENDENCIES", "DETAILS")}
     queries["roles"] = explore_ai.QUERIES["roles"]
     for name, kql in queries.items():  # a sampled row stands for itemCount calls
         counted = re.findall(r"\w+=(?:count|countif|dcount)\(", kql)
-        assert counted in ([], ["endpoints=count("]), f"{name} counts rows: {counted}"
+        assert counted in ([], ["endpoints=count("], ["backends=dcount("]), f"{name} counts rows: {counted}"
         assert "itemCount" in kql, name
+
+
+DETAIL_COLUMNS = ["part", "operation", "role", "code", "failed", "with_backend", "backends", "backend", "backend_code",
+                  "requests", "caller"]
+APIM_OP = "product;rev=1 - GetPrice"
+
+
+def test_endpoint_details_name_each_endpoint_s_failing_backends_and_callers():
+    def answer(c, q):
+        assert "datatable(operation:string, role:string, code:string)" in q and '"product;rev=1 - GetPrice", "edge-apim", "500"' in q
+        assert "distinct operation_Id, backend=target, backend_code=resultCode" in q  # a request counts once per backend
+        return table(DETAIL_COLUMNS, [
+            ["total", APIM_OP, "edge-apim", "500", 300, 100, 5, None, None, None, None],
+            ["backend", APIM_OP, "edge-apim", "500", None, None, None, "https://prices.internal", "502", 90, None],
+            ["backend", APIM_OP, "edge-apim", "500", None, None, None, "https://cache.internal", "", 10, None],
+            ["caller", APIM_OP, "edge-apim", "500", None, None, None, None, None, 250, "web-shop"],
+            ["caller", "GET /other", "edge-apim", "500", None, None, None, None, None, 9, "not asked"]])
+    out = AppInsightsSource(Insights(answer), APIM_AI).endpoint_details(
+        [{"operation": APIM_OP, "role": "edge-apim", "code": "500"}], "30d")
+    [row] = out["rows"]
+    assert (row["failed"], row["with_backend"], row["backend_count"]) == (300, 100, 5)
+    assert row["backends"] == [{"backend": "https://prices.internal", "code": "502", "requests": 90},
+                               {"backend": "https://cache.internal", "code": "", "requests": 10}]
+    assert row["callers"] == [{"caller": "web-shop", "requests": 250}] and out["queries"][0]["label"] == "backends and callers"
+
+
+def test_endpoint_details_escape_names_and_limit_how_many_are_asked():
+    src = AppInsightsSource(Insights(lambda c, q: table(DETAIL_COLUMNS, [])), APP)
+    kql = src.endpoint_details_queries([{"operation": 'GET /a"] | take 1 //', "role": "r", "code": ""}], "1h")[0]["query"]
+    assert '["GET /a\\"] | take 1 //", "r", ""]' in kql  # the quote is escaped: the name can't close the literal
+    with pytest.raises(ValueError):
+        src.endpoint_details_queries([], "1h")
+    with pytest.raises(ValueError):
+        src.endpoint_details_queries([{"operation": "x", "role": "r"}] * 101, "1h")
+
+
+def test_the_endpoint_details_route_checks_what_it_is_given():
+    client = Insights(lambda c, q: table(DETAIL_COLUMNS, [["total", "GET /a", "api", "", 4, 0, 0, None, None, None, None]]))
+    app = Flask("test")
+    app.register_blueprint(create_blueprint(lambda tenant: client, config.load("/nonexistent"), authorize=lambda: None))
+    web = app.test_client()
+    ok = web.get("/api/investigate/endpoint-details", query_string={
+        "component": APP, "window": "1h", "endpoints": '[{"operation": "GET /a", "role": "api", "code": ""}]'})
+    assert ok.status_code == 200 and ok.get_json()["rows"][0]["failed"] == 4
+    for bad in ("not json", '{"operation": "x"}', '[{"operation": 5}]', "[]"):
+        reply = web.get("/api/investigate/endpoint-details", query_string={"component": APP, "endpoints": bad})
+        assert reply.status_code == 400, bad
+
+
+def test_listed_endpoints_carry_a_recent_failed_request_s_method_and_path():
+    from healthconsole.core.investigate.appinsights import CODES, OPERATIONS
+    assert "path=take_anyif(name, success == false)" in OPERATIONS
+    assert "arg_max(timestamp, operation_Id, name)" in CODES and "path=name" in CODES

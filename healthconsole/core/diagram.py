@@ -132,6 +132,17 @@ STYLE = """<style>
 .dg-node.hit .dg-box { stroke: var(--accent); stroke-width: 2.5; }
 .st-critical .dg-box { fill: var(--critical-bg); stroke: var(--critical); stroke-width: 1.5; }
 .st-warning .dg-box { fill: var(--warning-bg); stroke: var(--warning); stroke-width: 1.5; }
+@keyframes dg-pulse-critical { 0%, 100% { fill: var(--critical-bg); stroke-width: 1.5; }
+  50% { fill: color-mix(in srgb, var(--critical) 45%, var(--critical-bg)); stroke-width: 4; } }
+@keyframes dg-pulse-warning { 0%, 100% { fill: var(--warning-bg); stroke-width: 1.5; }
+  50% { fill: color-mix(in srgb, var(--warning) 40%, var(--warning-bg)); stroke-width: 4; } }
+@keyframes dg-blink { 0%, 100% { opacity: 1; } 50% { opacity: .15; } }
+.st-critical .dg-box { animation: dg-pulse-critical 1.2s ease-in-out infinite; }
+.st-warning .dg-box { animation: dg-pulse-warning 2.2s ease-in-out infinite; }
+.dg-node.st-critical .dg-dot, .dg-node.st-warning .dg-dot { animation: dg-blink 1.2s ease-in-out infinite; }
+.dg-node.dg-new .dg-box, .dg-node.dg-new .dg-dot { animation-duration: .6s; }
+@media (prefers-reduced-motion: reduce) { .st-critical .dg-box, .st-warning .dg-box, .dg-node .dg-dot { animation: none; }
+  .st-critical .dg-box, .st-warning .dg-box { stroke-width: 3; } }
 .dg-name { font-size: 13px; font-weight: 600; fill: var(--text); }
 .dg-type { font-size: 11px; fill: var(--muted); }
 .dg-dot { stroke: var(--panel); stroke-width: 1.5; }

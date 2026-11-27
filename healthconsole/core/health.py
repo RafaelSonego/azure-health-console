@@ -306,9 +306,9 @@ def _key_vault_signals(client, node, options):
 
 
 def _detector_signals(client, node):
-    """Only the quick health/risk categories here; the Diagnostics tab runs the full set."""
+    """The same detectors as the Diagnostics tab (and the same kept answers), so the graph and the tab agree."""
     try:
-        result = detectors.run(client, node.id, words=("health", "risk"))
+        result = detectors.run(client, node.id)
     except ArmError:
         return []
     if result.get("error"):

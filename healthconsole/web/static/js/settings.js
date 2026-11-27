@@ -50,7 +50,7 @@ const SETTING_LABELS = {
   "triage.azure_status_feed": "Read the public Azure status feed", "updates.check": "Tell me when a new version is out",
   "graph.auto": "Draw dependencies on every click", "graph.depth": "Hops to follow", "graph.max_nodes": "Stop drawing at (resources)",
   "graph.inbound": "Also find what points at a resource", "graph.inbound_limit": "At most this many inbound resources",
-  "graph.inbound_scope": "Where to look for inbound references",
+  "graph.inbound_scope": "Where to look for inbound references", "graph.refresh_minutes": "Check the graph again by itself",
   "health.window_minutes": "Metric window for \u201cnow\u201d (minutes)", "health.compare_last_week": "Compare with the same window last week",
   "health.changes_hours": "Changes shown per resource (hours)", "health.alert_hours": "Ignore stateless alerts older than (hours)",
   "health.critical_max_severity": "Critical from alert severity (Sev0 is worst)", "health.warning_max_severity": "Warning from alert severity",
@@ -71,8 +71,6 @@ const SETTING_LABELS = {
   "appinsights.failed_min": "Spike: failed requests at least", "appinsights.failed_rate_points": "Spike: failure rate up by (points)",
   "appinsights.exceptions_min": "Spike: exceptions at least", "appinsights.exceptions_percent": "Spike: exceptions at (% of last week)",
   "appinsights.critical_rate_percent": "Spike turns red at (% failure rate)", "appinsights.critical_failed_min": "...with failed requests at least",
-  "path.drop_percent": "Path: traffic dropped under (% of last week)", "path.drop_min": "...when last week had requests at least",
-  "path.restarts_min": "Path: pod restarts rising from", "path.restarts_critical": "...red from",
   "security.risky_ports": "Ports that are a warning when open to the internet",
   "triage.capacity_near_max_percent": "Autoscale near its maximum at (% of the maximum)", "triage.resolved_hours": "Show resolved Service Health issues for (hours)",
   "health.baseline_change_percent": "Moved against last week at (% of last week)", "cost.spike_percent": "Cost spike at (% of a usual day)",
@@ -92,12 +90,13 @@ const SETTING_LABELS = {
 const OPTION_LABELS = {
   "triage.auto_refresh_minutes": { 0: "Off", 1: "Every minute", 2: "Every 2 minutes", 5: "Every 5 minutes", 10: "Every 10 minutes", 15: "Every 15 minutes" },
   "graph.inbound_scope": { subscription: "The same subscription", tenant: "The whole tenant (slower)" },
+  "graph.refresh_minutes": { 0: "Off", 2: "Every 2 minutes", 5: "Every 5 minutes", 10: "Every 10 minutes", 15: "Every 15 minutes", 30: "Every 30 minutes" },
   ...Object.fromEntries(["restarts", "oom", "events"].map((k) => [`aks.${k}_look_back_hours`,
     { 1: "1 hour", 6: "6 hours", 24: "24 hours", 72: "3 days", 168: "7 days", 336: "14 days", 720: "30 days" }])),
   persona: { "": "ask on first run" },
 };
 const PANE_OF = { updates: "general", triage: "general", summary: "general", alerts: "general", audit: "general", health: "thresholds", network: "thresholds", alert_check: "thresholds", cost: "thresholds", vulnerabilities: "thresholds",
-  appinsights: "thresholds", path: "thresholds", security: "thresholds", graph: "graph", aks: "aks", files: "files", persona: "persona", logs: "files" };
+  appinsights: "thresholds", security: "thresholds", graph: "graph", aks: "aks", files: "files", persona: "persona", logs: "files" };
 
 function settingRows(fields) {
   return fields.map((f) => {

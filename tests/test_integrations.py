@@ -691,8 +691,9 @@ def test_settings_know_what_each_tool_answers():
     assert caps["newrelic"] == {"connected": True, "capabilities": ["alerts", "entities", "logs", "alert history",
                                                                         "Kubernetes OOM kills", "Kubernetes warning events",
                                                                         "Kubernetes workloads by namespace",
-                                                                        "an app's requests per minute", "a workload's pod restarts",
-                                                                        "a workload's CPU and memory over 30 days",
+                                                                        "app names, to match a workload to its app",
+                                                                        "a workload's CPU and memory over 30 days, and its pods' memory hour by hour",
+                                                                        "a cluster's restarts, OOM kills, memory and HPA time at max over 7 days",
                                                                         "an app's heap and process memory"]}
     assert caps["grafana"]["connected"] is False
 

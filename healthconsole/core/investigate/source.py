@@ -115,6 +115,14 @@ class TraceSource:
         """Failed requests in the window by HTTP result code, most first, each with the endpoints that return it."""
         raise NotImplementedError
 
+    def endpoint_details_queries(self, endpoints, window):
+        raise NotImplementedError
+
+    def endpoint_details(self, endpoints, window):
+        """For endpoints a table lists ([{operation, role, code}]): the backends their failed requests called that
+        failed too, how many had none, and their top callers."""
+        raise NotImplementedError
+
     def dependencies_queries(self, window):
         raise NotImplementedError
 

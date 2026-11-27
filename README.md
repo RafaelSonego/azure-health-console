@@ -527,6 +527,19 @@ of its own, with its KQL under **Query sent**:
    Investigate for steps 2 to 4 and Search logs, with a *Showing:* line saying what each step covers; 1 hour to 30 days;
    Application Insights keeps 30 days by default, some components 90 or more, so a longer window finds nothing older;
    30 days of a busy app takes 10 to 15 seconds).
+   In both lists an endpoint reads as its operation, a recent failed request's method and path (never its query
+   string), and for API Management (which names operations `<api>;rev=<n> - <operation>`) its API and revision; the
+   exceptions and search tables name operations the same way, and a service shows its name on one line with its
+   region under it.
+   **Backend** is what those failing requests called that failed too: each host with its status (*no response* for a
+   timeout or a failed connection) and how many requests, the top 3 and how many more, and how many failed with no
+   backend call failing, which broke in the service itself (an API Management policy, for example). **Called by**
+   lists the API Management subscriptions that sent them. Both are read after the list draws (a code's when you open
+   it), in one query for the endpoints shown: under a second for an hour, about 30 seconds for 30 days of a busy
+   gateway.
+   Step 2's five sections (By HTTP code, Its failing endpoints, Exceptions, Failing dependencies, Recent changes) each
+   fold, with their count on the title; your open or closed choice is kept in this browser, **Expand all** and
+   **Collapse all** act for this visit, and a closed section is read only when you open it.
 3. **Its latest failures:** that endpoint's latest failed requests (tick *successful ones too* for the rest), with
    when, HTTP status, how long it took, the instance (pod or host) and URL. Samples you've followed are marked
    **✓ followed**.
@@ -786,7 +799,12 @@ text lists up to three), and names cut in the middle so names that share a prefi
 its connectors and what they reach and fades the rest; a click keeps that and opens its details. An identity only one
 resource signs in as is drawn as 🔑 on that resource, its roles starting there ("AcrPull (via …)"); identities nothing
 in the group uses sit in a small row at the bottom. A legend under the title explains the marks. Its bar's
-**Problems** lights every critical or warning box and what it connects to (press again to clear); its filter box
+**Problems** lights every critical or warning box and what it connects to (press again to clear). Critical and warning
+boxes pulse: their colour and status dot (red faster than amber; a solid outline with the system's *reduce motion*). While a graph is on screen it
+checks again by itself every `graph.refresh_minutes` (5 by default), in the background, and redraws only the graph,
+keeping zoom, scroll and filter; the bar says when it was checked and when the next one is, with **Pause**. A box that
+turned critical or warning since the previous check pulses faster for a minute. It never runs while the graph is
+minimized or shown as a table, while another tab is in front, or on top of a check you started. Its filter box
 lights the boxes whose name or type matches every word typed (the same type names as search, so "k8s" finds an AKS
 cluster) and scrolls to the first; it also zooms,
 fits the width, goes full screen, or **Opens in new tab** (the same picture, view-only, no Azure call). The printable
@@ -874,31 +892,31 @@ Its tabs, in order (a red count means something is open there):
   **Dependencies of a workload** (namespace and Deployment, StatefulSet or DaemonSet, picked from the cluster's own, or for one namespace from Container Insights or the monitoring tool; also Investigate → pod): the
   Azure resources it uses, from the host names in its env and ConfigMaps (scanned on your machine, values never
   shown, Secrets never read) and from what its workload identity holds roles on, Cosmos DB data roles included.
-  Without the Kubernetes API it shows the identity part alone and says so. **Path** (same pickers; also Investigate →
-  pod and an App Service's App Insights tab): each hop in front of the workload and the workload itself, the last hour
-  against the same hour last week, per minute on one 60-minute strip, and one sentence on where it breaks (the hop
-  furthest back whose errors rose, or whose traffic fell below half). *App Gateway* routes and *API Management* APIs
-  are read from their logs in Log Analytics (5xx, 502/504, the gateway's own errors against the backend's, p95, top
-  reasons); *requests* from the monitoring tool picked in the Scope bar (an app's transactions) or an App Insights
-  component; *pods* from Container Insights, else the monitoring tool. Nothing ties a gateway route to a workload on
-  its own, so **Link front doors** suggests them from data (a backend pool that is the cluster's internal load
-  balancer or in its subnets; APIs sharing words with the workload or a path its app serves; its app and component
-  by name), each with why, and keeps what you tick for this tenant (`workload_links` in the config file). A hop it
-  can't read says why, never zero. **Workload details**: click a workload on any line that names one (HPAs, Happening
+  Without the Kubernetes API it shows the identity part alone and says so. **Workload details**: click a workload on any line that names one (HPAs, Happening
   now, Configuration risks, Pods not running; or pick it and press **Details**) and it opens under that line, read
   then: rollout and images; the checks for it; its **HPA** with each metric now against its target and how many pods
-  that metric alone asks for (so *held at its maximum by memory* is shown, not guessed), its conditions and behaviour;
-  each container's requests and limits against use now, probes, scratch volumes, and its runtime's memory settings
-  (`-Xmx`, `MaxRAMPercentage`, `--max-old-space-size`, `GOMEMLIMIT`… picked out of its env and arguments; the rest of a
-  value is never kept); its pods with node, zone, restarts and last exit; its events. Below that, its CPU and memory
+  that metric alone asks for (so *held at its maximum by memory* is shown, not guessed), how long it has been at its
+  maximum (from Kubernetes' own `ScalingLimited` condition, so no history tool is needed), its conditions and behaviour;
+  each container's requests and limits against use now, probes, scratch volumes, and its **runtime memory cap**
+  against its limit: Java's heap max (`-Xmx`, `MaxRAMPercentage`, or the JVM's default 25% when none is set), Node.js's
+  `--max-old-space-size`, Go's `GOMEMLIMIT`, .NET's GC heap limit, picked out of its env and arguments (the rest of a
+  value is never kept), with its share of the limit and the room left outside it. Only the Deployment's own env, command
+  and args are read (the Kubernetes API, no exec): a cap set inside the image (its `ENV` or entrypoint) or through
+  `envFrom` isn't seen, and a container with none says only that. The ⓘ on that table gives the commands to check it
+  yourself, the workload's names filled in: the spec's env names (a read), and what the running process got, image
+  included (`kubectl exec`, which needs `pods/exec`: the console never runs it, and Reader doesn't allow it); its pods with node, zone, restarts and last exit; its events. Below that, its CPU and memory
   over 7 and 30 days (Container Insights, else the monitoring tool) with the pod request each HPA target needs to be
   reachable (memory from its 30-day max, CPU from its 7-day p99), and, when the monitoring tool reports it, the app's
-  heap and process memory against the pod's, which shows memory held outside the runtime. **Would a change fit?**
-  takes new requests per container (today's, or *what its HPA targets need*) and, on **Check**, reads the nodes and
-  every pod on them: the replicas its HPA would then ask for (its own arithmetic with the new request, or a number
-  you give), whether they fit node by node on the pools its pods run on, each pool's requests before and after, the
-  nodes missing when they don't (and whether the pool's autoscaler can add them), and the room a rolling update has
-  next to the old pods. Taints, affinity and topology spread aren't modelled. The ⓘ next to a section shows the kubectl command for the same list, with copy. A Failed pod is a
+  heap and process memory against the pod's, which shows memory held outside the runtime. Then **Memory over 7 days,
+  pod by pod**: each pod's working set hour by hour (its containers added up) on one chart, with ▲ restarts, ✕ OOM kills
+  and the last rollout, the 40 most recent pods drawn and every pod in a table with when it started, memory now and at
+  its peak, **growth** (MiB per hour since it started) and its restarts and OOM kills; and, for a Deployment, the 24
+  hours before its last rollout against the 24 after (memory per pod, pods running, restarts). From Container Insights,
+  else the monitoring tool; facts only, the console doesn't call anything a leak.
+- **Memory & scaling** (a Workloads sub-tab, read when opened): one row per workload, sortable by any column: replicas
+  against the HPA's max, how long at max (and, from the monitoring tool, its share of the last 7 days), memory now as a
+  share of its request, its peak against its limit over 7 days (monitoring tool), restarts and OOM-killed pods over 7
+  days, and each container's runtime memory cap. Workloads gone since are listed under it. The ⓘ next to a section shows the kubectl command for the same list, with copy. A Failed pod is a
   warning, dated by when it stopped; one that stopped over a day ago is marked *leftover* (Kubernetes keeps Failed
   pods until someone deletes them).
 - **kubectl** (AKS): the commands to run in your own terminal, this cluster's name, group and subscription filled
@@ -918,7 +936,8 @@ Its tabs, in order (a red count means something is open there):
 - **Diagnostics:** Azure's "Diagnose and solve problems" checks over the last 24 hours, with the same details as
   the portal. Opening any resource runs its default detectors in the background (once per resource per session), and
   the tab shows how many report a warning or critical finding (red when one is critical), so a problem is seen
-  without opening the tab. A detector alone only turns a resource yellow. Azure's read API has detectors for App Service, AKS,
+  without opening the tab. A check (the graph, the table, exports) runs the same detectors, and each answer is kept 10
+  minutes, so whichever reads first, the others reuse it: what the tab shows is what colours the box. A detector alone only turns a resource yellow. Azure's read API has detectors for App Service, AKS,
   Redis, Logic Apps and Batch; for other types (API Management among them) the portal runs its checks through
   Microsoft's Help service, which starts a diagnostic run, a write the console doesn't make, so the tab links to the
   portal's page. A type whose detectors API never answers (Event Hubs, Service Bus, Storage and Container Registry
@@ -1334,8 +1353,7 @@ Plus the settings in the table that aren't roles (Defender plans, Container Insi
 | Access audit (group members), Check someone's access | Your account can read groups' members and other users in **Microsoft Graph** (the default for members; some tenants restrict it) | none (directory setting) | The audit names the groups whose members couldn't be listed; the user search shows Graph's refusal |
 | Vulnerabilities: findings, Recommendations from Defender | **Defender for Servers** and **Defender for Containers** turned on (paid plans, a setting, not a role); the free tier gives some recommendations | none (setting) | Only the platform checks show (AKS versions and node images, runtimes, TLS); Advisor's recommendations still show |
 | AKS dependencies of a workload | **Reader** on the cluster's subscription (managed identities and their federated credentials, role assignments, Cosmos DB role assignments); for its configuration, the AKS roles and network path above | `*/read` | Without the Kubernetes API the list comes from the workload identity's roles alone, and says so |
-| AKS workload details | As AKS Workloads (above), plus every namespace's pods for *Would a change fit*; its CPU and memory history from **Container Insights** or a monitoring tool; the app's heap from the monitoring tool (New Relic's APM agents) | `*/read` | Each part says what it couldn't read |
-| Workload path | **Reader** on the App Gateways and API Management services (routes, APIs, diagnostic settings) and on the cluster's node resource group and virtual network (its load balancer and subnets, for suggestions); their logs in a workspace (**Reader** on the resource, or **Log Analytics Reader**); a monitoring tool for requests or pods where Azure has none | `*/read` | Each hop says what it couldn't read; suggestions note what wasn't listed |
+| AKS workload details | As AKS Workloads (above); its CPU and memory history from **Container Insights** or a monitoring tool; the app's heap from the monitoring tool (New Relic's APM agents) | `*/read` | Each part says what it couldn't read |
 | AKS logs and pod history (Container Insights) | **Container Insights** turned on for the cluster (a setting), and **Reader** on the cluster or **Log Analytics Reader** on its workspace | `*/read` | Workloads says Container Insights isn't available and shows the other layers |
 | Key Vault expiry (Secrets, a vault's page) | **Reader** on the vault: names and dates only, never values. Data roles like *Key Vault Secrets User* aren't enough. A vault firewall that doesn't allow trusted Azure services blocks it | `*/read` | The page says the firewall or role refused it |
 | vCPU quota (Readiness) | **Reader** on the subscription | `*/read` | That check is skipped and named |
@@ -1376,6 +1394,7 @@ All settings are optional; most are also editable in **Settings**. The annotated
 | `tenants.<key>.saved_scopes` | none | named Scope bar setups (Saved scopes ▾ writes these): `name`, `subscriptions`, `resource_groups`, `tag_filters`, `connections` |
 | `tenants.<key>.open_with` | `none` | what the page opens with: `none`, `all` or a saved scope's name |
 | `tenants.<key>.favourite_subscriptions`, `favourite_resource_groups`, `tag_filters` | none | before 1.0.0; read as the *Favourites* saved scope until moved |
+| `path` (section), `tenants.<key>.workload_links` | none | retired in 1.5.0 with the workload Path view: still accepted so an older file loads, ignored, safe to delete |
 | `tenants.<key>.alert_rules` | none | alert rules (Settings → Alerts writes these): `name`, `scope` (a saved scope) or `watchlist: true`, `signals`, `servicenow_priority`, `interval_minutes`, `notify`, `notify_recovered`, `enabled` |
 | `tenants.<key>.integrations` | none | ServiceNow and monitoring connections (Settings → Integrations writes these) |
 | `triage.scope` | `none` | before 1.0.0; read as Open with until a tenant has its own `open_with` |
@@ -1387,6 +1406,7 @@ All settings are optional; most are also editable in **Settings**. The annotated
 | `triage.azure_status_feed` | `true` | the service status card reads the public Azure status feed (`azure.status.microsoft`, no token, nothing about you sent) |
 | `updates.check` | `true` | an installed copy (pip, pipx, brew) asks PyPI every 6 hours whether a newer version is out: a dot on the account button, a menu line, and About gives the upgrade command for how it was installed. Never from a checkout; nothing about you sent |
 | `graph.auto` | `false` | draw dependencies on every click |
+| `graph.refresh_minutes` | `5` | a graph on screen (a resource's dependencies, a group's Graph) checks again by itself this often, redrawing only the graph; 0, 2, 5, 10, 15 or 30 (0 is off) |
 | `graph.depth` / `graph.max_nodes` | `2` / `60` | hops followed; stop drawing at this many resources |
 | `graph.inbound` / `inbound_limit` / `inbound_scope` | `true` / `25` / `subscription` | also find what points at a resource, how many, and where to look |
 | `health.window_minutes` | `15` | metric window for "now" (and for Against last week) |
@@ -1401,8 +1421,6 @@ All settings are optional; most are also editable in **Settings**. The annotated
 | `appinsights.failed_min` / `failed_rate_points` | `5` / `1` | failing more: at least this many failed requests, and the rate this many points above the same hour last week (Triage's spike card, Investigate, Path) |
 | `appinsights.exceptions_min` / `exceptions_percent` | `10` / `200` | throwing more: at least this many exceptions, at this share of last week or more |
 | `appinsights.critical_rate_percent` / `critical_failed_min` | `20` / `20` | failing turns red at this rate with at least this many failed |
-| `path.drop_percent` / `drop_min` | `50` / `100` | Path: traffic under this share of last week (when it had this many) is a drop |
-| `path.restarts_min` / `restarts_critical` | `3` / `10` | Path: pod restarts rising from (and twice last week), red from |
 | `cost.spike_percent` | `200` | a day at this share of the usual day (median of the 7 before) is a spike |
 | `security.risky_ports` | `22, 3389, 1433, 3306, 5432, 6379, 27017, 5985, 5986` | ports that are a warning when open to the internet |
 | `vulnerabilities.eol_warning_days` | `90` | an App Service runtime turns yellow this many days before its end of support |

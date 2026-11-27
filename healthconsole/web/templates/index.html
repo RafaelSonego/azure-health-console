@@ -244,23 +244,23 @@
         <button type="button" id="inv-trace-go">Follow</button></div></div>
     <div class="inv-step hidden" id="inv-ops"><h3><span class="q-num">2</span> What's failing in it<span class="inv-what muted"></span> <span class="muted inv-span" data-inv-span></span>
       <span class="inv-picked hidden"></span><button type="button" class="link inv-unfold hidden" data-inv-unfold>Show all again</button></h3>
-      <div class="inv-parts"><div id="inv-codes-part"><h4>By HTTP code</h4>
+      <div class="inv-parts"><div class="inv-fold-all muted">Sections: <button type="button" class="link" data-inv-parts="open">Expand all</button> · <button type="button" class="link" data-inv-parts="close">Collapse all</button> <span class="muted">· a closed section is read when you open it</span></div><details class="inv-part" id="inv-codes-part" data-part="codes" open><summary><h4>By HTTP code</h4><span class="inv-part-n muted"></span></summary>
         <p class="muted">Every failed request in the look-back window by its HTTP code: server errors (5xx) first, then
         responses not sent in full and failed runs with no HTTP status (code 0, a function or job not called over HTTP),
         each with why, then the caller's (4xx). Open a code for the endpoints that return it; <strong>Samples</strong>
-        lists that code's latest failures there.</p><div id="inv-codes-out"></div></div>
-      <div id="inv-ops-part"><h4>Failing endpoints</h4>
+        lists that code's latest failures there.</p><div id="inv-codes-out"></div></details>
+      <details class="inv-part" id="inv-ops-part" data-part="endpoints" open><summary><h4>Failing endpoints</h4><span class="inv-part-n muted"></span></summary>
         <p class="muted">Requests that failed in the look-back window, by endpoint and the service that answered. <strong>Samples</strong>
-        lists the latest failures of one.</p><div id="inv-ops-out"></div></div>
-      <div id="inv-exc-part"><h4>Exceptions</h4>
+        lists the latest failures of one.</p><div id="inv-ops-out"></div></details>
+      <details class="inv-part" id="inv-exc-part" data-part="exceptions" open><summary><h4>Exceptions</h4><span class="inv-part-n muted"></span></summary>
         <p class="muted">Exceptions in the look-back window by type, operation and service, including ones thrown where the request
-        still succeeded. <strong>Follow</strong> opens the latest one's request end to end.</p><div id="inv-exc-out"></div></div>
-      <div id="inv-dep-part"><h4>Failing dependencies</h4>
+        still succeeded. <strong>Follow</strong> opens the latest one's request end to end.</p><div id="inv-exc-out"></div></details>
+      <details class="inv-part" id="inv-dep-part" data-part="dependencies" open><summary><h4>Failing dependencies</h4><span class="inv-part-n muted"></span></summary>
         <p class="muted">Calls it made that failed (databases, queues, other APIs), by type and target. <strong>Follow</strong> opens
-        a request with one of those failed calls.</p><div id="inv-dep-out"></div></div>
-      <div id="inv-chg-part"><h4>Recent changes</h4>
+        a request with one of those failed calls.</p><div id="inv-dep-out"></div></details>
+      <details class="inv-part" id="inv-chg-part" data-part="changes" open><summary><h4>Recent changes</h4><span class="inv-part-n muted"></span></summary>
         <p class="muted">Changes to the component, the apps that report to it and its gateways, from Azure's change history
-        (settings, configuration, scale). Code deployments don't appear here.</p><div id="inv-chg-out"></div></div></div></div>
+        (settings, configuration, scale). Code deployments don't appear here.</p><div id="inv-chg-out"></div></details></div></div>
     <div class="inv-step hidden" id="inv-samples"><h3><span class="q-num">3</span> Its latest failures<span class="inv-what muted"></span> <span class="muted inv-span" data-inv-span></span>
       <span class="inv-picked hidden"></span><button type="button" class="link inv-unfold hidden" data-inv-back-samples>Back to the samples</button></h3><div class="inv-body"></div></div>
     <div class="inv-step hidden" id="inv-request"><h3><span class="q-num">4</span> One request end to end<span class="inv-what muted"></span>

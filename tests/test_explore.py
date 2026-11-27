@@ -563,3 +563,36 @@ def test_diagnostics_lists_detectors_then_runs_one_at_a_time(monkeypatch):
     one = detectors.run_one(Arm(), "/r", "other-b")
     assert one["status"] == "warning" and calls == ["/r/detectors/other-b"]
     assert "error" in detectors.run_one(Arm(), "/r", "missing")
+
+
+def test_a_detector_answer_is_read_once_for_the_check_the_tab_and_its_count(monkeypatch):
+    from healthconsole.core.arm import ArmTimeout
+    from healthconsole.core.credentials import Identity
+    from healthconsole.core.explore import detectors
+    listed = [{"name": "oomkilled", "title": "OOM-Killed Pods", "category": "Cluster and Control Plane Availability and Performance"}]
+    monkeypatch.setattr(detectors, "available", lambda client, rid: (listed, "2024-01-01", None, None))
+    calls, fail = [], []
+
+    class Arm:
+        identity, is_fresh = Identity("oid-1", "a", "t-1"), False
+
+        def get(self, path, version, params=None, tolerate=()):
+            calls.append(path)
+            if fail:
+                raise ArmTimeout("slow")
+            return {"properties": {"status": {"statusId": 0}, "dataset": []}}
+
+        def api_version(self, rid):
+            return "2024-01-01"
+    check = detectors.run(Arm(), "/R")  # the health check's set is the tab's: availability counts
+    assert [r["name"] for r in check["results"]] == ["oomkilled"] and check["results"][0]["status"] == "critical"
+    assert detectors.run_one(Arm(), "/r", "oomkilled")["status"] == "critical" and len(calls) == 1  # the tab reuses it
+    other = Arm()
+    other.identity = Identity("oid-2", "b", "t-1")
+    detectors.run_one(other, "/r", "oomkilled")
+    assert len(calls) == 2  # another viewer reads with their own access
+    fresh = Arm()
+    fresh.is_fresh = True
+    fail.append(True)
+    assert "error" in detectors.run_one(fresh, "/r", "oomkilled") and len(calls) == 3  # Refresh asks again
+    assert "error" in detectors.run_one(fresh, "/r", "oomkilled") and len(calls) == 4  # and a failed read isn't kept

@@ -355,9 +355,9 @@ async function renderVaultExpiry(node) {
 
 function factsHtml(section) {
   if (section.table) {
-    return table(section.table.columns, section.table.rows.map((r) => r.map((cell) => esc(fmt(cell)))));
+    return table(section.table.columns, section.table.rows.map((r) => r.map((cell) => fmt(cell))));
   }
-  return table(["", "", ""], section.facts.map((f) => [esc(f.label), esc(fmt(f.value)), f.status ? pill(f.status) : ""]))
+  return table(["", "", ""], section.facts.map((f) => [esc(f.label), fmt(f.value), f.status ? pill(f.status) : ""]))
     .replace("<tr><th></th><th></th><th></th></tr>", "");
 }
 

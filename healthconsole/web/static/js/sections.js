@@ -131,8 +131,8 @@ const CI_LOOK_BACK = [["", "default"], ["1", "1 hour"], ["6", "6 hours"], ["24",
   ["168", "7 days"], ["336", "14 days"], ["720", "30 days"]];
 const ciSpan = (hours) => (hours >= 24 && hours % 24 === 0 ? `last ${hours / 24 === 1 ? "24 h" : `${hours / 24} days`}` : `last ${hours === 1 ? "hour" : `${hours} h`}`);
 
-// Every workload in scope, problems or not: its name opens Details (describe, pods, events, YAML), Dependencies and
-// Path; its HPA and last rollout as columns.
+// Every workload in scope, problems or not: its name opens Details (describe, pods, events, YAML) and Dependencies;
+// its HPA and last rollout as columns.
 function allWorkloadsTable(k) {
   const hpas = new Map((k.hpas || []).map((h) => [`${h.namespace}|${h.workload}`, h]));
   const rolled = new Map((k.rollouts || []).map((r) => [`${r.namespace}|${r.workload}`, r]));
@@ -141,7 +141,7 @@ function allWorkloadsTable(k) {
     return [esc(w.namespace), esc(w.kind || w.workload.split("/")[0]), workloadButton(w.namespace, w.workload, w.workload.split("/").slice(1).join("/")),
       w.desired == null ? '<span class="muted">–</span>' : `<span data-v="${w.desired ? (w.ready || 0) / w.desired : 1}">${fmt(w.ready || 0)}/${fmt(w.desired)}${short ? ` ${pill("warning")}` : ""}</span>`,
       h ? `${fmt(h.min)}–${fmt(h.max)}` : '<span class="muted">none</span>',
-      h ? `${fmt(h.current)}${h.current >= h.max ? ` ${pillHtml("critical", "at max")}` : ""}<div class="muted">${esc(h.targets)}</div>` : '<span class="muted">–</span>',
+      h ? `${fmt(h.current)}${h.current >= h.max ? ` ${pillHtml("critical", "at max")}${h.at_max_since ? ` <span class="muted" title="since ${esc(new Date(h.at_max_since).toLocaleString())}">for ${esc(sinceText(h.at_max_since))}</span>` : ""}` : ""}<div class="muted">${esc(h.targets)}</div>` : '<span class="muted">–</span>',
       rolloutHtml(rolled.get(`${w.namespace}|${w.workload}`)),
       w.findings ? `${pill(SEVERITY_STATUS[w.severity] || "info")} ${fmt(w.findings)}` : '<span class="ok">✓</span>'];
   }), "k-workloads");
@@ -269,7 +269,42 @@ function topConsumersHtml(top, pools, by = "cpu") {
 }
 
 // Workloads' pages: one answer each, with the toolbar above them all; the last one opened is kept in this browser.
-const AKS_SUBS = [["problems", "What's wrong now"], ["workloads", "All workloads"], ["capacity", "Capacity"], ["setup", "Setup risks"], ["evidence", "Pods & events"]];
+const AKS_SUBS = [["problems", "What's wrong now"], ["workloads", "All workloads"], ["memory", "Memory & scaling"], ["capacity", "Capacity"], ["setup", "Setup risks"], ["evidence", "Pods & events"]];
+
+// Memory & scaling: one row per workload with the facts a memory or scaling problem shows in, side by side and sortable.
+// The Kubernetes API gives now (replicas, HPA at max since, memory against request, runtime caps); Container Insights or
+// the monitoring tool the week (restarts, OOM kills; the tool also memory against limit and HPA time at max).
+const capSummary = (caps) => (caps || []).filter((c) => c.runtime || c.cap_mib != null).map((c) => `${esc(c.runtime)}${c.of_limit != null
+  ? ` ${fmt(c.of_limit)}% of limit` : c.cap_mib != null ? ` ${memText(c.cap_mib)}` : " no cap"}`).join("<br>") || '<span class="muted" title="None in its env or arguments; the image or an envFrom may still set one">none in its spec</span>';
+function memoryScalingHtml(k, week) {
+  const hpas = new Map((k.hpas || []).map((h) => [`${h.namespace}|${h.workload}`, h]));
+  const weekRows = new Map((week.workloads || []).map((r) => [`${r.namespace}|${r.workload}`, r]));
+  const atMaxShare = new Map((week.hpas || []).map((r) => [`${r.namespace}|${r.hpa}`, r.at_max_percent]));
+  const seen = new Set();
+  const rows = (k.workload_rows || []).filter((w) => w.kind !== "CronJob").map((w) => {
+    const name = w.workload.split("/").slice(1).join("/"), key = `${w.namespace}|${name}`, h = hpas.get(`${w.namespace}|${w.workload}`), r = weekRows.get(key) || {};
+    seen.add(key);
+    const share = h ? atMaxShare.get(`${w.namespace}|${h.name}`) : undefined;
+    return [esc(w.namespace), workloadButton(w.namespace, w.workload, name),
+      h ? `<span data-v="${h.max ? h.current / h.max : 0}">${fmt(h.current)} of ${fmt(h.max)}</span>${h.current >= h.max ? ` ${pillHtml("critical", "at max", { rank: null })}` : ""}`
+        : w.desired == null ? "–" : `<span data-v="0">${fmt(w.ready || 0)}/${fmt(w.desired)}</span> <span class="muted">no HPA</span>`,
+      `<span data-v="${h && h.at_max_since ? Date.now() - new Date(h.at_max_since) : -1}">${h && h.at_max_since ? `for ${esc(sinceText(h.at_max_since))}` : "–"}</span>${share != null
+        ? `<div class="muted" data-share="${share}">${fmt(share)}% of the last 7 days</div>` : ""}`,
+      w.memory_of_request == null ? '<span class="muted" data-v="-1">–</span>' : `<span data-v="${w.memory_of_request}" class="${w.memory_of_request >= 100 ? "worse" : ""}">${fmt(w.memory_of_request)}%</span>`,
+      r.max_of_limit == null ? '<span class="muted" data-v="-1">–</span>' : `<span data-v="${r.max_of_limit}" class="${r.max_of_limit >= 90 ? "worse" : ""}">${fmt(r.max_of_limit)}%</span>`,
+      r.restarts == null ? '<span class="muted" data-v="-1">–</span>' : `<span data-v="${r.restarts}" class="${r.restarts ? "worse" : ""}">${fmt(r.restarts)}</span>`,
+      r.oom_pods == null ? '<span class="muted" data-v="-1">–</span>' : `<span data-v="${r.oom_pods}" class="${r.oom_pods ? "worse" : ""}">${fmt(r.oom_pods)}</span>`,
+      capSummary(w.runtime_caps)];
+  });
+  const unknown = (week.workloads || []).filter((r) => !seen.has(`${r.namespace}|${r.workload}`) && (r.restarts || r.oom_pods));
+  const from = week.found ? `the last 7 days from <strong>${esc(week.source)}</strong>` : `no 7-day source: ${esc(week.reason || "")}`;
+  return `<p class="muted">Facts to read a memory or scaling problem from, side by side; sort by any column (click its header). <em>Now</em> comes
+      from the Kubernetes API; restarts, OOM kills${week.source && week.source !== "Container Insights" ? ", memory against limit and HPA time at max" : ""} from ${from}.
+      A workload's name opens its details, with each pod's memory over the week.</p>
+    ${table(["Namespace", "Workload", "Replicas (HPA)", "At max", "Memory now, of request", "Memory peak, of limit (7 d)", "Restarts (7 d)", "Pods OOM-killed (7 d)", "Runtime memory cap"], rows, "k-memory")}
+    ${unknown.length ? `<p class="muted">Also in the week, not running now: ${unknown.map((r) => `${esc(r.namespace)}/${esc(r.workload)} (${fmt(r.restarts)} restarts, ${fmt(r.oom_pods)} OOM-killed pods)`).join(", ")}.</p>` : ""}
+    <details class="mon-query"><summary>Queries sent</summary>${queryBlock({ queries: week.queries || [] })}</details>`;
+}
 function subBadge(body, key, n, bad) {
   const badge = body.querySelector(`[data-sub-n="${key}"]`);
   if (!badge) return;
@@ -302,6 +337,7 @@ function wireAksSubs(body, counts) {
     body.querySelectorAll(".aks-sub").forEach((d) => d.classList.toggle("hidden", d.dataset.sub !== key));
     body.querySelectorAll("[data-aks-sub]").forEach((b) => { b.classList.toggle("active", b.dataset.aksSub === key); b.setAttribute("aria-selected", String(b.dataset.aksSub === key)); });
     stored.set("ahc.aksSub", key === "problems" ? null : key);
+    if (key === "memory" && body.loadMemoryScaling) body.loadMemoryScaling();
     renderTabTools(body);
   };
   for (const [key, [n, bad]] of Object.entries(counts)) subBadge(body, key, n, bad);
@@ -334,7 +370,7 @@ async function tabWorkloads(node, body, includeSystem = state.aksSystem || false
   let html = `<div class="tab-tools" data-showing="${esc(JSON.stringify(showing.filter(Boolean)))}" data-changed="${state.aksCiHours || includeSystem ? 1 : 0}">
     <div class="list-tools aks-tools"><label class="tool-field"><span class="tool-label">Namespace</span><select id="aks-ns" data-ns-filter aria-label="Show one namespace" title="Every section to one namespace; the count is its rows in the sections with problems. System namespaces are hidden from All namespaces: pick one, or All namespaces, including system"><option value="">All namespaces</option></select></label>
       <label class="tool-field"><span class="tool-label">Go to workload</span><span class="go-wrap"><input type="search" id="aks-go" autocomplete="off" spellcheck="false" placeholder="Go to workload…" aria-label="Go to a workload"
-        title="Type part of its name (or namespace/name) and pick it: its Details, Dependencies and Path open below" role="combobox" aria-expanded="false" aria-controls="aks-go-list"><span class="go-list" id="aks-go-list" role="listbox" hidden></span></span></label>
+        title="Type part of its name (or namespace/name) and pick it: its Details and Dependencies open below" role="combobox" aria-expanded="false" aria-controls="aks-go-list"><span class="go-list" id="aks-go-list" role="listbox" hidden></span></span></label>
       <label class="tool-field"><span class="tool-label">Filter</span><input type="search" id="aks-filter" placeholder="workload, pod, reason…" aria-label="Filter the workload sections"></label>
       ${lookBack ? `<label class="tool-field" title="How far back restarts, OOM kills and warning events look, in Container Insights and ${esc(oomTool ? toolLabel(oomTool) : "the monitoring tool")}. Default: ${esc(lookBackDefaults)} (Settings → AKS). The workspace keeps 30 days by default"><span class="tool-label">Look back</span>
         <select id="ci-look-back">${CI_LOOK_BACK.map(([v, l]) => `<option value="${v}" ${v === (state.aksCiHours || "") ? "selected" : ""}${v ? "" : ` title="${esc(lookBackDefaults)}"`}>${l}</option>`).join("")}</select></label>` : ""}
@@ -361,7 +397,7 @@ async function tabWorkloads(node, body, includeSystem = state.aksSystem || false
 
   html += `<div class="aks-sub" data-sub="workloads"><section class="layer" data-jump="All workloads"><h4>All workloads ${kubeHowButton("k-workloads")}</h4>
     ${k.available ? `<p class="muted">Everything in the cluster, problems or not, like the portal's Workloads: pick a kind below, and the
-      <em>Namespace</em> box at the top narrows it. A workload's name opens its details (describe, pods, events, YAML), dependencies and path;
+      <em>Namespace</em> box at the top narrows it. A workload's name opens its details (describe, pods, events, YAML) and dependencies;
       a pod's opens the pod.</p>${systemNote}
       <div class="seg k-kinds" data-k-kinds role="group" aria-label="Kind to list">${K_KINDS.map(([v, label, view]) => {
         const n = view === "pods" ? (k.pod_rows || []).length : view === "jobs" ? (k.job_rows || []).length
@@ -380,6 +416,8 @@ async function tabWorkloads(node, body, includeSystem = state.aksSystem || false
     <section class="layer" data-jump="Top consumers"><h4>Top consumers <span class="muted">· now</span></h4>
       ${k.available ? `<div class="top-consumers">${topConsumersHtml(k.top, k.pools || [])}</div>` : needsApi("Live use per workload")}</section></div>`;
 
+  html += `<div class="aks-sub" data-sub="memory"><section class="layer" data-jump="Memory & scaling"><h4>Memory &amp; scaling</h4>
+    ${k.available ? '<div class="k-memory-out"><p class="muted">Read when you open it.</p></div>' : needsApi("Memory & scaling")}</section></div>`;
   html += `<div class="aks-sub" data-sub="setup"><section class="layer" data-jump="Setup risks"><h4>Setup risks ${kubeHowButton("k-config")}</h4>
     ${k.available ? `<p class="muted">How workloads are set up: single replicas, missing requests or limits, HPA and PodDisruptionBudget settings. Worth fixing before a
       peak, but common on healthy clusters, so yellow at most.</p>${configRows.length ? findingsTable(configRows, "k-config") : '<p class="ok">✓ None.</p>'}` : needsApi("Setup risks")}</section></div>`;
@@ -437,6 +475,15 @@ async function tabWorkloads(node, body, includeSystem = state.aksSystem || false
     </section></div>`;
   body.innerHTML = html;
   renderProblems(body, problems, data.timings);
+  body.loadMemoryScaling = () => {  // read once per drawing, when Memory & scaling is first opened
+    const out = body.querySelector(".k-memory-out");
+    if (!out || out.dataset.read) return;
+    out.dataset.read = "1";
+    out.innerHTML = loading("Reading the week: restarts, OOM kills, memory and HPA time at max…");
+    api("api/explore/memory-scaling", { params: { id: node.id, ...(oomTool ? toolParams(oomTool) : {}) } })
+      .catch((error) => ({ found: false, workloads: [], hpas: [], queries: [], reason: error.message }))
+      .then((week) => { if (!out.isConnected) return; out.innerHTML = memoryScalingHtml(k, week); if (body.reapplyFilter) body.reapplyFilter(); });
+  };
   wireAksSubs(body, {
     problems: [problems.groups.filter((g) => g.namespace || g.workload).length, problems.groups.length > 0],
     workloads: [(k.workload_rows || []).length, false],

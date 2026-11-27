@@ -9,7 +9,7 @@ from .. import alert_check
 from .matching import AZURE_ID, cached, match, name_index
 from .newrelic import NewRelicClient, NewRelicError
 from .provider import (ALERT_HISTORY, ALERTS, ENTITIES, ENTITY_SEARCH_LIMIT, LOG_LIMIT, LOGS, OOM_KILLS, PARTITION, WARNING_EVENTS, WORKLOADS,
-                       REQUESTS, RUNTIME_MEMORY, WORKLOAD_PODS, WORKLOAD_USAGE,
+                       CLUSTER_WEEK, REQUESTS, RUNTIME_MEMORY, WORKLOAD_USAGE,
                        REPORT_LIMIT, SEARCHABLE_NAME, Provider, ProviderError, match_entity)
 
 CACHE_SECONDS = 60
@@ -74,7 +74,7 @@ def _window(window):
 class NewRelicProvider(Provider):
     kind = "newrelic"
     label = "New Relic"
-    capabilities = (ALERTS, ENTITIES, LOGS, ALERT_HISTORY, OOM_KILLS, WARNING_EVENTS, WORKLOADS, REQUESTS, WORKLOAD_PODS, WORKLOAD_USAGE,
+    capabilities = (ALERTS, ENTITIES, LOGS, ALERT_HISTORY, OOM_KILLS, WARNING_EVENTS, WORKLOADS, REQUESTS, WORKLOAD_USAGE, CLUSTER_WEEK,
                     RUNTIME_MEMORY)
     reports = ("errors", "slow")
 
@@ -450,7 +450,7 @@ class NewRelicProvider(Provider):
                     "workloads": [{"kind": k, "name": n} for k, n in sorted(found, key=lambda w: (order.index(w[0]), w[1]))]}
         return cached(self._key("workloads", cluster_name, namespace), CACHE_SECONDS, fetch, refresh)
 
-    # Workload path: requests from APM transactions, pods from Kubernetes container samples.
+    # Workload details: app names from APM transactions, usage and runtime memory from Kubernetes and APM samples.
     def _each_account(self, nrqls, key, read):
         """`read(rows per query, account)` over every account until one has data: (result, queries sent)."""
         sent = []
@@ -473,74 +473,6 @@ class NewRelicProvider(Provider):
                 names |= {n for n in rows[0].get("apps") or [] if n}
             return {"names": sorted(names), "queries": sent}
         return cached(self._key("apps"), 600, fetch, refresh)
-
-    def request_paths(self, app, refresh=False):
-        nrql = (f"SELECT count(*) FROM Transaction WHERE appName = {nrql_string(app)} FACET request.uri"
-                " SINCE 1 day ago LIMIT 50")
-
-        def fetch():
-            found, sent = self._each_account([nrql], "paths", lambda answers, _: [
-                str(r.get("facet") or r.get("request.uri") or "") for r in answers[0] if r.get("facet") or r.get("request.uri")])
-            return {"paths": found or [], "queries": sent}
-        return cached(self._key("paths", app), 600, fetch, refresh)
-
-    def requests(self, app, refresh=False):
-        where = f"FROM Transaction WHERE appName = {nrql_string(app)}"
-        what = ("SELECT count(*) AS total, filter(count(*), WHERE error IS true OR httpResponseCode LIKE '5%') AS errors,"
-                " percentile(duration, 95) AS p95")
-        nrqls = [f"{what} {where} SINCE 60 minutes ago", f"{what} {where} SINCE 10140 minutes ago UNTIL 10080 minutes ago",
-                 "SELECT count(*) AS total, filter(count(*), WHERE error IS true OR httpResponseCode LIKE '5%') AS errors"
-                 f" {where} SINCE 60 minutes ago TIMESERIES 1 minute"]
-
-        def period(rows):
-            row = (rows or [{}])[0]
-            p95 = row.get("p95")
-            p95 = next(iter(p95.values()), None) if isinstance(p95, dict) else p95
-            return {"total": row.get("total") or 0, "errors": row.get("errors") or 0,
-                    "p95_ms": round(p95 * 1000) if isinstance(p95, (int, float)) else None}
-
-        def read(answers, _):
-            now, week = period(answers[0]), period(answers[1])
-            if not now["total"] and not week["total"]:
-                return None
-            minutes = [[datetime.fromtimestamp(r["beginTimeSeconds"], timezone.utc).isoformat(), r.get("total") or 0,
-                        r.get("errors") or 0] for r in answers[2] if r.get("beginTimeSeconds") is not None]
-            return {"now": now, "week": week, "minutes": minutes}
-
-        def fetch():
-            found, sent = self._each_account(nrqls, "requests", read)
-            return {"found": bool(found), **(found or {"now": {}, "week": {}, "minutes": []}), "queries": sent}
-        return cached(self._key("requests", app), CACHE_SECONDS, fetch, refresh)
-
-    def workload_pods(self, cluster_name, namespace, kind, name, refresh=False):
-        field = dict(OWNERS).get(kind)
-        if not field or not all(K8S_CLUSTER.match(x or "") for x in (cluster_name, namespace, name)):
-            raise ProviderError("That isn't a cluster, namespace and workload New Relic could have.")
-        where = (f"FROM K8sContainerSample WHERE clusterName = {nrql_string(cluster_name)}"
-                 f" AND namespaceName = {nrql_string(namespace)} AND {field} = {nrql_string(name)}")
-        nrqls = [f"SELECT sum(restartCountDelta) AS restarts, uniqueCount(podName) AS pods {where} SINCE 60 minutes ago",
-                 f"SELECT sum(restartCountDelta) AS restarts, uniqueCount(podName) AS pods {where}"
-                 " SINCE 10140 minutes ago UNTIL 10080 minutes ago",
-                 f"SELECT uniqueCount(podName) AS pods, filter(uniqueCount(podName), WHERE isReady IS false) AS not_ready {where}"
-                 " SINCE 5 minutes ago",
-                 f"SELECT sum(restartCountDelta) AS restarts {where} SINCE 60 minutes ago TIMESERIES 5 minutes"]
-
-        def read(answers, _):
-            now, week, ready = ((rows or [{}])[0] for rows in answers[:3])
-            if not now.get("pods") and not week.get("pods"):
-                return None
-            restarts = int(now.get("restarts") or 0)
-            return {"now": {"restarts": restarts, "errors": restarts, "pods": now.get("pods") or 0,
-                            "not_ready": ready.get("not_ready") or 0},
-                    "week": {"restarts": int(week.get("restarts") or 0), "errors": int(week.get("restarts") or 0),
-                             "pods": week.get("pods") or 0},
-                    "minutes": [[datetime.fromtimestamp(r["beginTimeSeconds"], timezone.utc).isoformat(), None,
-                                 int(r.get("restarts") or 0)] for r in answers[3] if r.get("beginTimeSeconds") is not None]}
-
-        def fetch():
-            found, sent = self._each_account(nrqls, "pods", read)
-            return {"found": bool(found), **(found or {"now": {}, "week": {}, "minutes": []}), "queries": sent}
-        return cached(self._key("pods", cluster_name, namespace, kind, name), CACHE_SECONDS, fetch, refresh)
 
     def _workload_where(self, cluster_name, namespace, kind, name):
         field = dict(OWNERS).get(kind)
@@ -571,6 +503,66 @@ class NewRelicProvider(Provider):
             found, sent = self._each_account(nrqls, "usage", read)
             return {"found": bool(found), "containers": found or [], "queries": sent}
         return cached(self._key("usage", cluster_name, namespace, kind, name), 600, fetch, refresh)
+
+    def workload_memory(self, cluster_name, namespace, kind, name, refresh=False):
+        where = self._workload_where(cluster_name, namespace, kind, name)
+        nrqls = [f"SELECT average(memoryWorkingSetBytes) {where} FACET podName, containerName TIMESERIES 1 hour SINCE 7 days ago LIMIT MAX",
+                 f"SELECT sum(restartCountDelta) AS restarts, filter(count(*), WHERE reason = 'OOMKilled') AS oom {where}"
+                 " FACET podName TIMESERIES 1 hour SINCE 7 days ago LIMIT MAX"]
+
+        def read(answers, _):
+            pods, at = {}, lambda r: datetime.fromtimestamp(r["beginTimeSeconds"], timezone.utc).isoformat().replace("+00:00", "Z")
+            for r in answers[0]:  # one series per pod and container: added up per pod and hour
+                value = r.get("average.memoryWorkingSetBytes")
+                if value is None or r.get("beginTimeSeconds") is None:
+                    continue
+                pod = (r.get("facet") or [None])[0] if isinstance(r.get("facet"), list) else r.get("facet")
+                hours = pods.setdefault(pod, {"hours": {}, "restarts": [], "oom": []})["hours"]
+                hours[at(r)] = hours.get(at(r), 0) + value
+            for r in answers[1]:
+                pod = r.get("podName") or r.get("facet")
+                if pod not in pods or r.get("beginTimeSeconds") is None:
+                    continue
+                if r.get("restarts"):
+                    pods[pod]["restarts"].append([at(r), int(r["restarts"])])
+                if r.get("oom"):
+                    pods[pod]["oom"].append(at(r))
+            return {pod: {"points": [list(x) for x in sorted(v["hours"].items())], "restarts": v["restarts"], "oom": v["oom"]}
+                    for pod, v in pods.items()} or None
+
+        def fetch():
+            found, sent = self._each_account(nrqls, "memory", read)
+            return {"found": bool(found), "pods": found or {}, "queries": sent}
+        return cached(self._key("memory", cluster_name, namespace, kind, name), 600, fetch, refresh)
+
+    def cluster_week(self, cluster_name, refresh=False):
+        if not K8S_CLUSTER.match(cluster_name or ""):
+            raise ProviderError("That isn't a cluster name New Relic could have.")
+        cluster = nrql_string(cluster_name)
+        nrqls = [f"SELECT sum(restartCountDelta) AS restarts, filter(uniqueCount(podName), WHERE reason = 'OOMKilled') AS oomPods,"
+                 " max(memoryWorkingSetUtilization) AS maxOfLimit, average(requestedMemoryWorkingSetUtilization) AS avgOfRequest"
+                 f" FROM K8sContainerSample WHERE clusterName = {cluster}"
+                 " FACET namespaceName, deploymentName, statefulsetName, daemonsetName SINCE 7 days ago LIMIT MAX",
+                 "SELECT percentage(count(*), WHERE currentReplicas >= maxReplicas) AS atMax FROM K8sHpaSample"
+                 f" WHERE clusterName = {cluster} FACET namespaceName, displayName SINCE 7 days ago LIMIT MAX"]
+
+        def read(answers, _):
+            rows = []
+            for r in answers[0]:
+                facet = r.get("facet") or []
+                name = next((x for x in facet[1:] if x), None) if isinstance(facet, list) else None
+                if name:
+                    rows.append({"namespace": facet[0], "workload": name, "restarts": int(r.get("restarts") or 0),
+                                 "oom_pods": int(r.get("oomPods") or 0), "max_of_limit": _round(r.get("maxOfLimit")),
+                                 "avg_of_request": _round(r.get("avgOfRequest"))})
+            hpas = [{"namespace": (r.get("facet") or [None, None])[0], "hpa": (r.get("facet") or [None, None])[1],
+                     "at_max_percent": _round(r.get("atMax"))} for r in answers[1] if isinstance(r.get("facet"), list)]
+            return {"workloads": rows, "hpas": hpas} if rows or hpas else None
+
+        def fetch():
+            found, sent = self._each_account(nrqls, "week", read)
+            return {"found": bool(found), **(found or {"workloads": [], "hpas": []}), "queries": sent}
+        return cached(self._key("week", cluster_name), 600, fetch, refresh)
 
     def runtime_memory(self, app, refresh=False):
         names = ", ".join(nrql_string(n) for n in RUNTIME_METRICS.values())
@@ -641,6 +633,12 @@ OOM_ROW_LIMIT = 200  # kills listed one per row (newest first); every kill is st
 OOM_DETAIL_LIMIT = 25  # of those, the newest get memory readings (two reads each); the kernel's line covers the rest
 OOM_MATCH = (-30, 180)  # seconds from the node's event to the restart sample of the killed container
 OOM_SAME_KILL = 10  # seconds: an OOMKilling and a SystemOOM this close on one node are one kill
+
+
+def _round(value):
+    return round(value) if isinstance(value, (int, float)) else None
+
+
 K8S_CLUSTER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,100}$")
 OWNERS = (("Deployment", "deploymentName"), ("StatefulSet", "statefulsetName"), ("DaemonSet", "daemonsetName"),
           ("Job", "jobName"))

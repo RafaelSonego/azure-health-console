@@ -121,26 +121,6 @@ def move_legacy_scope(file, tenant_key, legacy):
         return _write(file, data)
 
 
-def apply_workload_link(file, tenant_key, link):
-    """Saves one workload's link, replacing the one with the same key; a link with no front door, app or component
-    removes it. Validated before anything is written."""
-    file = Path(file).expanduser()
-    keep = {k: v for k, v in link.items() if v not in (None, "", [], {})}
-    with _lock:
-        data = _load(file)
-        entry = _tenant_entry(data, tenant_key)
-        current = [dict(x) for x in entry.get("workload_links") or [] if str(x.get("key", "")).lower() != link["key"].lower()]
-        if any(keep.get(k) for k in ("apim", "agw", "app", "component")):
-            current.append(keep)
-        if current:
-            entry["workload_links"] = CommentedSeq(CommentedMap(
-                (k, CommentedSeq(CommentedMap(i.items()) for i in v) if isinstance(v, list) else v) for k, v in x.items())
-                for x in current)
-        else:
-            entry.pop("workload_links", None)
-        return _write(file, data)
-
-
 def apply_alert_rules(file, tenant_key, rules):
     """Replaces one tenant's alert rules (each as the page sends it: kind, scope, signals, …), validated first."""
     file = Path(file).expanduser()

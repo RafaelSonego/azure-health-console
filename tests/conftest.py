@@ -100,3 +100,12 @@ def _no_real_log_folder(tmp_path, monkeypatch):
     monkeypatch.setitem(config.DEFAULTS, "logs", {"dir": str(tmp_path / "default-logs"), "keep_days": 30})
     yield
     eventlog.configure(None)
+
+
+@pytest.fixture(autouse=True)
+def _fresh_detector_answers():
+    """Detector answers are kept for 10 minutes across calls: none may leak from one test into another."""
+    from healthconsole.core.explore import detectors
+    detectors._results.clear()
+    yield
+    detectors._results.clear()

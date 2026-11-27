@@ -251,7 +251,6 @@ async function tabAppInsights(node, body) {
   if (!data.available) {
     body.innerHTML = aiLinkHtml(data.link);
     relink();
-    sitePathSection(node, body);
     return;
   }
   const span = `${new Date(data.from).toLocaleString()} → ${new Date(data.to).toLocaleTimeString()}`;
@@ -287,14 +286,5 @@ async function tabAppInsights(node, body) {
     stored.set("ahc.aiWindow", event.target.value);
     tabAppInsights(node, body).catch((error) => { body.innerHTML = errorHtml(error); });
   });
-  sitePathSection(node, body);
-}
-
-// An App Service's path: the App Gateway and API Management in front of it and its requests (workload path).
-function sitePathSection(node, body) {
-  if ((node.type || "").toLowerCase() !== SITE_TYPE) return;
-  body.insertAdjacentHTML("beforeend", `<section class="layer"><h4>Path <button type="button" class="link" id="site-path-read"
-    title="Each hop in front of the app (App Gateway, API Management) and its requests, against the same hour last week">Read</button></h4><div id="site-path"></div></section>`);
-  $("site-path-read").addEventListener("click", () => loadPath($("site-path"), { site: node.id }));
 }
 

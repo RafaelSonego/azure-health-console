@@ -393,6 +393,7 @@ async function poll(jobId) {
     if (state.quickDrawn && state.detailNode) state.pendingDetail = { node: state.detailNode, tab: state.detailTab };  // stay on your tab
     state.quickDrawn = false;
     state.snapshot = job.snapshot;
+    Object.assign(state, { jobDone: jobId, graphCheckedAt: Date.now() });
     if (job.snapshot.kind === "group" && state.target && state.target.group) keepGroupCheck(state.target, job.snapshot);
     showMessage("");
     renderSnapshot();
@@ -615,7 +616,7 @@ const diagramTools = () => `<span class="dg-tools"><input type="search" class="d
   <button type="button" data-dz="-1" title="Zoom out">−</button><span class="dg-zoom">100%</span>
   <button type="button" data-dz="1" title="Zoom in">+</button><button type="button" data-dz="fit" title="Fit the width">Fit</button>
   <button type="button" data-dz="full" title="Full screen">⤢</button><button type="button" data-dz="tab">Open in new tab</button>
-  ${minButton("graph")}</span>`;
+  ${minButton("graph")}<span class="dg-refresh muted"></span></span>`;
 
 const diagramTitle = (s) => s.title
   || `${(s.nodes.find((n) => n.id === s.root_id) || {}).name || "Resource"} and what it connects to`;
@@ -650,6 +651,80 @@ async function drawDiagram(s) {
   if (state.diagramFilter) filterDiagram(state.diagramFilter, false);
   else diagramFocusing.refresh();
   [graph.querySelector(".diagram").scrollLeft, graph.querySelector(".diagram").scrollTop] = scroll;
+  renderGraphClock();
+}
+
+// The graph checks again by itself while it's on screen (graph.refresh_minutes): the same target in the background, then
+// only the graph is redrawn, keeping zoom, scroll and filter. Never on top of a check you started, which takes over.
+const graphOnScreen = () => {
+  const t = state.target;
+  return !!t && state.view === "browse" && !document.hidden && !state.graphMin && (t.kind === "group" ? state.groupView === "graph" : t.depth > 0)
+    && !!$("graph").querySelector(".diagram svg") && !$("graph").classList.contains("as-table");
+};
+
+function renderGraphClock() {
+  const box = $("graph").querySelector(".dg-refresh"), minutes = state.graphRefreshMinutes || 0;
+  if (!box) return;
+  if (!minutes || !state.graphCheckedAt) { box.innerHTML = ""; return; }
+  const at = new Date(state.graphCheckedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  const next = Math.max(0, Math.ceil((state.graphCheckedAt + minutes * 60000 - Date.now()) / 60000));
+  const when = state.jobDone !== state.jobId ? "next when this check finishes" : state.graphDueNow || !next ? "checking again shortly" : `next in ${next} min`;
+  box.innerHTML = state.graphRefreshing ? `checked ${esc(at)} · checking again…`
+    : state.graphPaused ? `checked ${esc(at)} · re-checks paused <button type="button" class="link" data-graph-refresh="resume">Resume</button>`
+      : `<span title="Checks this graph again by itself every ${minutes} min while it's on screen (Settings → Dependency graph)">checked ${esc(at)} · ${when}</span>
+        <button type="button" class="link" data-graph-refresh="pause">Pause</button>`;
+}
+
+async function graphRefreshTick() {
+  renderGraphClock();
+  const minutes = state.graphRefreshMinutes || 0;
+  if (!minutes || state.graphRefreshing || state.graphPaused || state.busy || state.jobDone !== state.jobId || !graphOnScreen()
+    || (!state.graphDueNow && Date.now() - (state.graphCheckedAt || Date.now()) < minutes * 60000)) return;
+  state.graphDueNow = false;
+  const target = state.target, before = state.snapshot, owner = state.jobId;
+  const stillOurs = () => state.target === target && state.jobId === owner;
+  state.graphRefreshing = true;
+  renderGraphClock();
+  try {
+    const body = target.kind === "group" ? { resource_group: target.group } : { resource_id: target.id, depth: target.depth, inbound: target.inbound };
+    const { job_id: jobId } = await api("api/snapshots", { method: "POST", body });
+    let job = { status: "running" };
+    while (job.status === "running" && stillOurs()) {
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+      job = await api(`api/snapshots/${jobId}`);
+    }
+    if (job.status !== "done" || !stillOurs()) return;  // you started another check, or this one failed: the next tick tries again
+    Object.assign(state, { snapshot: job.snapshot, jobId, jobDone: jobId });
+    if (target.kind === "group") keepGroupCheck(target, job.snapshot);
+    await drawDiagram(job.snapshot);
+    markNewProblems(before, job.snapshot);
+  } catch (error) {
+    if (error.signedOut) return;
+  } finally {
+    state.graphRefreshing = false;
+    if (state.target === target) state.graphCheckedAt = Date.now();
+    renderGraphClock();
+  }
+}
+setInterval(graphRefreshTick, 15000);
+document.addEventListener("visibilitychange", () => { if (!document.hidden) graphRefreshTick(); });
+document.addEventListener("click", (event) => {
+  const button = event.target.closest && event.target.closest("[data-graph-refresh]");
+  if (!button) return;
+  state.graphPaused = button.dataset.graphRefresh === "pause";
+  if (!state.graphPaused) state.graphDueNow = true;  // Resume checks at once (the clock keeps the real last check)
+  graphRefreshTick();
+});
+
+// A box that turned critical or warning since the previous check pulses faster for a minute.
+const PROBLEM_RANK = { critical: 2, warning: 1 };
+function markNewProblems(before, after) {
+  const was = new Map(((before || {}).nodes || []).map((n) => [n.id, PROBLEM_RANK[n.status] || 0]));
+  for (const n of after.nodes || []) {
+    if ((PROBLEM_RANK[n.status] || 0) <= (was.get(n.id) || 0)) continue;
+    const box = $("graph").querySelector(`.dg-node[data-id="${CSS.escape(n.id)}"]`);
+    if (box) { box.classList.add("dg-new"); setTimeout(() => box.classList.remove("dg-new"), 60000); }
+  }
 }
 
 function zoomDiagram(z) {
@@ -723,7 +798,7 @@ $("graph").addEventListener("keydown", (event) => {
 
 function fmt(value) {
   if (value == null || value === "") return "–";
-  if (typeof value !== "number") return String(value);
+  if (typeof value !== "number") return esc(String(value));  // outside text: escaped here, so callers never wrap it
   return Number.isInteger(value) ? value.toLocaleString() : value.toLocaleString(undefined, { maximumFractionDigits: 2 });
 }
 

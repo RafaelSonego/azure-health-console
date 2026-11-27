@@ -238,3 +238,10 @@ def test_the_console_search_and_the_diagram_filter_share_the_type_names():
     from healthconsole.core import taxonomy
     assert "k8s" in taxonomy.names_for("Microsoft.ContainerService/managedClusters")
     assert "microsoft.containerservice/managedclusters" in taxonomy.types_called("k8s")
+
+
+def test_problem_boxes_pulse_and_stay_still_for_reduced_motion():
+    svg = diagram.render_svg(snapshot(nic_status="critical"), show_all=True)
+    assert "dg-node st-critical" in svg and "@keyframes dg-blink" in svg
+    assert ".st-critical .dg-box { animation: dg-pulse-critical" in svg and ".st-warning .dg-box { animation: dg-pulse-warning" in svg
+    assert "@media (prefers-reduced-motion: reduce) { .st-critical .dg-box, .st-warning .dg-box, .dg-node .dg-dot { animation: none" in svg

@@ -34,7 +34,7 @@ from ..core.arm import AccessDenied, ArmClient, ArmError, Throttled, WriteBlocke
 from ..core.credentials import AzureCliTokenProvider, CredentialError
 from ..core.discovery import DiscoveryOptions
 from ..core.explore import (activity, advice, aks, appinsights, dependencies, details, detectors, help_guides, kube, metrics,
-                            kube_yaml, pod_detail, scaling, workload_detail, workload_fit, workload_path, workload_problems)
+                            kube_yaml, pod_detail, scaling, workload_detail, workload_memory, workload_names, workload_problems)
 from ..core.health import HealthOptions
 from ..core.localfiles import private_dir, read_private_text, write_private_text
 from ..signin import AzLogin, SignInError, accounts as signin_accounts_read, logout as signin_logout
@@ -1700,6 +1700,20 @@ def create_blueprint(client_for, settings, url_prefix="", config_file=None, star
         source = investigate_source()
         return investigate_answer(lambda: source.codes(request.args.get("window", "1h")))
 
+    @blueprint.get("/api/investigate/endpoint-details")
+    def investigate_endpoint_details():
+        """Backends and callers of the endpoints a table lists: `endpoints` is JSON [{operation, role, code}]."""
+        try:
+            endpoints = json.loads(request.args.get("endpoints", "[]"))
+        except ValueError:
+            abort(400, "endpoints must be JSON")
+        if not isinstance(endpoints, list) or not all(
+                isinstance(e, dict) and all(isinstance(e.get(k, ""), str) and len(e.get(k, "")) <= 500
+                                            for k in ("operation", "role", "code")) for e in endpoints):
+            abort(400, "endpoints must be a list of {operation, role, code} strings")
+        source = investigate_source()
+        return investigate_answer(lambda: source.endpoint_details(endpoints, request.args.get("window", "1h")))
+
     @blueprint.get("/api/investigate/trace")
     def investigate_trace():
         source, at = investigate_source(), investigate_at(required=False)
@@ -1786,96 +1800,29 @@ def create_blueprint(client_for, settings, url_prefix="", config_file=None, star
                        rows=found["rows"], total=found.get("total", len(found["rows"])), queries=found["queries"],
                        notes=found["notes"])
 
-    # ---------------------------------------------------------------- workload path (decision 150)
+    # ---------------------------------------------------------------- a workload's details
 
-    apim_apis = TtlCache("API Management APIs", 3600)
-
-    def path_workload(source):
-        """The workload a path request names: an AKS one (cluster, namespace, kind, workload) or an App Service (site).
-        {key, name, cluster_id, namespace, kind} or {key, name, site_id}; 400 when it isn't one."""
-        site = (source.get("site") or "").rstrip("/")
-        if site:
-            if not workload_path.SITE_ID.match(site):
-                abort(400, "site must be an App Service ID")
-            return {"key": site.lower(), "name": site.rsplit("/", 1)[-1], "site_id": site}
+    def workload_args(source):
+        """The AKS workload a request names (cluster, namespace, kind, workload): {name, cluster_id, namespace, kind};
+        400 when it isn't one."""
         cluster, namespace = (source.get("cluster") or "").rstrip("/"), source.get("namespace") or ""
         kind, name = source.get("kind") or "", source.get("workload") or ""
         try:
-            workload_path.check_workload(cluster, namespace, kind, name)
+            workload_names.check_workload(cluster, namespace, kind, name)
         except ValueError as error:
             abort(400, str(error))
-        return {"key": workload_path.workload_key(cluster, namespace, kind, name), "name": name, "cluster_id": cluster,
-                "namespace": namespace, "kind": kind}
+        return {"name": name, "cluster_id": cluster, "namespace": namespace, "kind": kind}
 
-    def path_tool():
-        """(the Scope bar's monitoring tool as a provider, its capabilities, why not) for this request."""
+    def monitor_tool():
+        """(the Scope bar's monitoring tool as a provider, its capabilities) for this request."""
         monitor, blocked = chosen_monitor()
         source = None if blocked else monitors.provider_for(monitor)
-        return source, (getattr(source, "capabilities", ()) if source else ()), (blocked or {}).get("reason", "")
-
-    def saved_link(workload):
-        tenant, _ = tenant_of(client())
-        return next((x for x in config.workload_links(settings, tenant) if x["key"].lower() == workload["key"]), None)
-
-    @blueprint.get("/api/path/candidates")
-    def path_candidates():
-        """What could be this workload's front doors, app and component, best first with why; and its saved link."""
-        workload, arm_client = path_workload(request.args), client()
-        subscriptions, _ = scope_args(request.args)
-        source, can, tool_reason = path_tool()
-        paths, apps, notes = [], [], []
-        if source is not None and REQUESTS in can:
-            try:
-                names = source.app_names()["names"]
-                apps = workload_path.app_candidates(names, workload["name"])
-                picked = (saved_link(workload) or {}).get("app") or (apps[0]["app"] if apps and apps[0]["score"] >= 10 else "")
-                paths = source.request_paths(picked)["paths"] if picked else []
-            except ServiceError as error:
-                notes.append(f"{source.label}: {str(error).splitlines()[0][:200]}")
-        elif tool_reason:
-            notes.append(f"Monitoring tool: {tool_reason}")
-        site_hosts, component = [], []
-        if workload.get("site_id"):
-            site = arm_client.get(workload["site_id"], "2023-12-01", tolerate=(403, 404)) or {}
-            site_hosts = (site.get("properties") or {}).get("hostNames") or []
-            found = appinsights.link(arm_client, workload["site_id"])
-            if found.get("component_id"):
-                component = [{"component": found["component_id"], "name": found["component_name"], "score": 10,
-                              "why": ["the app reports to it"]}]
-        apim, apim_notes = workload_path.apim_candidates(arm_client, subscriptions, workload["name"], paths, apim_apis)
-        agw, agw_notes = workload_path.agw_candidates(arm_client, subscriptions, workload["name"],
-                                                      workload.get("cluster_id", ""), site_hosts)
-        components = component or workload_path.component_candidates(arm_client, subscriptions, workload["name"])
-        return jsonify(workload=workload, link=saved_link(workload), apim=apim, agw=agw, apps=apps, components=components,
-                       request_paths=paths[:10], tool=getattr(source, "label", ""), notes=notes + apim_notes + agw_notes)
-
-    @blueprint.post("/api/path/link")
-    def path_link_save():
-        """Saves the front doors the viewer confirmed for one workload (an empty pick removes the link)."""
-        body = request.get_json(silent=True) or {}
-        workload = path_workload(body)
-        link = {**{k: v for k, v in workload.items()}, "apim": [{"service_id": a.get("service_id", ""), "api": a.get("api", "")}
-                                                                for a in body.get("apim") or [] if isinstance(a, dict)],
-                "agw": [{"gateway_id": g.get("gateway_id", ""), "listener": g.get("listener", ""), "pool": g.get("pool", "")}
-                        for g in body.get("agw") or [] if isinstance(g, dict)],
-                "app": str(body.get("app") or ""), "component": str(body.get("component") or "")}
-        return save_for_tenant(settings_file.apply_workload_link, link) or jsonify(link=saved_link(workload))
-
-    @blueprint.get("/api/path/read")
-    def path_read():
-        """Each hop of the workload's saved link (or just its pods and requests when none is saved), and the verdict."""
-        workload = path_workload(request.args)
-        link = {**workload, **(saved_link(workload) or {})}
-        source, can, _ = path_tool()
-        return jsonify(**workload_path.read(client(), link, source, can, settings["path"], settings["appinsights"]),
-                       link=link, tool=getattr(source, "label", ""))
+        return source, (getattr(source, "capabilities", ()) if source else ())
 
     @blueprint.get("/api/workload/detail")
     def workload_detail_read():
         """One workload's details from the Kubernetes API, read when its line is opened on the Workloads tab."""
-        workload = path_workload(request.args)
-        if "cluster_id" not in workload:
-            abort(400, "cluster, namespace, kind and workload are needed")
+        workload = workload_args(request.args)
         return jsonify(workload_detail.read(client(), workload["cluster_id"], workload["namespace"], workload["kind"],
                                             workload["name"], kube_settings=settings["aks"]))
 
@@ -1883,7 +1830,7 @@ def create_blueprint(client_for, settings, url_prefix="", config_file=None, star
     def pod_detail_read():
         """One pod as `kubectl describe pod` and `-o yaml` show it: the Kubernetes API, else Container Insights."""
         cluster = (request.args.get("cluster") or "").rstrip("/")
-        if not workload_path.CLUSTER_ID.match(cluster):
+        if not workload_names.CLUSTER_ID.match(cluster):
             abort(400, "cluster must be an AKS cluster ID")
         try:
             return jsonify(pod_detail.read(client(), cluster, request.args.get("namespace", ""), request.args.get("pod", ""),
@@ -1895,7 +1842,7 @@ def create_blueprint(client_for, settings, url_prefix="", config_file=None, star
     def kube_yaml_read():
         """One object's YAML read now; env values only with values=1 (Show values), never in the page's first read."""
         cluster = (request.args.get("cluster") or "").rstrip("/")
-        if not workload_path.CLUSTER_ID.match(cluster):
+        if not workload_names.CLUSTER_ID.match(cluster):
             abort(400, "cluster must be an AKS cluster ID")
         try:
             return jsonify(kube_yaml.read(client(), cluster, request.args.get("namespace", ""), request.args.get("kind", ""),
@@ -1907,9 +1854,7 @@ def create_blueprint(client_for, settings, url_prefix="", config_file=None, star
     @blueprint.get("/api/workload/history")
     def workload_history_read():
         """Its CPU and memory over 30 days and its runtime's memory; `target_cpu` and `target_memory` are its HPA's %."""
-        workload = path_workload(request.args)
-        if "cluster_id" not in workload:
-            abort(400, "cluster, namespace, kind and workload are needed")
+        workload = workload_args(request.args)
         targets = {}
         for resource in ("cpu", "memory"):
             value = request.args.get(f"target_{resource}", "")
@@ -1917,31 +1862,29 @@ def create_blueprint(client_for, settings, url_prefix="", config_file=None, star
                 if not value.isdigit() or not 0 < int(value) <= 1000:
                     abort(400, f"target_{resource} must be a whole percent")
                 targets[resource] = int(value)
-        link = {**workload, **(saved_link(workload) or {})}
-        source, can, _ = path_tool()
+        source, can = monitor_tool()
         names = (lambda: source.app_names()["names"]) if source is not None and REQUESTS in can else None
-        return jsonify(workload_detail.history(client(), link, targets, source, can, names))
+        return jsonify(workload_detail.history(client(), workload, targets, source, can, names))
 
-    @blueprint.get("/api/workload/fit")
-    def workload_fit_read():
-        """Would new requests fit: `container` is `name:cpu millicores:memory MiB`, once per container changed;
-        `replicas` replaces the HPA's arithmetic. Reads only (the nodes and every live pod on them)."""
-        workload = path_workload(request.args)
-        if "cluster_id" not in workload:
-            abort(400, "cluster, namespace, kind and workload are needed")
-        new = {}
-        for item in request.args.getlist("container"):
-            match = re.fullmatch(r"([a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?):([0-9]{1,7}):([0-9]{1,8})", item)
-            if not match or not int(match.group(3)) and not int(match.group(4)):
-                abort(400, "container must be name:cpu millicores:memory MiB")
-            new[match.group(1)] = (int(match.group(3)), int(match.group(4)))
-        if not new:
-            abort(400, "at least one container with its new requests is needed")
-        replicas = request.args.get("replicas", "")
-        if replicas and (not replicas.isdigit() or not 0 < int(replicas) <= 10000):
-            abort(400, "replicas must be a whole number from 1 to 10000")
-        return jsonify(workload_fit.read(client(), workload["cluster_id"], workload["namespace"], workload["kind"],
-                                         workload["name"], new, int(replicas) if replicas else None, kube_settings=settings["aks"]))
+    @blueprint.get("/api/workload/memory")
+    def workload_memory_read():
+        """Its pods' memory hour by hour over 7 days, growth per hour, restarts and OOM kills, and the 24 hours either
+        side of `rollout` (an ISO time, its last rollout) when given."""
+        workload = workload_args(request.args)
+        rollout = request.args.get("rollout") or None
+        if rollout and not re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(\.\d+)?(Z|[+-]\d\d:\d\d)", rollout):
+            abort(400, "rollout must be an ISO time")
+        source, can = monitor_tool()
+        return jsonify(workload_memory.read(client(), workload, rollout, source, can))
+
+    @blueprint.get("/api/explore/memory-scaling")
+    def memory_scaling_read():
+        """A cluster's week per workload (restarts, OOM kills; memory and HPA time at max from the monitoring tool)."""
+        cluster = (request.args.get("id") or "").rstrip("/")
+        if not workload_names.CLUSTER_ID.match(cluster):
+            abort(400, "id must be an AKS cluster ID")
+        source, can = monitor_tool()
+        return jsonify(workload_memory.cluster_week(client(), cluster, source, can))
 
     @blueprint.get("/api/explore/workload-names")
     def explore_workload_names():

@@ -24,6 +24,10 @@ NOT_OFFERED = (400, 404, 405)  # no detectors route for the type
 _without_detectors = TtlCache("types without detectors", NO_DETECTORS_TTL_SECONDS)
 _NOT_OFFERED = "not offered"
 MAX_PARALLEL = 8
+RESULTS_TTL_SECONDS = 600
+# Each detector's answer per viewer, resource and look-back: the health check, the Diagnostics tab and its count read the
+# same answers, so a resource's detectors run once per 10 minutes whichever asks first. A failed read isn't kept.
+_results = TtlCache("detector results", RESULTS_TTL_SECONDS)
 INSIGHT_TYPES = {7, 26}  # rendering types that carry Status/Message rows
 _STATUS_IDS = {0: CRITICAL, 1: WARNING, 2: INFO, 3: HEALTHY}
 _STATUS_NAMES = {"critical": CRITICAL, "warning": WARNING, "info": INFO, "success": HEALTHY}
@@ -154,7 +158,7 @@ def run_one(client, resource_id, name, hours=24):
     if denied or detector is None:
         return {"name": name, "title": name, "category": "", "status": UNKNOWN, "insights": [],
                 "error": denied or "Azure doesn't list this detector for the resource."}
-    return _run_detector(client, resource_id, version, detector, _window(hours))
+    return _run_detector(client, resource_id, version, detector, _window(hours), hours)
 
 
 def _window(hours):
@@ -170,15 +174,26 @@ def run(client, resource_id, hours=24, only_health=True, words=_HEALTH_WORDS):
     version = client.api_version(resource_id)
     params = _window(hours)
     with ThreadPoolExecutor(max_workers=MAX_PARALLEL) as pool:
-        results = list(pool.map(lambda d: _run_detector(client, resource_id, version, d, params), planned["detectors"]))
+        results = list(pool.map(lambda d: _run_detector(client, resource_id, version, d, params, hours), planned["detectors"]))
     order = {CRITICAL: 0, WARNING: 1, INFO: 2, HEALTHY: 3, UNKNOWN: 4}
     results.sort(key=lambda r: (order.get(r["status"], 5), r["category"], r["title"] or ""))
     return {"supported": True, "results": results, "total": planned["total"], "ran": len(results),
             "skipped": planned["skipped"]}
 
 
-def _run_detector(client, resource_id, version, detector, params):
-    """One detector, read and judged."""
+def _run_detector(client, resource_id, version, detector, params, hours=24):
+    """One detector, read and judged; kept in `_results` unless the read failed (a Refresh reads it again)."""
+    viewer = getattr(client, "identity", None)
+    key = (f"{getattr(viewer, 'tenant_id', '')}/{getattr(viewer, 'object_id', '')}", resource_id.lower(), detector["name"], hours)
+    if not getattr(client, "is_fresh", False):
+        kept = _results.get(key)
+        if kept is not None:
+            return kept
+    result = _read_detector(client, resource_id, version, detector, params)
+    return result if result.get("error") else _results.put(key, result)
+
+
+def _read_detector(client, resource_id, version, detector, params):
     try:
         payload = client.get(f"{resource_id}/detectors/{detector['name']}", version,
                              params=params, tolerate=(400, 404, 500, 503)) or {}

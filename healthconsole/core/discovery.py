@@ -25,6 +25,7 @@ class DiscoveryOptions:
     inbound: bool = True
     inbound_limit: int = 25
     inbound_scope: str = "subscription"
+    refresh_minutes: int = 5  # the page's own: how often a graph on screen checks again
 
 
 class _Graph:

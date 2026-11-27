@@ -4,6 +4,83 @@ All notable changes to this project are documented here. The format is based
 on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.0] - 2026-11-27
+
+### Added
+
+- **Investigate shows where a failing endpoint breaks.** In *By HTTP code* and *Its failing endpoints*:
+  - **Backend:** what the failing requests called that failed too, each host with its status (*no response* for a
+    timeout or a failed connection) and how many requests, and how many failed with no backend call failing, which
+    broke in the service itself. An API Management 500 that is a backend's 502 now reads as that.
+  - **Called by:** the API Management subscriptions that sent the failing requests.
+  - Both read after the list draws (a code's when you open it), in one query for the endpoints shown.
+- **Readable endpoints.** An API Management operation (`product;rev=1 - GetPrice`) shows as *GetPrice* with a recent
+  failed request's method and path (`POST /public/v1/product/price`, never the query string) and *API product ·
+  revision 1*; other apps' endpoints show their method and path too. The same reading is used in every Investigate
+  table that names an operation (exceptions, search results) and in the latest-failures heading.
+- **A service's name stays on one line** in Investigate's tables, with API Management's region (and a span's
+  instance) under it, instead of breaking at every hyphen in a narrow column.
+
+- **Memory and scaling facts for a workload, to read a leak or a misconfiguration from** (facts only, no verdicts):
+  - **How long an HPA has been at its max**, from Kubernetes' own `ScalingLimited` condition, so it works on every
+    cluster: in All workloads, the HPA panel and the finding ("At the maximum 50 replicas for 3 d 4 h").
+  - **Memory over 7 days, pod by pod** in a workload's details: one chart with restarts, OOM kills and the last
+    rollout marked; each pod's growth per hour since it started; the 24 hours before the last rollout against the 24
+    after. From Container Insights, else New Relic (most clusters here have only New Relic).
+  - **Runtime memory cap against the limit** for Java (or the JVM's 25% default when none is set), Node.js, Go and
+    .NET, with the room left outside it. Read from the Deployment's env, command and args only (no exec): a cap set in
+    the image or through `envFrom` isn't seen, and the page says so; its ⓘ gives the `kubectl` commands to check it
+    yourself, including the `exec` ones the console will never run (they need `pods/exec`, which Reader doesn't have).
+  - **Workloads → Memory & scaling**: one sortable row per workload with replicas against max, time at max (and its
+    share of the week from New Relic), memory against request now and against limit over the week, restarts,
+    OOM-killed pods and runtime caps. Read when opened.
+- **A graph on screen checks itself again.** A resource's dependency graph or a group's Graph re-checks the same target
+  in the background every `graph.refresh_minutes` (default 5; Settings → Dependency graph; 0 is off) and redraws only
+  the graph, keeping zoom, scroll and filter. Its bar says *checked 12:08 · next in 4 min* with **Pause**. It waits
+  while the graph is hidden, minimized or a table, and never runs on top of a check you started.
+- **Problem boxes pulse in the graph:** a critical or warning box's colour pulses and its status dot blinks (red faster
+  than amber), and one that turned critical or warning since the previous check pulses faster for a minute. With
+  *reduce motion* on, a solid outline.
+
+### Fixed
+
+- **The graph missed findings the Diagnostics tab showed** (an AKS cluster's OOM-killed pods, for one). A check ran
+  only Azure's health and risk detectors, the tab also availability and performance. Both now run the same set, and
+  each detector's answer is kept 10 minutes per viewer and resource, so opening a resource reads it once (it ran 15 +
+  28 detector calls on one cluster, now 28) and the box, the table, exports and the tab agree. A detector alone still
+  turns a box amber, never red.
+- In the Panes layout, a table inside Azure's detector text (Diagnostics) showed its header two rows down, over the
+  rows: the text's sideways-scroll box held the sticky header. Panes turns that box off, as it does for the others.
+- A workload's HPA showed a colour's name as its label: "healthy False" on ScalingLimited, and "info" next to the
+  metric that sets the replica count. Conditions now read *within range*, *at min or max*, *OK* or *can't scale*, and
+  the metric reads *sets the count* (or *holds it at max*).
+
+### Security
+
+- **Numbers on the page escape any text they're given.** The helper that formats a value for display passed
+  anything that wasn't a number through as it was, into the page. Every caller sends numbers today, but a value read
+  from Azure or the monitoring tool would have run as HTML. It now escapes text itself.
+
+### Removed
+
+- **Path** (a workload's Details · Dependencies · **Path**, Investigate → pod, an App Service's App Insights tab): each
+  hop in front of a workload against last week, with *Link front doors*. The console shows data; it doesn't try to
+  troubleshoot. Gone with it: its routes, its Settings (`path.*`), saved front-door links, and the monitoring tool's
+  request and pod-restart reads it alone used. A config file that still has `path:` or `tenants.<key>.workload_links`
+  loads as before; both are ignored and can be deleted. A workload's runtime memory now finds its monitoring-tool app
+  by name only.
+- **Would a change fit?** in an AKS workload's details (new requests per container checked node by node), along with
+  its `/api/workload/fit` route. The CPU and memory history above it, with the request each HPA target needs, stays.
+
+### Changed
+
+- **Investigate's step 2 sections fold**, like Workloads': By HTTP code, Failing endpoints, Exceptions, Failing
+  dependencies and Recent changes each open or close, with their count on the title, plus **Expand all** and
+  **Collapse all**. Your choice is kept in this browser, and a closed section isn't read until you open it.
+- **Each HTTP code's heading reads in two lines:** the code as a coloured badge, its name and a few words on what that
+  kind of code means (*the service failed while answering*, *the service refused the caller's request*…), then its
+  numbers, each labelled: failed requests in the window, share of all failures, endpoints, most recent.
+
 ## [1.4.0] - 2026-11-27
 
 ### Added

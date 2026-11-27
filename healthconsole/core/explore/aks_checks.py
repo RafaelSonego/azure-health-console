@@ -5,6 +5,8 @@ from collections import defaultdict
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 
+from . import runtime_caps
+
 KUBERNETES_NAMESPACES = ("kube-system", "kube-public", "kube-node-lease")  # created by Kubernetes itself (kube- is reserved)
 # Labels with which AKS and its add-on manager mark what they deploy: a namespace holding only such workloads is theirs.
 MANAGED_LABELS = (("addonmanager.kubernetes.io/mode", None), ("kubernetes.azure.com/managedby", "aks"))
@@ -226,6 +228,19 @@ def usage_by_container(pod_metrics, pod_owner):
     return usage
 
 
+def memory_of_request(containers, usage, w):
+    """Memory in use now (metrics-server) as a % of what its pods request, every container added up; None without a
+    reading or a request."""
+    used = requested = 0
+    for c in containers:
+        values = usage.get((w["ns"], w["kind"], w["name"], c["name"])) or []
+        req = parse_mem(((c.get("resources") or {}).get("requests") or {}).get("memory"))
+        if values and req:
+            used += sum(v[2] for v in values)
+            requested += req * len(values)
+    return round(100 * used / requested) if requested else None
+
+
 # ------------------------------------------------------------------ HPA
 
 
@@ -255,6 +270,27 @@ def hpa_targets(h):
             blk = m.get(mtype[:1].lower() + mtype[1:], {}) if mtype else {}
             out.append(((blk.get("metric") or {}).get("name", mtype), mtype, "-", "-"))
     return out
+
+
+def at_max_since(h):
+    """When the HPA reached its maxReplicas, from Kubernetes' own ScalingLimited condition (True, TooManyReplicas, with
+    the time it changed): no history source needed. None when it isn't at max, or the condition doesn't say."""
+    st = h.get("status", {})
+    if (st.get("currentReplicas") or 0) < h["spec"]["maxReplicas"]:
+        return None
+    c = next((c for c in st.get("conditions") or [] if c.get("type") == "ScalingLimited"), None)
+    return c.get("lastTransitionTime") if c and c.get("status") == "True" and c.get("reason") == "TooManyReplicas" else None
+
+
+def since_text(stamp, now=None):
+    """"3 d 4 h", "5 h 20 min", "12 min": how long ago an ISO time was."""
+    try:
+        then = datetime.fromisoformat(str(stamp).replace("Z", "+00:00"))
+    except ValueError:
+        return ""
+    minutes = max(0, int(((now or datetime.now(timezone.utc)) - then).total_seconds() // 60))
+    days, hours = minutes // 1440, minutes % 1440 // 60
+    return f"{days} d {hours} h" if days else f"{hours} h {minutes % 60} min" if hours else f"{minutes} min"
 
 
 def _held_by_memory(h):
@@ -288,14 +324,16 @@ def analyze_hpa(h, containers, cfg, ns, workload):
                          "when that single pod restarts or its node is drained, the service is down until a new pod is ready",
                          "Set minReplicas to at least 2 and add a PodDisruptionBudget.", **at, kind=CONFIG,
                          basis=rule(PRACTICE, "aks-pdb")))
+    since = at_max_since(h)
+    for_how_long = f" for {since_text(since)}" if since else ""
     if cur >= mx:
         if _held_by_memory(h):
-            f.append(finding("HIGH", "scaling", f"At the maximum {mx} replicas, held there by memory",
+            f.append(finding("HIGH", "scaling", f"At the maximum {mx} replicas{for_how_long}, held there by memory",
                              "memory, not traffic, pushes the HPA up, so raising maxReplicas may only add idle pods",
                              "Check memory at idle; raise the memory request or scale on CPU, then decide maxReplicas.", **at,
                              basis=rule(KUBERNETES, "hpa")))
         else:
-            f.append(finding("HIGH", "scaling", f"At the maximum {mx} replicas",
+            f.append(finding("HIGH", "scaling", f"At the maximum {mx} replicas{for_how_long}",
                              "it cannot add pods if traffic grows, so the existing pods take all the extra load",
                              "Raise maxReplicas and check the node pools can fit the extra pods.", **at,
                              basis=rule(KUBERNETES, "hpa")))
@@ -345,7 +383,8 @@ def describe_hpa(h):
         f"{r} {v}{'%' if tt == 'Utilization' else ''} (now {c if c is not None else '?'}"
         f"{'%' if tt == 'Utilization' and c is not None else ''})" for r, tt, v, c in hpa_targets(h))
     return {"name": h["metadata"]["name"], "min": spec.get("minReplicas", 1), "max": spec["maxReplicas"],
-            "current": st.get("currentReplicas"), "desired": st.get("desiredReplicas"), "targets": targets}
+            "current": st.get("currentReplicas"), "desired": st.get("desiredReplicas"), "targets": targets,
+            "at_max_since": at_max_since(h)}
 
 
 # ------------------------------------------------------------------ PDB
@@ -801,7 +840,8 @@ def analyze(objs, pods, replicasets, jobs, hpas, pdbs, nodes, pod_metrics, node_
         worst = min((SEVERITIES.index(x["severity"]) for x in own), default=None)
         workload_rows.append({"namespace": w["ns"], "workload": label, "kind": w["kind"], "desired": w["desired"], "ready": w["ready"],
                               "hpa": bool(hpa), "severity": SEVERITIES[worst] if worst is not None else None,
-                              "findings": len(own)})
+                              "findings": len(own), "memory_of_request": memory_of_request(containers, usage, w),
+                              "runtime_caps": runtime_caps.workload_caps(containers)})
         findings += own
 
     pool_rows, capacity_findings = capacity(nodes, pods, node_metrics, cfg, profiles)

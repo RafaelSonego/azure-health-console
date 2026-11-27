@@ -8,13 +8,16 @@ from .matching import match
 
 ALERTS, ENTITIES, LOGS, ALERT_HISTORY, OOM_KILLS = "alerts", "entities", "logs", "alert history", "oom kills"
 WORKLOADS = "kubernetes workloads"
-REQUESTS, WORKLOAD_PODS = "app requests", "workload pods"
+REQUESTS = "app requests"
 WORKLOAD_USAGE, RUNTIME_MEMORY = "workload usage", "runtime memory"
+CLUSTER_WEEK = "cluster week"
 WARNING_EVENTS = "warning events"
 CAPABILITY_LABELS = {ALERTS: "alerts", ENTITIES: "entities", LOGS: "logs", ALERT_HISTORY: "alert history",
                      OOM_KILLS: "Kubernetes OOM kills", WORKLOADS: "Kubernetes workloads by namespace",
-                     REQUESTS: "an app's requests per minute", WORKLOAD_PODS: "a workload's pod restarts",
-                     WORKLOAD_USAGE: "a workload's CPU and memory over 30 days", RUNTIME_MEMORY: "an app's heap and process memory",
+                     REQUESTS: "app names, to match a workload to its app",
+                     WORKLOAD_USAGE: "a workload's CPU and memory over 30 days, and its pods' memory hour by hour",
+                     CLUSTER_WEEK: "a cluster's restarts, OOM kills, memory and HPA time at max over 7 days",
+                     RUNTIME_MEMORY: "an app's heap and process memory",
                      WARNING_EVENTS: "Kubernetes warning events"}
 LOG_WINDOWS = (15, 30, 60, 360, 1440, 10080)  # minutes, up to 7 days; the tool's own retention still applies
 LOG_LIMIT = 100
@@ -126,32 +129,27 @@ class Provider(AlertHistory):
         """{"found", "workloads": [{kind, name}], "queries"}: what ran in that namespace over the last hour."""
         raise ProviderError(f"{self.label or 'This tool'} can't list a cluster's workloads here yet.")
 
-    # Workload path (REQUESTS): an app's requests, for the hop behind the gateways; and its names and paths, to suggest
-    # which app and which gateway routes are a workload's.
+    # Workload details (REQUESTS): the apps that sent requests, to find the one that is a workload (its runtime memory).
     def app_names(self):
         """{"names", "queries"}: the apps that sent requests over the last day."""
         raise ProviderError(f"{self.label or 'This tool'} can't list apps here yet.")
-
-    def request_paths(self, app):
-        """{"paths", "queries"}: the app's busiest request paths over the last day."""
-        raise ProviderError(f"{self.label or 'This tool'} can't give an app's request paths here yet.")
-
-    def requests(self, app):
-        """{"found", "now", "week", "minutes", "queries"}: the app's last hour and the same hour last week, each
-        {total, errors, p95_ms}; `minutes` is [[time, total, errors]] over the last hour."""
-        raise ProviderError(f"{self.label or 'This tool'} can't give an app's requests here yet.")
-
-    # Workload path (WORKLOAD_PODS), for clusters without Container Insights.
-    def workload_pods(self, cluster_name, namespace, kind, name):
-        """{"found", "now", "week", "minutes", "queries"}: restarts in the last hour and the same hour last week
-        (`errors` = restarts), pods and pods not ready now; `minutes` is [[time, None, restarts]] per 5 minutes."""
-        raise ProviderError(f"{self.label or 'This tool'} can't give a workload's pods here yet.")
 
     # Workload details (WORKLOAD_USAGE), for clusters without Container Insights.
     def workload_usage(self, cluster_name, namespace, kind, name):
         """{"found", "containers": [{container, cpu: {p95, p99, max_7d, max_30d}, memory: {…}}], "queries"}: per
         container, CPU in cores and memory (working set) in bytes over 7 days, and the 30-day max."""
         raise ProviderError(f"{self.label or 'This tool'} can't give a workload's CPU and memory over time here yet.")
+
+    def workload_memory(self, cluster_name, namespace, kind, name):
+        """{"found", "pods": {pod: {"points": [[iso, bytes]], "restarts": [[iso, n]], "oom": [iso]}}, "queries"}: each pod's
+        working-set memory per hour over 7 days (its containers added up), with its restarts and OOM kills per hour."""
+        raise ProviderError(f"{self.label or 'This tool'} can't give a workload's memory hour by hour here yet.")
+
+    # Workloads → Memory & scaling (CLUSTER_WEEK): the week of every workload in a cluster.
+    def cluster_week(self, cluster_name):
+        """{"found", "workloads": [{namespace, workload, restarts, oom_pods, max_of_limit, avg_of_request}],
+        "hpas": [{namespace, hpa, at_max_percent}], "queries"} over the last 7 days."""
+        raise ProviderError(f"{self.label or 'This tool'} can't give a cluster's week here yet.")
 
     # Workload details (RUNTIME_MEMORY): what the app's runtime holds, against what the pod's memory shows.
     def runtime_memory(self, app):

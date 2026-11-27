@@ -383,11 +383,96 @@ async function loadInvOperations() {
   const exceptionsFirst = c && (c.causes || []).includes("exceptions") && !c.causes.includes("failed");
   $("inv-ops").querySelector(".inv-parts").classList.toggle("exceptions-first", Boolean(exceptionsFirst));
   inv.found = {};
-  loadInvCodes();
-  loadInvExceptions();
-  loadInvDependencies();
-  loadInvChanges(c);
-  loadInvEndpoints();
+  invPart("codes", loadInvCodes);
+  invPart("exceptions", loadInvExceptions);
+  invPart("dependencies", loadInvDependencies);
+  invPart("changes", () => loadInvChanges(c));
+  invPart("endpoints", loadInvEndpoints);
+}
+
+// Step 2's sections fold: open by default, yours kept in this browser (Expand all / Collapse all only for this visit).
+// A closed one isn't read until you open it, since 30 days of a busy app can take 10 to 30 seconds each.
+const INV_PARTS = { codes: "inv-codes-part", endpoints: "inv-ops-part", exceptions: "inv-exc-part", dependencies: "inv-dep-part", changes: "inv-chg-part" };
+inv.partLoaders = {};
+function invPart(key, load) {
+  const part = $(INV_PARTS[key]), kept = stored.json("ahc.invParts", {})[key];
+  inv.partLoaders[key] = load;
+  part.dataset.read = "";
+  part.querySelector(".inv-part-n").textContent = "";
+  if (part.open !== (kept ?? true)) { part.dataset.auto = "1"; part.open = kept ?? true; }
+  if (part.open) { part.dataset.read = "1"; load(); } else part.querySelector("div[id$='-out']").innerHTML = '<p class="muted">Not read yet: it reads when you open it.</p>';
+}
+function invPartCount(key, n, noun) {
+  const box = $(INV_PARTS[key]).querySelector(".inv-part-n");
+  box.textContent = `· ${fmt(n)} ${noun}${n === 1 ? "" : "s"}`;
+  box.classList.toggle("worse", n > 0 && key !== "changes");
+}
+document.addEventListener("toggle", (event) => {
+  const part = event.target;
+  if (!part.matches || !part.matches("details.inv-part")) return;
+  if (part.dataset.auto) delete part.dataset.auto;
+  else { const kept = stored.json("ahc.invParts", {}); kept[part.dataset.part] = part.open; stored.set("ahc.invParts", kept); }
+  if (part.open && !part.dataset.read && inv.partLoaders[part.dataset.part]) { part.dataset.read = "1"; inv.partLoaders[part.dataset.part](); }
+}, true);
+document.addEventListener("click", (event) => {
+  const all = event.target.closest && event.target.closest("[data-inv-parts]");
+  if (!all) return;
+  for (const part of document.querySelectorAll("details.inv-part")) {
+    const open = all.dataset.invParts === "open";
+    if (part.open !== open) { part.dataset.auto = "1"; part.open = open; }
+  }
+});
+
+// API Management names an operation "<api>;rev=<n> - <operation>": shown as the operation, its method and path (a recent
+// failed request's, no query string), and its API; any other name as it is. Its callers and backends fill in later.
+const APIM_OP = /^(.+);rev=(\d+) - (.+)$/;
+const epKey = (e) => JSON.stringify([e.operation || "", e.role || "", e.code || ""]);
+function endpointHtml(e, { callers = true } = {}) {
+  if (!e.operation) return '<span class="muted">(none)</span>';
+  const m = APIM_OP.exec(e.operation || "");
+  const path = e.path && e.path !== e.operation ? e.path : "";
+  return `<strong>${esc(m ? m[3] : e.operation || "–")}</strong>${path
+    ? `<div class="muted ai-msg" title="A recent failed request's method and path (without its query string)">${esc(path)}</div>` : ""}${m
+    ? `<div class="muted">API ${esc(m[1])} · revision ${esc(m[2])}</div>` : ""}${callers ? `<div class="muted" data-ep-callers="${esc(epKey(e))}"></div>` : ""}`;
+}
+// An operation in plain text (step headings): "GetPrice (API product)" for API Management, else as it is.
+const opText = (operation) => { const m = APIM_OP.exec(operation || ""); return m ? `${m[3]} (API ${m[1]})` : operation || "–"; };
+// A service (cloud role): its name kept on one line, and what follows the first space (API Management's region) and the
+// instance under it, so a long hyphenated name isn't broken at every hyphen in a narrow column.
+function serviceHtml(role, instance = "") {
+  if (!role && !instance) return '<span class="muted">(no name)</span>';
+  const at = (role || "").indexOf(" "), name = at > 0 ? role.slice(0, at) : role || "", rest = at > 0 ? role.slice(at + 1) : "";
+  return `<span class="inv-service">${esc(name)}</span>${rest ? `<div class="muted">${esc(rest)}</div>` : ""}${instance ? `<div class="muted">${esc(instance)}</div>` : ""}`;
+}
+const backendCell = (e) => `<div data-ep-backend="${esc(epKey(e))}" class="muted">reading…</div>`;
+const BACKEND_NOTE = `<p class="muted"><strong>Backend:</strong> the calls these failing requests made that failed too (host, its
+  status, how many requests), and how many failed with no backend call failing: those broke in the service itself (an API
+  Management policy, for example). <strong>Called by:</strong> the API Management subscription that sent them.</p>`;
+const hostOf = (url) => String(url || "").replace(/^[a-z]+:\/\//i, "").replace(/\/$/, "");
+
+// Each listed endpoint's backends and callers (one read for the table), into the cells drawn for them.
+async function loadEndpointDetails(box, endpoints) {
+  if (!endpoints.length) return;
+  const data = await api("api/investigate/endpoint-details", { params: invParams({ endpoints: JSON.stringify(endpoints) }) })
+    .catch((error) => (error.signedOut ? null : { rows: [], errors: [error.message] }));
+  if (!data || !box.isConnected) return;
+  const found = new Map(data.rows.map((r) => [epKey(r), r]));
+  const failedRead = (data.errors || []).join(" ");
+  box.querySelectorAll("[data-ep-backend]").forEach((cell) => {
+    const r = found.get(cell.dataset.epBackend);
+    if (!r) { cell.innerHTML = failedRead ? `<span title="${esc(failedRead)}">couldn't be read</span>` : "–"; return; }
+    const none = (r.failed || 0) - (r.with_backend || 0);
+    const more = (r.backend_count || 0) - r.backends.length;
+    cell.classList.remove("muted");
+    cell.innerHTML = `${r.backends.map((b) => `<div><span class="ai-msg">${esc(hostOf(b.backend))}</span> ${b.code
+      ? `<strong>${esc(b.code)}</strong>` : '<strong title="The call failed without an HTTP status: it timed out or couldn\'t connect">no response</strong>'}
+      <span class="muted">· ${fmt(b.requests)}</span></div>`).join("")}${more > 0 ? `<div class="muted">+${fmt(more)} more backend(s)</div>` : ""}${none > 0
+      ? `<div class="muted" title="No backend call of these requests failed: they broke in the service itself, or the backend answered and the service still failed">${r.backends.length ? "" : "no backend call failed · "}${fmt(none)} without a backend failure</div>` : ""}`;
+  });
+  box.querySelectorAll("[data-ep-callers]").forEach((cell) => {
+    const r = found.get(cell.dataset.epCallers);
+    if (r && r.callers.length) cell.innerHTML = `called by ${r.callers.map((c) => `${esc(c.caller)} <span title="failed requests">(${fmt(c.requests)})</span>`).join(" · ")}`;
+  });
 }
 
 async function loadInvEndpoints() {
@@ -399,13 +484,15 @@ async function loadInvEndpoints() {
     return;
   }
   inv.found.operations = data.rows;
-  out.innerHTML = `${noticesHtml(data.errors)}${invRetryHtml("endpoints", data)}${data.rows.length ? table(["Endpoint", "Service", `Failed in the ${invSpan()}`, "Out of", "Failure rate",
-    "HTTP status codes", "Most recent failure", ""],
-    data.rows.map((r) => [esc(r.operation || "–"), esc(r.role || "") || '<span class="muted">(no name)</span>', `<span class="worse">${fmt(r.failed)}</span>`,
-      fmt(r.total), pctText(r.failed_pct, r.failed), codes(r.codes), seen(r.last_seen),
+  invPartCount("endpoints", data.rows.length, "endpoint");
+  out.innerHTML = `${noticesHtml(data.errors)}${invRetryHtml("endpoints", data)}${data.rows.length ? BACKEND_NOTE + table(["Endpoint", "Service", `Failed in the ${invSpan()}`, "Out of", "Failure rate",
+    "HTTP status codes", "Backend", "Most recent failure", ""],
+    data.rows.map((r) => [endpointHtml(r), serviceHtml(r.role), `<span class="worse">${fmt(r.failed)}</span>`,
+      fmt(r.total), pctText(r.failed_pct, r.failed), codes(r.codes), backendCell(r), seen(r.last_seen),
       `<button type="button" class="link" data-inv-op="${esc(JSON.stringify({ operation: r.operation, role: r.role }))}">Samples</button>`]), "inv-ops")
     : invNoneHtml(data, "failed requests")}
     <details class="mon-query"><summary>Query sent</summary>${queryBlock(data)}</details>`;
+  loadEndpointDetails(out, data.rows.map((r) => ({ operation: r.operation || "", role: r.role || "", code: "" })));
 }
 
 // A failed read (no `data`, or `data.errors`) gets its own Try again, which reads only that section again.
@@ -424,6 +511,8 @@ function invNoneHtml(data, what) {
 // Failed requests by HTTP code: server errors, then cut short, then the caller's (4xx), each most first; a code opens to
 // its busiest endpoints, whose Samples read only that code.
 const CODE_ORDER = { server: 0, cut: 1, run: 2, client: 3 };
+const CODE_MEANS = { server: "the service failed while answering", cut: "the response stopped before it was complete",
+  run: "a run that failed, not called over HTTP", client: "the service refused the caller's request" };
 const REASON_HINTS = { ClientConnectionFailure: "the caller closed the connection", Timeout: "the backend didn't answer in time",
   BackendConnectionFailure: "the backend couldn't be reached", ExpressionValueEvaluationFailure: "a policy expression failed",
   TokenExpired: "the caller's token had expired", RateLimitExceeded: "a rate limit was hit" };
@@ -447,20 +536,29 @@ async function loadInvCodes() {
     return;
   }
   const rows = [...data.rows].sort((a, b) => CODE_ORDER[codeKind(a.code)] - CODE_ORDER[codeKind(b.code)] || b.failed - a.failed);
+  invPartCount("codes", rows.length, "code");
   out.innerHTML = `${noticesHtml(data.errors)}${invRetryHtml("codes", data)}${rows.length ? rows.map((r) => {
     const kind = codeKind(r.code), more = r.endpoints > r.top.length;
-    return `<details class="scope-group code-group ${kind}"><summary><strong>${esc(codeOf(r.code))}</strong>
-        <span class="code-name">${esc(codeName(r.code))}</span> <span class="muted">· ${fmt(r.failed)} in the ${esc(invSpan())}
-        (${pctText(r.failed_pct, r.failed)} of all failures) · ${fmt(r.endpoints)} endpoint(s) · most recent ${esc(ago(r.last_seen))}</span></summary>
+    const name = codeName(r.code);
+    return `<details class="scope-group code-group ${kind}"><summary><span class="code-line"><strong class="code-num">${esc(codeOf(r.code))}</strong>
+        <span class="code-name">${esc(name.charAt(0).toUpperCase() + name.slice(1))}</span> <span class="muted">${esc(CODE_MEANS[kind] || "")}</span></span>
+        <span class="code-facts"><strong>${fmt(r.failed)}</strong> failed request${r.failed === 1 ? "" : "s"} in the ${esc(invSpan())}
+        · <strong>${pctText(r.failed_pct, r.failed)}</strong> of all failures · <strong>${fmt(r.endpoints)}</strong> endpoint${r.endpoints === 1 ? "" : "s"}
+        · most recent <strong>${esc(ago(r.last_seen))}</strong></span></summary>
       ${codeReasonsHtml(r)}
-      ${table(["Endpoint", "Service", `${/^\d{3}$/.test(codeOf(r.code)) ? `${codeOf(r.code)}s` : "Failed"} in the ${invSpan()}`, "Most recent", ""], r.top.map((e) => [esc(e.operation || "–"),
-        esc(e.role || "") || '<span class="muted">(no name)</span>', `<span class="worse">${fmt(e.failed)}</span>`, seen(e.last_seen),
+      ${r.top.length ? BACKEND_NOTE : ""}${table(["Endpoint", "Service", `${/^\d{3}$/.test(codeOf(r.code)) ? `${codeOf(r.code)}s` : "Failed"} in the ${invSpan()}`, "Backend", "Most recent", ""], r.top.map((e) => [endpointHtml({ ...e, code: r.code }),
+        serviceHtml(e.role), `<span class="worse">${fmt(e.failed)}</span>`, backendCell({ ...e, code: r.code }), seen(e.last_seen),
         `<button type="button" class="link" data-inv-op="${esc(JSON.stringify({ operation: e.operation, role: e.role, code: r.code }))}">Samples</button>`]), "inv-codes")}
       ${more ? `<p class="muted">Its ${CODE_TOP_SHOWN} busiest of ${fmt(r.endpoints)} endpoints. Failing endpoints below has the rest by endpoint.</p>` : ""}
       ${r.trace_id ? `<p><button type="button" class="link" data-inv-follow="${esc(JSON.stringify({ trace: r.trace_id, at: r.last_seen }))}">Follow one</button> <span class="muted">a request that failed with ${esc(codeOf(r.code))}, end to end</span></p>` : ""}
     </details>`;
   }).join("") : invNoneHtml(data, "failed requests")}
     <details class="mon-query"><summary>Query sent</summary>${queryBlock(data)}</details>`;
+  out.querySelectorAll("details.code-group").forEach((group, i) => group.addEventListener("toggle", () => {
+    if (!group.open || group.dataset.detailsRead) return;  // read when first opened: over 30 days it takes ~30 s
+    group.dataset.detailsRead = "1";
+    loadEndpointDetails(group, rows[i].top.map((e) => ({ operation: e.operation || "", role: e.role || "", code: rows[i].code || "" })));
+  }));
 }
 const CODE_TOP_SHOWN = 5;
 
@@ -473,9 +571,10 @@ async function loadInvExceptions() {
     return;
   }
   inv.found.exceptions = data.rows;
+  invPartCount("exceptions", data.rows.length, "type");
   out.innerHTML = `${noticesHtml(data.errors)}${invRetryHtml("exceptions", data)}${data.rows.length ? table(["Exception", "Operation", "Service", `Count in the ${invSpan()}`, "Most recent", ""],
     data.rows.map((r) => [`<strong>${esc(r.type || "–")}</strong><div class="ai-msg muted">${esc(r.message || "")}</div>`,
-      esc(r.operation || "") || '<span class="muted">(none)</span>', esc(r.role || "") || '<span class="muted">(no name)</span>',
+      endpointHtml(r, { callers: false }), serviceHtml(r.role),
       `<span class="worse">${fmt(r.total)}</span>`, seen(r.last_seen),
       r.trace_id ? `<button type="button" class="link" data-inv-follow="${esc(JSON.stringify({ trace: r.trace_id, at: r.last_seen, instance: r.instance }))}">Follow</button>` : ""]), "inv-exc")
     : invNoneHtml(data, "exceptions")}
@@ -491,9 +590,10 @@ async function loadInvDependencies() {
     return;
   }
   inv.found.dependencies = data.rows;
+  invPartCount("dependencies", data.rows.length, "target");
   out.innerHTML = `${noticesHtml(data.errors)}${invRetryHtml("dependencies", data)}${data.rows.length ? table(["Type", "Target", "Service", `Failed in the ${invSpan()}`, "Out of", "Failure rate",
     "Result codes", "p95", "Most recent failure", ""], data.rows.map((r) => [esc(r.type || "–"), `<span class="ai-msg">${esc(r.target || "")}</span>`,
-      esc(r.role || "") || '<span class="muted">(no name)</span>', `<span class="worse">${fmt(r.failed)}</span>`, fmt(r.total),
+      serviceHtml(r.role), `<span class="worse">${fmt(r.failed)}</span>`, fmt(r.total),
       pctText(r.failed_pct, r.failed), codes(r.codes), msText(r.p95_ms), seen(r.last_seen),
       r.trace_id ? `<button type="button" class="link" data-inv-follow="${esc(JSON.stringify({ trace: r.trace_id }))}">Follow</button>` : ""]), "inv-dep")
     : invNoneHtml(data, "failed dependency calls")}
@@ -519,6 +619,7 @@ async function loadInvChanges(c) {
     return;
   }
   inv.found.changes = data.rows;
+  invPartCount("changes", data.rows.length, "change");
   const before = data.before;
   out.innerHTML = `${data.rows.length ? table(["When", "Resource", "Change", "By", "What changed"], data.rows.map((r) => [invTime(r.at),
       `${esc(r.name)} ${portalLinkHtml(r.id)}`, esc(r.change),
@@ -539,7 +640,7 @@ async function loadInvSamples(op, all = false) {
   inv.op = op;
   inv.opAll = all;
   const box = invStep("inv-samples", loading("Reading sample requests…"));
-  $("inv-samples").querySelector("h3 .inv-what").textContent = `· ${op.operation || "–"}${op.role ? ` · ${op.role}` : ""}${op.code ? ` · only ${codeOf(op.code)}` : ""}`;
+  $("inv-samples").querySelector("h3 .inv-what").textContent = `· ${opText(op.operation)}${op.role ? ` · ${op.role}` : ""}${op.code ? ` · only ${codeOf(op.code)}` : ""}`;
   let data;
   try { data = await api("api/investigate/samples", { params: invParams({ ...op, all: all ? "1" : "0" }) }); } catch (error) {
     if (!error.signedOut) box.innerHTML = noticeHtml(error);
@@ -566,7 +667,7 @@ function invSpanRow(s) {
   return `<tr class="${failed ? "inv-failed" : ""}"><td class="num" data-v="${Number(s.offset_ms)}">+${msLabel(s.offset_ms)}</td>
     <td>${pillHtml(INV_KIND_TONE[s.kind] || "info", s.kind)}${s.gateway ? ' <span class="chip-ok">gateway</span>' : ""}</td>
     <td style="padding-left:${0.5 + s.depth}rem">${esc(s.name || (s.severity ? s.severity : ""))}</td>
-    <td>${esc(s.role || "")}<div class="muted">${esc(s.instance || "")}</div></td>
+    <td>${serviceHtml(s.role, s.instance)}</td>
     <td>${s.duration_ms == null ? "" : msText(Math.round(s.duration_ms))}</td><td>${failed ? `<span class="worse">${esc(s.code || "failed")}</span>` : esc(s.code || "")}</td>
     <td>${detail}</td></tr>`;
 }
@@ -702,8 +803,6 @@ async function loadInvPodDetail(p) {
     ${logs.error ? noticeHtml(logs.error) : ""}${logs.error && !(logs.lines || []).length ? "" : logViewHtml(logs.lines || [])}
     <h4>Depends on <button type="button" class="link" id="inv-deps-read" title="Reads the pod's env and ConfigMaps for host names, and its identity's roles">Read</button></h4>
     <div id="inv-deps"></div>
-    ${p.owner ? `<h4>Path of ${esc(p.owner.kind)} ${esc(p.owner.name)} <button type="button" class="link" id="inv-path-read" title="Each hop in front of the workload (App Gateway, API Management), its requests and its pods, against the same hour last week">Read</button></h4>
-      <div id="inv-path"></div>` : ""}
     <h4>OOM kills of this pod, 30 minutes before to 5 after</h4>
     ${oom.error ? noticeHtml(oom.error) : (oom.kills || []).length ? oomTable(oom.kills, (ns, pod, container, at) => `<button type="button" class="link"
       data-inv-oom-logs="${esc(JSON.stringify({ namespace: ns, pod, container, at }))}">logs</button>`, "inv-oom") : '<p class="muted">None.</p>'}
@@ -717,7 +816,6 @@ async function loadInvPodDetail(p) {
     ${(changes.operations || []).length ? table(["When", "Operation", "Status", "Caller"], changes.operations.map((o) => [invTime(o.at), esc(o.operation),
       esc(o.status || ""), esc(o.caller || "")]), "inv-operations") : '<p class="muted">No control-plane operations.</p>'}`;
   $("inv-deps-read").addEventListener("click", () => loadDependencies($("inv-deps"), { id: p.cluster, namespace: p.namespace, pod: p.instance }));
-  if (p.owner) $("inv-path-read").addEventListener("click", () => loadPath($("inv-path"), { cluster: p.cluster, namespace: p.namespace, kind: p.owner.kind, workload: p.owner.name }));
   out.onclick = (event) => {
     const button = event.target.closest("[data-inv-oom-logs]");
     if (!button) return;
@@ -765,7 +863,7 @@ async function runInvSearch() {
   out.innerHTML = `${queryBlock(data)}${noticesHtml(data.errors)}
     <p class="muted">${data.rows.length} line(s), newest first${data.truncated ? " · <strong>only the newest 100</strong>" : ""}.</p>
     ${table(["Time", "Level", "Kind", "Role · instance", "Operation", "Message", ""], data.rows.map((r) => [invTime(r.time), esc(r.severity ?? ""),
-      esc(r.kind), `${esc(r.role || "")}<div class="muted">${esc(r.instance || "")}</div>`, esc(r.operation || ""),
+      esc(r.kind), serviceHtml(r.role, r.instance), endpointHtml(r, { callers: false }),
       `<span class="ai-msg">${esc((r.message || "").slice(0, 500))}</span>`,
       r.trace_id ? `<button type="button" class="link" data-inv-follow="${esc(JSON.stringify({ trace: r.trace_id, at: r.time, instance: r.instance }))}">Follow</button>` : ""]), "inv-search")}`;
 }

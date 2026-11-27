@@ -139,7 +139,10 @@ kubectl get pdb -A` },
 const EV_HOW = { "ev-not-running": "k-not-running", "ev-oom": "ci-oom", "ev-restarts": "ci-restarts", "ev-hot": "ci-hot", "ev-events": "ci-events" };
 for (const [key, from] of Object.entries(EV_HOW)) Object.defineProperty(KUBE_HOW, key, { value: KUBE_HOW[from], enumerable: false });
 
-const kubeHowButton = (key) => `<button type="button" class="kube-info" data-kube-how="${esc(key)}" title="How to see this with kubectl" aria-label="How to see this with kubectl">ⓘ</button>`;
+// ⓘ for a section: a KUBE_HOW key, or its own { from, cmd, note } (commands with the real names filled in).
+const kubeHowButton = (key, own = null) => `<button type="button" class="kube-info" data-kube-how="${esc(key)}"${own
+  ? ` data-kube-from="${esc(own.from)}" data-kube-cmd="${esc(own.cmd)}" data-kube-note="${esc(own.note || "")}"` : ""} title="How to see this with kubectl" aria-label="How to see this with kubectl">ⓘ</button>`;
+const SYSTEM_NOTE = "The console leaves system namespaces out of <em>All namespaces</em> unless you pick one, or <em>All namespaces, including system</em>; <code>-A</code> shows every namespace, <code>-n &lt;namespace&gt;</code> one. The kubectl tab has the rest.";
 const kubeCmdHtml = (cmd) => `<div class="kube-cmd"><pre class="logs">${esc(cmd)}</pre><button type="button" class="link" data-copy="${esc(cmd)}">copy</button></div>`;
 
 // ⓘ opens the command under its heading (and never toggles the fold it sits in).
@@ -150,9 +153,9 @@ document.addEventListener("click", (event) => {
   const anchor = button.closest("summary, h4, h5") || button;
   const next = anchor.nextElementSibling;
   if (next && next.classList.contains("kube-how")) { next.remove(); return; }
-  const how = KUBE_HOW[button.dataset.kubeHow];
+  const own = button.dataset.kubeCmd !== undefined, how = own ? { from: button.dataset.kubeFrom, cmd: button.dataset.kubeCmd } : KUBE_HOW[button.dataset.kubeHow];
   anchor.insertAdjacentHTML("afterend", `<div class="kube-how"><p class="muted">${esc(how.from)}</p>${kubeCmdHtml(how.cmd)}
-    <p class="muted">The console leaves system namespaces out of <em>All namespaces</em> unless you pick one, or <em>All namespaces, including system</em>; <code>-A</code> shows every namespace, <code>-n &lt;namespace&gt;</code> one. The kubectl tab has the rest.</p></div>`);
+    <p class="muted">${own ? esc(button.dataset.kubeNote) : SYSTEM_NOTE}</p></div>`);
   const part = button.closest("details");
   if (part) part.open = true;
 });
@@ -256,7 +259,7 @@ function aksPart(key, title, count, problem, inner, jump = title.split(",")[0], 
 
 // One filter over every table in the tab, by text and by namespace: sections with a match open, the rest hide. A
 // section with no Namespace column stays for a namespace (node pools). Tables in a workload's own panel are left alone.
-const tabLists = (root) => [...root.querySelectorAll("table[data-list]")].filter((t) => !t.closest(".logs-panel, #dep-out, #path-out"));
+const tabLists = (root) => [...root.querySelectorAll("table[data-list]")].filter((t) => !t.closest(".logs-panel, #dep-out"));
 
 function filterAksParts(body, text, ns = "") {
   for (const t of tabLists(body)) {

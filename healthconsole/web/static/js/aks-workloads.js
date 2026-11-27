@@ -185,6 +185,25 @@ function workloadButton(namespace, label, text = label) {
 
 const cpuText = (m) => (m == null ? "–" : m >= 1000 ? `${(m / 1000).toFixed(m >= 10000 ? 0 : 2)} cores` : `${Math.round(m)}m`);
 const memText = (mib) => (mib == null ? "–" : mib >= 1024 ? `${(mib / 1024).toFixed(1)} GiB` : `${Math.round(mib)} MiB`);
+// "3 d 4 h", "5 h 20 min", "12 min": how long since an ISO time (an HPA at max, a pod started).
+function sinceText(iso) {
+  const minutes = Math.max(0, Math.floor((Date.now() - new Date(iso)) / 60000));
+  const days = Math.floor(minutes / 1440), hours = Math.floor((minutes % 1440) / 60);
+  return days ? `${days} d ${hours} h` : hours ? `${hours} h ${minutes % 60} min` : `${minutes} min`;
+}
+// A container's runtime memory cap against its limit, in words: what's set, its share of the limit, the room outside it.
+function runtimeCapHtml(cap) {
+  if (!cap) return "–";
+  const limit = cap.limit_mib ? memText(cap.limit_mib) : "";
+  if (cap.cap_mib == null) {
+    return cap.runtime ? `<strong>${esc(cap.runtime)}</strong> <span class="muted">${esc(cap.how)}</span>`
+      : `<span class="muted" title="Only the Deployment's env, command and args are read (the Kubernetes API, no exec): a cap set in the image (its ENV or entrypoint) or through envFrom isn't seen">${cap.how ? esc(cap.how)
+        : `none in its env or arguments (the image or an envFrom may still set one)${limit ? `; its limit is ${limit}` : "; no memory limit set"}`}</span>`;
+  }
+  return `<strong>${esc(cap.runtime)}</strong> ${memText(cap.cap_mib)} <span class="muted">${esc(cap.how)}</span>${limit
+    ? `<div class="muted">${fmt(cap.of_limit)}% of the ${limit} limit · ${memText(cap.outside_mib)} left for everything outside it</div>`
+    : '<div class="muted">no memory limit set</div>'}`;
+}
 const ofRequest = (p) => (p == null ? "" : ` <span class="muted">(${fmt(p)}%)</span>`);
 
 function workloadDetailRow(button, clusterId, target) {
@@ -202,88 +221,70 @@ async function loadWorkloadDetail(box, head, clusterId, target) {
   box.innerHTML = workloadDetailHtml(d) + [(d.yaml || {}).workload, (d.yaml || {}).hpa].map((y) => yamlFoldHtml(y, clusterId)).join("")  /* JSON keys arrive sorted */ + `<h5>CPU and memory over time, runtime memory</h5><div class="wl-history">${loading("Reading 7 and 30 days of CPU and memory…")}</div>`;
   const targets = Object.fromEntries(((d.hpa || {}).metrics || []).filter((m) => m.type === "Utilization" && typeof m.target === "number")
     .map((m) => [`target_${m.resource}`, m.target]));
-  const tool = pathTool();
+  const tool = monitorTool();
   const h = await api("api/workload/history", { params: { ...params, ...targets, ...(tool ? toolParams(tool) : {}) } }).catch((error) => ({ error: error.message }));
   const out = box.querySelector(".wl-history");
   if (out) out.innerHTML = h.error ? noticeHtml(h.error) : workloadHistoryHtml(h, d);
-  box.insertAdjacentHTML("beforeend", workloadFitFormHtml(d, h.error ? {} : h.needed || {}));
-  wireWorkloadFit(box, params, d, h.error ? {} : h.needed || {});
+  if (!box.isConnected) return;
+  box.insertAdjacentHTML("beforeend", `<h5>Memory over 7 days, pod by pod</h5><div class="wl-memory">${loading("Reading each pod's memory over 7 days…")}</div>`);
+  const m = await api("api/workload/memory", { params: { ...params, ...(d.last_rollout ? { rollout: d.last_rollout } : {}), ...(tool ? toolParams(tool) : {}) } })
+    .catch((error) => ({ error: error.message }));
+  const memBox = box.querySelector(".wl-memory");
+  if (!memBox) return;
+  memBox.innerHTML = m.error ? noticeHtml(m.error) : workloadMemoryHtml(m, d);
+  if (m.found) drawMemoryChart(memBox.querySelector("canvas"), m);
 }
 
-// Would a change fit: new requests per container (today's, or what the HPA targets need), checked on Check only.
-function workloadFitFormHtml(d, needed) {
-  const rows = (d.containers || []).map((c) => [`<strong>${esc(c.name)}</strong>`,
-    `<input type="number" min="0" step="50" data-fit-cpu="${esc(c.name)}" value="${Math.round(c.cpu.request || 0)}" aria-label="${esc(c.name)} CPU request in millicores"> m`,
-    `<input type="number" min="0" step="256" data-fit-mem="${esc(c.name)}" value="${Math.round(c.memory.request || 0)}" aria-label="${esc(c.name)} memory request in MiB"> MiB`,
-    `<span class="muted">now ${cpuText(c.cpu.request)} · ${memText(c.memory.request)}</span>`]);
-  return `<h5>Would a change fit?</h5><div class="wl-fit">
-    <p class="muted">New requests per pod, checked against the nodes its pods run on now and every pod on them (Kubernetes API, read when you
-      press Check). The replicas follow its HPA's own arithmetic with the new request, unless you give a number.</p>
-    <table class="wl-fit-form"><thead><tr><th>Container</th><th>CPU request</th><th>Memory request</th><th></th></tr></thead><tbody>${
-      rows.map((r) => `<tr>${r.map((c) => `<td>${c}</td>`).join("")}</tr>`).join("")}</tbody></table>
-    <div class="table-tools"><label class="inline">Replicas <input type="number" min="1" max="10000" data-fit-replicas placeholder="from its HPA" style="width:9em"></label>
-      ${Object.keys(needed).length ? `<button type="button" data-fit-suggest title="Each request raised or lowered to what the HPA's targets need at the peak (history above), rounded up">Use what its HPA targets need</button>` : ""}
-      <button type="button" data-fit-check>Check</button></div><div class="wl-fit-out"></div></div>`;
+// A workload's memory week: facts to read a memory problem from (a climb that resets on restart, a jump after a rollout),
+// never a verdict. Container Insights, else the monitoring tool.
+function workloadMemoryHtml(m, d) {
+  const sent = `<details class="mon-query"><summary>Queries sent</summary>${queryBlock({ queries: m.queries || [] })}</details>`;
+  if (!m.found) return `<p class="muted">${esc(m.reason || "No memory history for this workload.")}</p>${sent}`;
+  const limit = (d.containers || []).reduce((sum, c) => sum + (c.memory.limit || 0), 0) || null;
+  const r = m.rollout;
+  const side = (x) => (x ? [memText(x.memory_per_pod), fmt(x.pods), fmt(x.restarts)] : ["–", "–", "–"]);
+  const around = r ? `<p><strong>Last rollout ${esc(new Date(r.at).toLocaleString())}</strong> <span class="muted">(${esc(sinceText(r.at))} ago): the 24 hours
+      before against the 24 after</span></p>${table(["", "Memory per pod (average)", "Pods running (average)", "Restarts"],
+      [["Before", ...side(r.before)], ["After", ...side(r.after)]], "wl-rollout")}`
+    : `<p class="muted">${d.last_rollout ? `The last rollout (${esc(new Date(d.last_rollout).toLocaleString())}) is outside these 7 days, or one side has too little data to compare.`
+      : "No rollout time is known for this workload (only a Deployment's is), so there's no before and after."}</p>`;
+  const rows = m.pods.map((p) => [esc(p.pod), `<span data-v="${new Date(p.started).getTime()}" title="${esc(new Date(p.started).toLocaleString())}">${esc(sinceText(p.started))} ago</span>`,
+    `<span data-v="${p.now_mib}">${memText(p.now_mib)}</span>${limit ? ` <span class="muted">${fmt(Math.round(100 * p.now_mib / limit))}% of limit</span>` : ""}`,
+    `<span data-v="${p.peak_mib}">${memText(p.peak_mib)}</span>`,
+    p.growth_mib_h == null ? '<span class="muted" data-v="0" title="Fewer than 6 hours of readings">–</span>' : `<span data-v="${p.growth_mib_h}">${p.growth_mib_h > 0 ? "+" : ""}${fmt(p.growth_mib_h)} MiB/h</span>`,
+    p.restarts ? `<span class="worse">${fmt(p.restarts)}</span>` : "0", p.oom ? `<span class="worse">${fmt(p.oom)}</span>` : "0"]);
+  return `<p class="muted">Each line is one pod's memory (working set, its containers added up), hour by hour, from <strong>${esc(m.source)}</strong>.
+      ▲ marks a restart, ✕ an OOM kill${r ? ", the dashed line the last rollout" : ""}. A pod whose memory climbs steadily and drops back when it
+      restarts behaves differently from one that stays flat; <em>growth</em> is how fast each pod's memory rose since it started.</p>
+    <p><strong>Median growth ${m.median_growth_mib_h == null ? "–" : `${m.median_growth_mib_h > 0 ? "+" : ""}${fmt(m.median_growth_mib_h)} MiB/h`}</strong>
+      <span class="muted">across ${fmt(m.pods.length)} pod(s) seen in 7 days${m.pods.length > m.chart.length ? `; the ${fmt(m.chart.length)} most recent are drawn` : ""}</span></p>
+    <div class="wl-memory-chart"><canvas></canvas></div>${around}
+    ${table(["Pod", "Started", "Memory now", "Peak", "Growth", "Restarts", "OOM kills"], rows, "wl-memory-pods")}${sent}`;
 }
 
-function wireWorkloadFit(box, params, d, needed) {
-  const wrap = box.querySelector(".wl-fit");
-  if (!wrap) return;
-  const cpuIn = [...wrap.querySelectorAll("[data-fit-cpu]")], memIn = [...wrap.querySelectorAll("[data-fit-mem]")];
-  const suggest = () => {
-    // The need is for the pod; each container gets its share of today's request, rounded up to 50m and 256 MiB.
-    for (const [res, inputs, total, step] of [["cpu", cpuIn, (needed.cpu || {}).need * 1000, 50], ["memory", memIn, (needed.memory || {}).need / 2 ** 20, 256]]) {
-      if (!total) continue;
-      const now = (d.containers || []).map((c) => c[res].request || 0), sum = now.reduce((a, b) => a + b, 0);
-      inputs.forEach((input, i) => { input.value = Math.ceil((sum ? total * now[i] / sum : total / inputs.length) / step) * step; });
-    }
-  };
-  const check = async () => {
-    const out = wrap.querySelector(".wl-fit-out");
-    const containers = cpuIn.map((input, i) => `${input.dataset.fitCpu}:${Math.round(Number(input.value) || 0)}:${Math.round(Number(memIn[i].value) || 0)}`);
-    const replicas = wrap.querySelector("[data-fit-replicas]").value.trim();
-    out.innerHTML = loading("Reading the nodes and every pod on them…");
-    const f = await api("api/workload/fit", { params: { ...params, container: containers, ...(replicas ? { replicas } : {}) } })
-      .catch((error) => ({ error: error.message }));
-    out.innerHTML = f.error || !f.available ? noticeHtml(f.error || f.reason) : workloadFitHtml(f);
-  };
-  wrap.addEventListener("click", (event) => {
-    if (event.target.closest("[data-fit-suggest]")) suggest();
-    if (event.target.closest("[data-fit-check]")) check();
+function drawMemoryChart(canvas, m) {
+  if (!canvas || typeof Chart === "undefined") return;
+  const ms = (t) => new Date(t).getTime(), palette = ["--accent", "--healthy", "--warning", "--muted"].map(cssVar);
+  const lines = m.chart.map((p, i) => ({ label: p.pod, data: p.points.map(([t, v]) => ({ x: ms(t), y: v })), borderWidth: 1.2,
+    borderColor: palette[i % palette.length], pointRadius: 0, tension: 0.2 }));
+  const at = (p, t) => (p.points.find(([x]) => ms(x) >= ms(t)) || p.points.at(-1) || [t, 0])[1];
+  const marks = (key, style, label) => ({ label, type: "scatter", showLine: false, pointStyle: style, pointRadius: 6, borderColor: cssVar("--critical"),
+    backgroundColor: cssVar("--critical"), data: m.chart.flatMap((p) => (p[key] || []).map((x) => { const t = Array.isArray(x) ? x[0] : x; return { x: ms(t), y: at(p, t) }; })) });
+  const top = Math.max(0, ...m.chart.flatMap((p) => p.points.map(([, v]) => v)));
+  const roll = m.rollout ? [{ label: "last rollout", data: [{ x: ms(m.rollout.at), y: 0 }, { x: ms(m.rollout.at), y: top }], borderDash: [5, 4],
+    borderColor: cssVar("--text"), borderWidth: 1, pointRadius: 0 }] : [];
+  new Chart(canvas, {
+    type: "line", data: { datasets: [...lines, marks("restarts", "triangle", "restart"), marks("oom", "crossRot", "OOM kill"), ...roll] },
+    options: { responsive: true, maintainAspectRatio: false, animation: false, parsing: false,
+      plugins: { legend: { display: false }, tooltip: { callbacks: {
+        title: (items) => new Date(items[0].parsed.x).toLocaleString(),
+        label: (ctx) => `${ctx.dataset.label}: ${memText(ctx.parsed.y)}` } } },
+      scales: { x: { type: "linear", ticks: { color: cssVar("--muted"), maxTicksLimit: 8, callback: (v) => new Date(v).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit" }) },
+          grid: { display: false } },
+        y: { beginAtZero: true, ticks: { color: cssVar("--muted"), callback: (v) => memText(v) }, grid: { color: cssVar("--border") } } } },
   });
-  wrap.addEventListener("keydown", (event) => { if (event.key === "Enter" && event.target.matches("input")) { event.preventDefault(); check(); } });
 }
 
-function workloadFitHtml(f) {
-  const pod = `${cpuText(f.per_pod.after[0])} · ${memText(f.per_pod.after[1])}`;
-  const m = f.missing, r = f.replicas, ro = f.rollout;
-  const where = f.pools.map((p) => `${fmt(p.usable)} node(s) of ${esc(p.pool)}`).join(" and ");
-  let head = f.fits ? `${pill("healthy")} <strong>Fits:</strong> ${fmt(r.after)} pod(s) of ${pod} on the ${where}.`
-    : `${pill("warning")} <strong>Doesn't fit:</strong> ${fmt(f.short)} of ${fmt(r.after)} pod(s) of ${pod} have no room on the ${where}.`;
-  if (m) {
-    const auto = (f.pools.find((p) => p.pool === m.pool) || {}).autoscaler;
-    head += m.nodes ? ` It needs <strong>${fmt(m.nodes)} more node(s)</strong> of ${esc(m.pool)} (${fmt(m.per_node)} such pod(s) per new node);`
-      + (m.room === null ? (auto ? " its autoscaler is off, so someone adds them." : " the pool's autoscaler settings couldn't be read.")
-        : m.room >= m.nodes ? ` its autoscaler can add them (${fmt(m.room)} below its maximum of ${fmt(auto.max)}).`
-        : ` its autoscaler can only add ${fmt(m.room)} (maximum ${fmt(auto.max)}).`)
-      : ` A pod this size doesn't fit on an empty node of ${esc(m.pool)}.`;
-  }
-  const pct = (a, b) => (b ? ` <span class="muted">(${fmt(Math.round(100 * a / b))}%)</span>` : "");
-  const pools = table(["Pool", "Nodes", "CPU requested: before → after", "Memory requested: before → after", "Its pods", "Autoscaler"], f.pools.map((p) => [
-    esc(p.pool), `${fmt(p.usable)}${p.usable < p.nodes ? ` <span class="muted">of ${fmt(p.nodes)}</span>` : ""}`,
-    `${cpuText(p.before_cpu)}${pct(p.before_cpu, p.alloc_cpu)} → ${cpuText(p.after_cpu)}${pct(p.after_cpu, p.alloc_cpu)} <span class="muted">of ${cpuText(p.alloc_cpu)}</span>`,
-    `${memText(p.before_mem)}${pct(p.before_mem, p.alloc_mem)} → ${memText(p.after_mem)}${pct(p.after_mem, p.alloc_mem)} <span class="muted">of ${memText(p.alloc_mem)}</span>`,
-    `${fmt(p.pods_before)} → ${fmt(p.pods_after)}`,
-    p.autoscaler ? (p.autoscaler.autoscale ? `${fmt(p.autoscaler.min)}–${fmt(p.autoscaler.max)}, now ${fmt(p.autoscaler.count)}` : "off")
-      + (p.autoscaler.vm_size ? ` <span class="muted">${esc(p.autoscaler.vm_size)}</span>` : "") : "–"]), "wl-fit-pools");
-  const metrics = r.metrics.length ? table(["Metric", "Now", "With the new request", "Target", "Asks for"], r.metrics.map((x) => [
-    esc(x.resource), `${fmt(x.now)}%`, `${fmt(x.after)}%`, `${fmt(x.target)}%`, fmt(x.asks)]), "wl-fit-metrics") : "";
-  const rollout = ro.surge || ro.unavailable ? `<p><strong>Rolling update:</strong> up to ${fmt(ro.surge)} new pod(s) at once (maxSurge) and ${fmt(ro.unavailable)}
-    old one(s) down (maxUnavailable); room now for ${fmt(ro.room_now)} new pod(s) next to the old ones, on ${fmt(ro.nodes_with_room)} node(s).
-    ${ro.note ? `<br>${pill("warning")} ${esc(ro.note)}` : ""}</p>` : (ro.note ? `<p class="muted">${esc(ro.note)}</p>` : "");
-  return `<p>${head}</p><p>Replicas: ${fmt(r.now)} now → <strong>${fmt(r.after)}</strong> <span class="muted">(${esc(r.why)})</span></p>
-    ${metrics}${pools}${rollout}<ul class="wl-notes muted">${f.notes.map((n) => `<li>${esc(n)}</li>`).join("")}</ul>`;
-}
 
 function workloadDetailHtml(d) {
   const o = d.overview, h = d.hpa;
@@ -300,6 +301,13 @@ function workloadDetailHtml(d) {
   return head + unread + findings + workloadHpaHtml(h, d) + workloadContainersHtml(d) + workloadPodsHtml(d) + workloadEventsHtml(d);
 }
 
+// An HPA condition in words: ScalingLimited is good when False (within min and max); the others when True.
+function hpaConditionHtml(c) {
+  const limited = c.type === "ScalingLimited", good = limited ? c.status !== "True" : c.status === "True";
+  const [tone, label] = good ? ["healthy", limited ? "within range" : "OK"] : limited ? ["warning", "at min or max"] : ["critical", "can't scale"];
+  return pillHtml(tone, label, { rank: null });
+}
+
 function workloadHpaHtml(h, d) {
   if (!h) return `<h5>Scaling</h5><p class="muted">No HPA: it runs a fixed ${fmt(d.overview.desired ?? 0)} replica(s).</p>`;
   const line = h.decides == null ? `Its HPA has no CPU or memory reading now, so it can't say which metric decides.`
@@ -307,17 +315,19 @@ function workloadHpaHtml(h, d) {
       : `<strong>${esc(h.decides)}</strong> decides: it asks for ${fmt(h.wants)} pods (min ${fmt(h.min)}, max ${fmt(h.max)}).`;
   const metrics = table(["Metric", "Target", "Now", "Pods it asks for"], h.metrics.map((m) => {
     const unit = m.type === "Utilization" ? "% of request" : "";
-    return [`${esc(m.resource)}${m.resource === h.decides ? ` ${pill(h.limited ? "critical" : "info", "this metric sets the replica count")}` : ""}`,
+    return [`${esc(m.resource)}${m.resource === h.decides ? ` ${pillHtml(h.limited ? "critical" : "info", h.limited ? "holds it at max" : "sets the count", { rank: null, title: "The metric whose reading decides how many pods the HPA asks for" })}` : ""}`,
       `${esc(m.target)}${unit ? `% <span class="muted">${unit.slice(2)}</span>` : ""}`, m.current == null ? "–" : `${esc(m.current)}${unit ? "%" : ""}`,
       m.asks == null ? "–" : fmt(m.asks) + (m.asks > h.max ? ` <span class="muted">(capped at ${fmt(h.max)})</span>` : m.asks < h.min ? ` <span class="muted">(min ${fmt(h.min)})</span>` : "")];
   }), "wl-hpa");
   const conditions = table(["Condition", "Status", "Reason", "Kubernetes says", "Since"], (h.conditions || []).map((c) => [
-    esc(c.type), c.status === "True" ? (c.type === "ScalingLimited" ? pill("warning") + " True" : "True") : pill(c.type === "ScalingLimited" ? "healthy" : "critical") + " " + esc(c.status),
+    esc(c.type), `${esc(c.status)} ${hpaConditionHtml(c)}`,
     esc(c.reason || ""), `<span class="muted ai-msg">${esc(c.message || "")}</span>`, c.lastTransitionTime ? seen(c.lastTransitionTime) : "–"]), "wl-hpa-conditions");
   const down = (h.behavior || {}).scaleDown, up = (h.behavior || {}).scaleUp;
   const behave = (name, b) => (b ? `${name}: wait ${fmt(b.stabilizationWindowSeconds ?? (name === "Scale down" ? 300 : 0))} s${(b.policies || []).map((p) => `, ${esc(p.type)} ${fmt(p.value)} per ${fmt(p.periodSeconds)} s`).join("")}` : "");
+  const pinned = h.at_max_since ? `<p><strong>At its maximum for ${esc(sinceText(h.at_max_since))}</strong> <span class="muted">· since
+    ${esc(new Date(h.at_max_since).toLocaleString())}, from Kubernetes' ScalingLimited condition</span></p>` : "";
   return `<h5>Scaling: HPA ${esc(h.name)}</h5>
-    <p class="big-line">${line}</p>
+    <p class="big-line">${line}</p>${pinned}
     <p class="muted">${fmt(h.current)} now, ${fmt(h.desired ?? h.current)} wanted, min ${fmt(h.min)}, max ${fmt(h.max)}${h.last_scale ? ` · last scaled ${seen(h.last_scale)}` : ""}.
       Each metric asks for <em>current pods × now ÷ target</em> (left alone within 10%), and the highest one wins.
       ${[behave("Scale up", up), behave("Scale down", down)].filter(Boolean).map(esc).join(" · ") || "Default behaviour: scale down after 5 minutes at a lower reading."}</p>
@@ -331,18 +341,39 @@ function workloadContainersHtml(d) {
     `${cpuText(c.cpu.request)} / ${cpuText(c.cpu.limit)}`, `${cpuText(c.cpu.used)}${ofRequest(c.cpu.of_request)}`,
     `${memText(c.memory.request)} / ${memText(c.memory.limit)}`, `${memText(c.memory.used)}${ofRequest(c.memory.of_request)}${c.memory.of_limit != null ? ` <span class="muted">${fmt(c.memory.of_limit)}% of limit</span>` : ""}`,
     `<span class="muted">start: ${probe(c.probes.startup)}<br>ready: ${probe(c.probes.readiness)}<br>live: ${probe(c.probes.liveness)}</span>`,
-    (c.memory_flags || []).length ? c.memory_flags.map((f) => f.flag ? `<code>${esc(f.flag)}</code> <span class="muted">${esc(f.source)}</span>`
-      : `<span class="muted">${esc(f.source)}: ${esc(f.note)}</span>`).join("<br>") + (c.heap_max ? `<br><span class="muted">heap max ${memText(c.heap_max)}</span>` : "") : '<span class="muted">none set</span>']);
+    runtimeCapHtml(c.runtime_cap) + ((c.memory_flags || []).length ? `<div class="muted">${c.memory_flags.map((f) => f.flag
+      ? `<code>${esc(f.flag)}</code> ${esc(f.source)}` : `${esc(f.source)}: ${esc(f.note)}`).join("<br>")}</div>` : "")]);
   const mounts = d.containers.flatMap((c) => (c.mounts || []).filter((m) => m.kind === "emptyDir").map((m) =>
     `${esc(c.name)}: <code>${esc(m.path)}</code> emptyDir${m.memory ? " in memory" : " on the node's disk"}${m.size_limit ? `, limit ${esc(m.size_limit)}` : ", no size limit"}`));
   const notes = d.containers.flatMap((c) => (c.notes || []).map((n) => `${esc(c.name)}: ${esc(n)}`));
-  return `<h5>Containers: requests against use</h5>
+  return `<h5>Containers: requests against use ${kubeHowButton("runtime-memory", runtimeMemoryHow(d))}</h5>
     <p class="muted">Use is the average over its pods right now (metrics-server)${d.usage_live ? "" : ", not available on this cluster"}. The HPA compares use with the <em>request</em>;
-      the limit is where a container is throttled (CPU) or killed (memory). Runtime memory settings are picked out of its env and arguments:
-      only those flags are shown, never the rest of a value.</p>
-    ${table(["Container", "CPU request / limit", "CPU used (of request)", "Memory request / limit", "Memory used (of request)", "Probes", "Runtime memory settings"], rows, "wl-containers")}
+      the limit is where a container is throttled (CPU) or killed (memory). <em>Runtime memory cap</em> is what its runtime (Java, Node.js,
+      Go, .NET) is told it may use, against its limit. It's read from the Deployment's own env, command and args (only those flags, never the
+      rest of a value); a cap set inside the image or through <code>envFrom</code> isn't seen.</p>
+    ${table(["Container", "CPU request / limit", "CPU used (of request)", "Memory request / limit", "Memory used (of request)", "Probes", "Runtime memory cap"], rows, "wl-containers")}
     ${notes.length ? `<ul class="wl-notes">${notes.map((n) => `<li>${n}</li>`).join("")}</ul>` : ""}
     ${mounts.length ? `<p class="muted">Scratch volumes (counted in the pod's memory when in memory, or as page cache when written often): ${mounts.join(" · ")}</p>` : ""}`;
+}
+
+// The commands to check a container's runtime memory settings yourself: what the spec sets (a read, as the console
+// does), and what the running process got (exec: a permission the console doesn't use and Reader doesn't have).
+function runtimeMemoryHow(d) {
+  const o = d.overview || {}, kind = { Deployment: "deploy", StatefulSet: "statefulset", DaemonSet: "daemonset" }[o.kind] || "deploy";
+  const ns = o.namespace || "<namespace>", name = o.name || "<workload>", first = ((d.containers || [])[0] || {}).name || "<container>";
+  const flags = String.raw`-Xm[xs][0-9]+[kKmMgG]?|-XX:[A-Za-z]*RAMPercentage=[0-9.]+|--max-old-space-size=[0-9]+|GOMEMLIMIT=[^ ]+|DOTNET_GCHeapHardLimit[A-Za-z]*=[^ ]+`;
+  return {
+    from: "What the console reads (a GET, Reader is enough), then what the running process actually got, which only exec can show:",
+    cmd: `# 1. What the ${o.kind || "workload"}'s own spec sets: each container's env names and envFrom (no values)
+kubectl get ${kind} -n ${ns} ${name} -o jsonpath='{range .spec.template.spec.containers[*]}{.name}{": env="}{.env[*].name}{"  envFrom="}{.envFrom}{"\n"}{end}'
+
+# 2. What the running process got, image and envFrom included (runs inside one pod: needs pods/exec)
+kubectl exec -n ${ns} ${kind}/${name} -c ${first} -- sh -c 'tr "\0" " " < /proc/1/cmdline; echo; env' | grep -oE -- '${flags}'
+
+# 3. A Java app's effective heap max, defaults included (needs pods/exec and jcmd in the image)
+kubectl exec -n ${ns} ${kind}/${name} -c ${first} -- jcmd 1 VM.flags | tr ' ' '\n' | grep -E 'MaxHeapSize|MaxRAMPercentage'`,
+    note: "The console only reads (GET) and never runs exec: commands 2 and 3 run inside a pod and need pods/exec (in AKS, Azure Kubernetes Service RBAC Writer or a role that grants it), which Reader doesn't have. Change -c to check another container.",
+  };
 }
 
 function workloadPodsHtml(d) {
@@ -432,117 +463,8 @@ async function loadDependencies(box, params) {
   box.innerHTML = d.error ? noticeHtml(d.error) : dependenciesHtml(d);
 }
 
-// ------------------------------------------------------------------ workload path (decision 150)
-// One workload and the hops in front of it, each from wherever its data is. Its front doors are suggested from data and
-// confirmed once (kept per tenant); then every hop is read: last hour against the same hour last week, per minute.
-const pathTool = () => toolKinds().find((k) => (state.selected || {})[k]) || "";
-const PATH_ROWS = { agw: "App Gateway", apim: "API Management", requests: "Requests", pods: "Pods" };
-
-function pathFigures(hop) {
-  const n = hop.now || {}, w = hop.week || {};
-  if (hop.hop === "pods") {
-    return [`${fmt(n.restarts ?? 0)} restarts · ${fmt(n.pods ?? 0)} pods${n.not_ready ? ` · <strong class="worse">${fmt(n.not_ready)} not ready</strong>` : ""}${n.oom_containers ? ` · ${fmt(n.oom_containers)} OOM` : ""}`,
-      `${fmt(w.restarts ?? 0)} restarts`];
-  }
-  const line = (r) => (r.total ? `${fmt(r.errors || 0)} of ${fmt(r.total)} failed (${pctText(r.total ? (100 * (r.errors || 0)) / r.total : 0, r.errors)})` : "no requests");
-  const extra = [n.p95_ms != null ? `p95 ${msLabel(n.p95_ms)}` : "", n.gateway_errors ? `${fmt(n.gateway_errors)} the gateway's own (no backend answer)` : "",
-    n.backend_errors ? `${fmt(n.backend_errors)} from the backend` : "", n.unreachable ? `${fmt(n.unreachable)}× 502` : "", n.timed_out ? `${fmt(n.timed_out)}× 504` : ""].filter(Boolean);
-  return [`${line(n)}${extra.length ? `<div class="muted">${extra.join(" · ")}</div>` : ""}`, line(w)];
-}
-
-function pathHopName(hop) {
-  const d = hop.details || {};
-  const what = hop.hop === "apim" ? d.api : hop.hop === "agw" ? `${d.listener} → ${d.pool}` : hop.hop === "requests" ? d.component || "" : "";
-  return `<strong>${esc(hop.label)}</strong>${what ? `<div class="muted">${esc(what)}</div>` : ""}`;
-}
-
-// Every hop's errors per minute over the last hour on one shared 60-minute axis (pods: restarts per 5 minutes).
-function pathTimelineHtml(hops) {
-  const end = Date.now(), w = 360, h = 26;
-  const rows = hops.filter((x) => x.available && x.minutes && x.minutes.length).map((hop) => {
-    const slots = new Array(60).fill(0);
-    for (const [t, , errors] of hop.minutes) {
-      const i = 59 - Math.floor((end - Date.parse(t)) / 60000);
-      if (i >= 0 && i < 60) slots[i] += errors || 0;
-    }
-    const peak = Math.max(...slots, 1), bw = w / 60;
-    const bars = slots.map((v, i) => (v ? `<rect x="${(i * bw).toFixed(1)}" y="${(h - (h * v) / peak).toFixed(1)}" width="${Math.max(bw - 1, 1).toFixed(1)}" height="${((h * v) / peak).toFixed(1)}"/>` : "")).join("");
-    return `<div class="path-strip"><span>${esc(hop.label)}</span><svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" role="img"
-      aria-label="${esc(`${hop.label}: ${hop.hop === "pods" ? "restarts" : "errors"} per minute, peak ${peak}`)}"><title>${esc(`${hop.hop === "pods" ? "Restarts" : "Errors"} per minute, peak ${fmt(Math.max(...slots))}`)}</title>${bars}</svg>
-      <span class="muted">peak ${fmt(Math.max(...slots))}</span></div>`;
-  });
-  return rows.length ? `<div class="path-timeline"><p class="muted">Last 60 minutes, left to right, each row on its own scale:</p>${rows.join("")}</div>` : "";
-}
-
-function pathLinkSummary(link, tool) {
-  const parts = [...(link.agw || []).map((g) => `App Gateway ${g.gateway_id.split("/").pop()}: ${g.listener} → ${g.pool}`),
-    ...(link.apim || []).map((a) => `API ${a.api} on ${a.service_id.split("/").pop()}`),
-    link.app ? `${tool || "monitoring tool"} app ${link.app}` : "", link.component ? `App Insights ${link.component.split("/").pop()}` : ""].filter(Boolean);
-  return parts.length ? `Front doors: ${esc(parts.join(" · "))}` : "No front doors linked yet: only its pods are read, and its requests when a component or app is linked.";
-}
-
-async function loadPath(box, params) {
-  const tool = pathTool();
-  box.innerHTML = loading("Reading each hop: last hour against the same hour last week…");
-  const data = await api("api/path/read", { params: { ...params, ...(tool ? toolParams(tool) : {}) } }).catch((error) => ({ error: error.message }));
-  if (data.error) { box.innerHTML = noticeHtml(data.error); return; }
-  const rows = data.hops.map((hop) => {
-    const [now, week] = hop.available ? pathFigures(hop) : [`<span class="muted">${esc(hop.reason)}</span>`, ""];
-    const detail = [...((hop.details || {}).reasons || []).map(([r, n]) => `${r} ×${fmt(n)}`),
-      ...((hop.details || {}).backend_statuses || []).map(([r, n]) => `backend ${r} ×${fmt(n)}`),
-      ...((hop.details || {}).events || []).map(([r, n]) => `${r} ×${fmt(n)}`)].join(" · ");
-    return [hop.status ? pill(hop.status, hop.why) : '<span class="muted">–</span>', pathHopName(hop), `<span class="muted">${esc(hop.source)}</span>`,
-      now, week, `<span class="muted ai-msg">${esc(detail)}</span>`];
-  });
-  const queries = data.hops.flatMap((h) => h.queries || []);
-  const pr = data.rules || {};
-  box.innerHTML = `<p class="big-line">${esc(data.verdict)}</p>
-    ${data.rules ? `<p class="muted rule">Rising: ${fmt(pr.requests_failed_min)}+ failed requests and the rate ${fmt(pr.requests_failed_rate_points)} point(s) above last week
-      (${settingLink("appinsights.failed_min", "the spike rule")}), or ${fmt(pr.restarts_min)}+ pod restarts; a drop: under ${fmt(pr.drop_percent)}% of last week's
-      traffic when it had ${fmt(pr.drop_min)}+ · ${settingLink("path.drop_percent", "change")}</p>` : ""}
-    <p class="muted">${pathLinkSummary(data.link || {}, data.tool)} <button type="button" class="link" data-path-edit>${(data.link.apim || []).length || (data.link.agw || []).length ? "Change" : "Link front doors"}</button></p>
-    ${table(["", "Hop", "From", "Last hour", "Same hour last week", "Detail"], rows, "path-hops")}
-    ${pathTimelineHtml(data.hops)}
-    <div class="path-edit"></div>
-    ${queries.length ? `<details class="mon-query"><summary>Queries sent</summary>${queryBlock({ queries })}</details>` : ""}`;
-  box.querySelector("[data-path-edit]").addEventListener("click", () => editPathLinks(box, params, data.link || {}));
-}
-
-async function editPathLinks(box, params, link) {
-  const out = box.querySelector(".path-edit");
-  const tool = pathTool();
-  out.innerHTML = loading("Looking for its front doors: API Management APIs, App Gateway routes, its app…");
-  const c = await api("api/path/candidates", { params: { ...params, ...scopeParams(currentScope()), ...(tool ? toolParams(tool) : {}) } })
-    .catch((error) => ({ error: error.message }));
-  if (c.error) { out.innerHTML = noticeHtml(c.error); return; }
-  const has = (list, test) => (list || []).some(test);
-  const why = (r) => `<span class="muted">${esc(r.why.join("; "))}</span>`;
-  const apis = c.apim.map((r, i) => `<label class="path-pick"><input type="checkbox" data-path-apim="${i}" ${has(link.apim, (a) => sameId(a.service_id, r.service_id) && a.api === r.api) ? "checked" : ""}>
-    <strong>${esc(r.name)}</strong> <span class="muted">${esc(r.service)} · /${esc(r.path)} → ${esc(r.backend)}</span> ${why(r)}</label>`);
-  const routes = c.agw.map((r, i) => `<label class="path-pick"><input type="checkbox" data-path-agw="${i}" ${has(link.agw, (g) => sameId(g.gateway_id, r.gateway_id) && g.listener === r.listener && g.pool === r.pool) ? "checked" : ""}>
-    <strong>${esc(r.gateway)}</strong> <span class="muted">${esc(r.listener)}${r.hosts.length ? ` (${esc(r.hosts.join(", "))})` : ""} → ${esc(r.pool)}${r.paths.length ? ` ${esc(r.paths.join(", "))}` : ""}</span> ${why(r)}</label>`);
-  const appOptions = [...new Set([link.app, ...c.apps.map((a) => a.app)].filter(Boolean))];
-  out.innerHTML = `<h4>Front doors of ${esc(c.workload.name)}</h4>
-    <p class="muted">Suggested from data, best first; tick the ones that send to this workload. Nothing is assumed: only what you tick is read.
-      Kept on this machine for this tenant (config file, <code>workload_links</code>).</p>
-    ${(c.notes || []).map((n) => `<p class="muted">${esc(n)}</p>`).join("")}
-    <h4>API Management APIs</h4>${apis.length ? apis.join("") : '<p class="muted">None suggested: no API shares a word with the workload\'s name or a path it serves.</p>'}
-    <h4>App Gateway routes</h4>${routes.length ? routes.join("") : '<p class="muted">None found: no backend pool holds the cluster\'s load balancer or an address in its subnets (or the app\'s host names).</p>'}
-    <h4>Its requests</h4>
-    <label class="path-pick">${esc(c.tool || "Monitoring tool")} app <input list="path-apps" id="path-app" value="${esc(link.app || "")}" placeholder="${c.tool ? "app name" : "no tool picked in the Scope bar"}" ${c.tool ? "" : "disabled"}>
-      <datalist id="path-apps">${appOptions.map((a) => `<option value="${esc(a)}">`).join("")}</datalist>
-      ${c.apps.length ? `<span class="muted">suggested: ${esc(c.apps.slice(0, 3).map((a) => a.app).join(", "))}</span>` : ""}</label>
-    <label class="path-pick">or App Insights component <select id="path-component"><option value="">none</option>${c.components.map((x) => `<option value="${esc(x.component)}" ${sameId(x.component, link.component) ? "selected" : ""}>${esc(x.name)} — ${esc(x.why.join("; "))}</option>`).join("")}</select></label>
-    <div class="table-tools"><button type="button" class="primary" data-path-save>Save and read</button> <button type="button" data-path-cancel>Cancel</button></div>`;
-  out.querySelector("[data-path-cancel]").addEventListener("click", () => { out.innerHTML = ""; });
-  out.querySelector("[data-path-save]").addEventListener("click", async () => {
-    const body = { ...params, apim: [...out.querySelectorAll("[data-path-apim]:checked")].map((x) => c.apim[x.dataset.pathApim]),
-      agw: [...out.querySelectorAll("[data-path-agw]:checked")].map((x) => c.agw[x.dataset.pathAgw]),
-      app: $("path-app").value.trim(), component: $("path-component").value };
-    try { await api("api/path/link", { method: "POST", body }); } catch (error) { out.insertAdjacentHTML("beforeend", noticeHtml(error)); return; }
-    loadPath(box, params);
-  });
-}
+// The monitoring tool picked in the Scope bar, for a workload's history (its CPU, memory and runtime memory).
+const monitorTool = () => toolKinds().find((k) => (state.selected || {})[k]) || "";
 
 // The toolbar's namespace picker: namespaces with problems first, with their counts. System namespaces sit apart:
 // picking one, or "All namespaces, including system", reads them in (`choice.reload`). Kept for this visit only.
@@ -638,10 +560,10 @@ function wireGoTo(body, node, list, tool) {
   out.addEventListener("click", (event) => { if (event.target.closest("[data-go-close]")) { out.innerHTML = ""; input.value = ""; } });
 }
 
-// One workload's Details, Dependencies and Path in one panel (Go to workload, or a workload's name on any line):
-// Details first, the others read when picked.
+// One workload's Details and Dependencies in one panel (Go to workload, or a workload's name on any line):
+// Details first, Dependencies read when picked.
 const DEP_KINDS = ["Deployment", "StatefulSet", "DaemonSet"];
-const WORKLOAD_VIEWS = [["detail", "Details"], ["deps", "Dependencies"], ["path", "Path"]];
+const WORKLOAD_VIEWS = [["detail", "Details"], ["deps", "Dependencies"]];
 function openWorkload(box, head, clusterId, target, view = "detail") {
   box.innerHTML = `<nav class="wl-views" aria-label="What to show">${WORKLOAD_VIEWS.map(([key, label]) =>
     `<button type="button" class="link${key === view ? " on" : ""}" data-wl-view="${key}" ${key === view ? 'aria-current="true"' : ""}>${label}</button>`).join(" · ")}</nav><div class="wl-view"></div>`;
@@ -653,7 +575,6 @@ function openWorkload(box, head, clusterId, target, view = "detail") {
   head.innerHTML = `${esc(target.kind)} ${esc(target.namespace)}/${esc(target.workload)}`;
   const params = { namespace: target.namespace, kind: target.kind, workload: target.workload };
   if (view === "deps") loadDependencies(inner, { id: clusterId, ...params });
-  else if (view === "path") loadPath(inner, { cluster: clusterId, ...params });
   else loadWorkloadDetail(inner, head, clusterId, target);
 }
 

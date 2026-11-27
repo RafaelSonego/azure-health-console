@@ -767,9 +767,16 @@ body { font-size: 14px; background: var(--canvas); }
 .inv-parts { display: flex; flex-direction: column; gap: 14px; }
 .code-top { font-size: 12px; color: var(--critical, #cf222e); }
 .code-cut { font-size: 12px; color: var(--warning, #9a6700); }
-.code-group summary .code-name { font-weight: normal; }
-.code-group.server summary strong { color: var(--critical, #cf222e); }
-.code-group.cut summary strong, .code-group.run summary strong { color: var(--warning, #9a6700); }
+/* a code's heading: the code as a badge and its name, then its numbers on a second line */
+.code-group > summary { display: list-item; padding: 8px 12px; }
+.code-group .code-line { font-size: 14px; }
+.code-group .code-num { display: inline-block; min-width: 38px; text-align: center; padding: 1px 8px; margin-right: 6px; border-radius: 6px;
+  font-variant-numeric: tabular-nums; background: var(--section-head); color: var(--text); }
+.code-group .code-name { font-weight: 650; margin-right: 4px; }
+.code-group .code-facts { display: block; margin: 3px 0 0 50px; font-size: 12.5px; color: var(--muted); }
+.code-group .code-facts strong { color: var(--text); font-weight: 650; }
+.code-group.server .code-num { background: var(--critical-bg); color: var(--critical, #cf222e); }
+.code-group.cut .code-num, .code-group.run .code-num { background: var(--warning-bg); color: var(--warning, #9a6700); }
 .how-it-works { margin: 4px 0 12px; padding: 8px 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); }
 .how-it-works summary { cursor: pointer; font-weight: 600; }
 .how-it-works ul { margin: 6px 0; padding-left: 20px; }
@@ -1217,12 +1224,6 @@ code, #view-settings { overflow-wrap: anywhere; }
 table[data-list] th, .data-table th { background: var(--section-head); color: var(--section-title); font-size: 12px; }
 table[data-list] tbody tr:hover > td, .data-table tbody tr:hover > td { background: var(--fold-hover); }
 .section-body table[data-list] { background: transparent; }
-/* Workload path: one 60-minute strip per hop, aligned; front-door picks one per line */
-.path-timeline { margin: 8px 0; }
-.path-strip { display: grid; grid-template-columns: 120px minmax(0, 360px) auto; gap: 8px; align-items: center; font-size: 12px; }
-.path-strip svg { width: 100%; height: 26px; background: var(--panel); border-radius: 3px; }
-.path-strip rect { fill: var(--critical, #cf222e); }
-.path-pick { display: block; margin: 4px 0; }
 
 /* Workload details, opened under a workload's line */
 .wl-notes { margin: 4px 0 8px 18px; padding: 0; }
@@ -1264,12 +1265,6 @@ pre.yaml { max-height: 60vh; overflow: auto; background: var(--panel); border: 1
   padding: 8px 10px; font-size: 12px; line-height: 1.45; white-space: pre; }
 #aks-go-out > .logs-panel { background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 8px 12px; margin: 0 0 8px; }
 
-/* Workload details: would a change fit */
-.wl-fit-form { border-collapse: collapse; margin: 4px 0; }
-.wl-fit-form th, .wl-fit-form td { text-align: left; padding: 3px 8px 3px 0; font-size: 13px; }
-.wl-fit-form input { width: 7em; }
-.wl-fit-out:empty { display: none; }
-.wl-fit-out table[data-list] { margin-bottom: 8px; }
 .k-kinds { margin: 6px 0 10px; flex-wrap: wrap; }
 
 /* Browse's header rows: a plain part of the page, or pinned in the panes layout below. */
@@ -1287,7 +1282,7 @@ pre.yaml { max-height: 60vh; overflow: auto; background: var(--panel); border: 1
     background: var(--surface); margin: 0 -16px; padding: 10px 16px 8px; border-bottom: 1px solid var(--border); }
   body.layout-panes .graph.as-table { max-height: none; height: auto; overflow: visible; resize: none; }
   body.layout-panes :is(.table-box, .card ul, .alert-list, .star-list, .q-list) { max-height: none; overflow: visible; }
-  body.layout-panes :is(.section-body, #network-body, #inv-apps-out, .table-scroll, #audit-body, #audit-notes, #needs-body) {
+  body.layout-panes :is(.section-body, .md, #network-body, #inv-apps-out, .table-scroll, #audit-body, #audit-notes, #needs-body) {
     overflow-x: visible; }  /* a scroll box would hold the sticky headers below at --head-h inside itself */
   body.layout-panes .view table thead th { position: sticky; top: var(--head-h, 0px); z-index: 3; background: var(--section-head);
     box-shadow: inset 0 -1px 0 var(--border); }
@@ -1335,3 +1330,15 @@ input[type="search"]:not(:placeholder-shown) { padding-right: 26px; background-r
   background: var(--section-head); border-left: 3px solid var(--accent); border-radius: 0 6px 6px 0; }
 .yaml-fold > summary::after { content: " · show the manifest"; font-weight: 400; font-size: 12px; color: var(--muted); }
 .yaml-fold[open] > summary::after { content: ""; }
+/* Investigate: a service's name stays on one line (its region and instance go under it) */
+.inv-service { white-space: nowrap; }
+/* Investigate step 2: each section folds like Workloads' do; its count sits on the title */
+.inv-fold-all { font-size: 12.5px; }
+details.inv-part > summary { list-style: none; display: flex; align-items: baseline; gap: 8px; cursor: pointer; padding: 4px 0; }
+details.inv-part > summary::-webkit-details-marker { display: none; }
+details.inv-part > summary::before { content: "▸"; color: var(--muted); width: 12px; transition: transform .12s; }
+details.inv-part[open] > summary::before { transform: rotate(90deg); }
+details.inv-part > summary h4 { margin: 0; }
+details.inv-part > summary .inv-part-n.worse { color: var(--critical, #cf222e); }
+/* Workload details: each pod's memory over the week */
+.wl-memory-chart { position: relative; height: 280px; margin: 8px 0 12px; }

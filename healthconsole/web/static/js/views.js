@@ -40,6 +40,7 @@ function applyContext(context) {
   $("depth").value = String(Math.min(4, Math.max(1, context.graph.depth || 1)));
   $("inbound").checked = !!context.graph.inbound;
   state.graphAuto = !!context.graph.auto;
+  state.graphRefreshMinutes = context.graph.refresh_minutes ?? 0;
 }
 
 function globMatch(patterns, value) {

@@ -394,3 +394,21 @@ def test_triage_auto_refresh_takes_listed_minutes_only():
     for bad in (3, "5", True, -1):
         with pytest.raises(config.ConfigError):
             config.from_data({"triage": {"auto_refresh_minutes": bad}})
+
+
+def test_graph_refresh_takes_listed_minutes_and_defaults_to_five():
+    assert config.load("/nonexistent")["graph"]["refresh_minutes"] == 5
+    assert config.from_data({"graph": {"refresh_minutes": 0}})["graph"]["refresh_minutes"] == 0
+    for bad in (3, "5", True, 60):
+        with pytest.raises(config.ConfigError):
+            config.from_data({"graph": {"refresh_minutes": bad}})
+    from healthconsole.core.discovery import DiscoveryOptions
+    assert DiscoveryOptions(**config.load("/nonexistent")["graph"]).refresh_minutes == 5  # every check builds it so
+
+
+def test_a_config_written_for_path_still_loads_and_its_settings_are_ignored():
+    old = {"path": {"drop_percent": 60}, "tenants": {"t1": {"workload_links": [{"key": "x", "app": "orders"}]}}}
+    loaded = config.from_data(old)
+    assert "path" not in loaded and loaded["tenants"]["t1"]["workload_links"]  # kept as written, read by nothing
+    with pytest.raises(config.ConfigError):
+        config.from_data({"paths": {}})  # a mistyped section is still refused

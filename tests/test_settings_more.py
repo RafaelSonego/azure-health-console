@@ -1,7 +1,7 @@
 import pytest
 
 from healthconsole.core import config, security, triage
-from healthconsole.core.explore import aks, appinsights, workload_path as wp
+from healthconsole.core.explore import aks, appinsights, workload_names as wn
 
 AKS = "/subscriptions/s/resourceGroups/r/providers/Microsoft.ContainerService/managedClusters/c"
 
@@ -15,23 +15,15 @@ def test_the_failure_rule_follows_its_settings():
     assert appinsights.assess({"requests/count": (100, 100), "requests/failed": (25, 0)}, {"critical_rate_percent": 30})[0] == "warning"
 
 
-def test_path_judges_requests_by_the_same_rule_and_drops_by_its_own():
-    hop = {"hop": "requests", "available": True, "now": {"errors": 8, "total": 100}, "week": {"errors": 0, "total": 100}}
-    assert wp.assess(hop)[0] == "warning"
-    assert wp.assess(hop, request_rules={"failed_min": 10})[0] == "healthy"  # the same setting as the spike card
-    drop = {"hop": "requests", "available": True, "now": {"errors": 0, "total": 60}, "week": {"errors": 0, "total": 100}}
-    assert wp.assess(drop)[0] == "healthy" and wp.assess(drop, {"drop_percent": 70})[0] == "warning"
-    pods = {"hop": "pods", "available": True, "now": {"errors": 4}, "week": {"errors": 0}}
-    assert wp.assess(pods)[0] == "warning" and wp.assess(pods, {"restarts_min": 5})[0] == "healthy"
-
-
 def test_a_naming_convention_is_learned_from_the_names_not_listed():
     names = ["orders-corp-cc-api", "cart-corp-cc-api", "search-corp-cc-api", "users-corp-cc-api"]
-    assert wp.common_words(names) == {"corp"}  # cc is under 3 letters, api a plumbing word
-    assert wp.common_words(names[:3]) == set()  # too few names to call anything a convention
-    picked = wp.app_candidates(names + ["billing-corp-cc-api"], "orders-corp")
+    assert wn.common_words(names) == {"corp"}  # cc is under 3 letters, api a plumbing word
+    assert wn.common_words(names[:3]) == set()  # too few names to call anything a convention
+    picked = wn.app_candidates(names + ["billing-corp-cc-api"], "orders-corp")
     assert [c["app"] for c in picked] == ["orders-corp-cc-api"]  # corp, shared by all, isn't a reason
-    assert wp.tokens("orders-v2-prod") == {"orders", "prod"}  # prod is no longer thrown away by a list
+    assert wn.tokens("orders-v2-prod") == {"orders", "prod"}  # prod is no longer thrown away by a list
+    found = wn.app_candidates(["orders-service", "orders-worker", "billing"], "orders-service")
+    assert [a["app"] for a in found] == ["orders-service", "orders-worker"] and found[0]["score"] == 10  # same name first
 
 
 def test_the_oom_cause_thresholds_are_settings():

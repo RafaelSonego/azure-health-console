@@ -139,7 +139,7 @@ def test_every_partial_result_note_can_be_closed():
 def test_investigate_counts_say_their_window_next_to_most_recent():
     js = app_js()
     assert '"Failed with it"' not in js and '"Last failure"' not in js
-    assert js.count("in the ${invSpan()}") >= 4 and "of all failures" in js and "most recent ${esc(ago(r.last_seen))}" in js
+    assert js.count("in the ${invSpan()}") >= 4 and "of all failures" in js and "most recent <strong>${esc(ago(r.last_seen))}" in js
 
 
 def test_investigate_keeps_a_trail_and_folds_step_two_when_going_deeper():
@@ -208,7 +208,12 @@ def test_panes_turns_off_every_horizontal_scroll_box_around_tables():
     css = (STATIC / "style.css").read_text()
     boxes = re.search(r"\n([^\n{]*#inv-apps-out[^\n{]*)\{ overflow-x: auto; \}", css).group(1)
     panes = re.search(r"body\.layout-panes :is\(([^)]*)\) \{\s*overflow-x: visible;", css).group(1)
-    assert {b.strip() for b in boxes.split(",")} <= {p.strip() for p in panes.split(",")}
+    turned_off = {p.strip() for p in panes.split(",")}
+    assert {b.strip() for b in boxes.split(",")} <= turned_off
+    # Azure's detector text (.md) and every section's body hold tables too, each in a rule of its own.
+    for box in (".md", ".section-body"):
+        assert re.search(rf"\n{re.escape(box)} \{{[^}}]*overflow-x: auto", css), box
+        assert box in turned_off, box
 
 
 def test_a_section_s_header_counts_what_later_reads_add():
@@ -219,3 +224,19 @@ def test_a_section_s_header_counts_what_later_reads_add():
     assert 'setPartCount(body, "ev-events", eventRows.length + extra.extra)' in sections
     assert "mergeMonitorOom(problems, extra.rows, extra.label, extra.byWorkload)" in sections
     assert "for (const r of byWorkload || rows)" in workloads
+
+
+def test_every_investigate_section_folds_and_is_read_through_one_gate():
+    js, html = app_js(), (TEMPLATES / "index.html").read_text()
+    parts = dict(re.findall(r'<details class="inv-part" id="([^"]+)" data-part="([^"]+)" open>', html))
+    gate = dict((pid, key) for key, pid in re.findall(r'(\w+): "(inv-\w+-part)"', re.search(r"const INV_PARTS = \{[^}]*\}", js).group(0)))
+    assert parts == gate and len(parts) == 5 and 'data-inv-parts="open"' in html and 'data-inv-parts="close"' in html
+    body = re.search(r"async function loadInvOperations\(\) \{(.*?)\n\}", js, re.S).group(1)
+    assert all(f'invPart("{key}"' in body for key in parts.values()) and not re.search(r"\n  loadInv\w+\(", body)
+
+
+def test_fmt_escapes_text_so_no_caller_has_to():
+    # fmt's output goes straight into HTML in most of its ~250 calls: a string from Azure must come back escaped.
+    body = re.search(r"^function fmt\(value\) \{\n(.*?)^\}", app_js(), re.M | re.S).group(1)
+    assert 'typeof value !== "number") return esc(String(value))' in body
+    assert "esc(fmt(" not in app_js()  # escaping twice would show &amp; on the page

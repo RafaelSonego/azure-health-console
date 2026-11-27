@@ -168,9 +168,9 @@ def test_history_falls_back_to_the_tool_and_finds_the_app_by_its_words():
     out = wd.history(client, link, {"memory": 50}, Tool(), ("workload usage", "runtime memory"), lambda: apps)
     assert out["usage"]["source"] == "Tool" and out["needed"]["memory"]["need"] == 4 * GIB
     assert out["runtime"]["app"] == "orders-prod" and out["runtime"]["heap_used"] == 975 and out["notes"]
-    assert wd.runtime_app(["orders-prod", "cart", "search", "users"], {}, "orders") == ("", "")  # prod isn't common here
-    out = wd.history(client, {**link, "app": "other"}, {}, Tool(), ("runtime memory",), lambda: [])
-    assert out["runtime"]["app"] == "other" and "linked" in out["runtime"]["why"] and not out["runtime"]["found"]
+    assert wd.runtime_app(["orders-prod", "cart", "search", "users"], "orders") == ("", "")  # prod isn't common here
+    out = wd.history(client, link, {}, Tool(), ("runtime memory",), lambda: ["billing-prod"])
+    assert not out["runtime"].get("app") and "can't be read" in out["runtime"]["reason"]  # no app has its name
 
 
 class FakeNr:

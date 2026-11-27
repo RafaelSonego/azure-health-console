@@ -16,7 +16,7 @@ DEFAULTS = {
     "default_tenant": None,
     "tenants": {},
     "graph": {"auto": False, "depth": 2, "max_nodes": 60, "inbound": True,
-              "inbound_limit": 25, "inbound_scope": "subscription"},
+              "inbound_limit": 25, "inbound_scope": "subscription", "refresh_minutes": 5},
     "health": {"window_minutes": 15, "compare_last_week": True, "changes_hours": 24, "alert_hours": 24,
                "critical_max_severity": 1, "warning_max_severity": 2, "heuristic_limit": 8,
                "detectors": True, "expiry_warning_days": 30, "expiry_critical_days": 7, "baseline_change_percent": 200},
@@ -40,7 +40,6 @@ DEFAULTS = {
     # Path's requests): the same rule everywhere.
     "appinsights": {"failed_min": 5, "failed_rate_points": 1, "exceptions_min": 10, "exceptions_percent": 200,
                     "critical_rate_percent": 20, "critical_failed_min": 20},
-    "path": {"drop_percent": 50, "drop_min": 100, "restarts_min": 3, "restarts_critical": 10},
     "security": {"risky_ports": [22, 3389, 1433, 3306, 5432, 6379, 27017, 5985, 5986]},
     "triage": {"scope": "none", "changes_hours": 1, "include_system_changes": False,
                "secret_scan_max_vaults": 200, "auto_refresh_minutes": 0,
@@ -88,9 +87,10 @@ MONITOR_FIELDS = {
 }
 # favourite_* and tag_filters are read only until moved into saved scopes (legacy_scope); open_with replaced triage.scope.
 LEGACY_TENANT_KEYS = ("favourite_subscriptions", "favourite_resource_groups", "tag_filters")
-_TENANT_KEYS = {*LEGACY_TENANT_KEYS, "integrations", "saved_scopes", "alert_rules", "open_with", "workload_links"}
-# Workload path: a workload's confirmed front doors (decision 150); each field is checked in _check_workload_links.
-WORKLOAD_LINK_KEYS = {"key", "name", "cluster_id", "namespace", "kind", "site_id", "apim", "agw", "app", "component"}
+# Retired settings: still accepted in a config file so an older one loads, and ignored (README says each can go).
+RETIRED_KEYS = {"path"}
+RETIRED_TENANT_KEYS = {"workload_links"}
+_TENANT_KEYS = {*LEGACY_TENANT_KEYS, *RETIRED_TENANT_KEYS, "integrations", "saved_scopes", "alert_rules", "open_with"}
 SAVED_SCOPE_KEYS = {"name", "subscriptions", "resource_groups", "tag_filters", "connections"}
 # What the page opens with: nothing, every subscription, or a saved scope by name (so no scope may use these two).
 OPEN_WITH = ("none", "all")
@@ -160,6 +160,9 @@ SCHEMA = [
     ("graph", "auto", "bool",
      "Draw the dependency graph on every click. Off: a click checks only that resource (fast), "
      "and Show dependencies draws the graph."),
+    ("graph", "refresh_minutes", (0, 2, 5, 10, 15, 30),
+     "Check the graph again by itself while it's on screen (a resource's dependencies, or a group's graph), redrawing only "
+     "the graph. 0 is off; each re-check costs about as much as Check again."),
     ("graph", "depth", "int", "How many hops to follow from a selected resource."),
     ("graph", "max_nodes", "int", "Stop drawing a graph at this many resources."),
     ("graph", "inbound", "bool", "Also find resources that point at the selected one (private endpoints, gateways)."),
@@ -224,10 +227,6 @@ SCHEMA = [
     ("appinsights", "exceptions_percent", "int", "...and they must be at this share of the same hour last week or more (200 = doubled)."),
     ("appinsights", "critical_rate_percent", "int", "...failing turns red at this failure rate or more..."),
     ("appinsights", "critical_failed_min", "int", "...with at least this many failed requests."),
-    ("path", "drop_percent", "int", "Path: a hop's traffic under this share of the same hour last week is a drop..."),
-    ("path", "drop_min", "int", "...when that hour last week had at least this many requests."),
-    ("path", "restarts_min", "int", "Path: pods restarting this many times in the hour (and twice last week's) are rising..."),
-    ("path", "restarts_critical", "int", "...red from this many."),
     ("security", "risky_ports", "ports",
      "Security: ports that are a finding when open to the internet (comma-separated numbers)."),
     ("summary", "top_items", "int", "Summary: how many items each card lists (problems, findings, subscriptions)."),
@@ -308,44 +307,6 @@ def _check_types(settings, where):
         if "open_with" in entry and (not isinstance(entry["open_with"], str) or not entry["open_with"].strip()):
             raise ConfigError(f"{where}: tenants.{tenant}.open_with must be none, all or a saved scope's name.")
         check_alert_rules(entry.get("alert_rules"), f"{where}: tenants.{tenant}.alert_rules")
-        check_workload_links(entry.get("workload_links"), f"{where}: tenants.{tenant}.workload_links")
-
-
-def check_workload_links(links, where="workload_links"):
-    """Each link names its workload (an AKS one by cluster, namespace, kind and name, or an App Service by ID) and its
-    front doors: API Management APIs (service_id, api), App Gateway routes (gateway_id, listener, pool), the monitoring
-    tool's app name and an App Insights component ID, all optional."""
-    if links is None:
-        return
-    if not isinstance(links, list):
-        raise ConfigError(f"{where} must be a list.")
-    keys = set()
-    for index, link in enumerate(links):
-        label = f"{where}[{index}]"
-        if not isinstance(link, dict) or not isinstance(link.get("key"), str) or not link["key"].strip():
-            raise ConfigError(f"{label} needs a key (the workload it belongs to).")
-        unknown = set(link) - WORKLOAD_LINK_KEYS
-        if unknown:
-            raise ConfigError(f"{label} unknown key(s) {sorted(unknown)}; allowed {sorted(WORKLOAD_LINK_KEYS)}.")
-        if link["key"].lower() in keys:
-            raise ConfigError(f"{where}: two links for {link['key']}.")
-        keys.add(link["key"].lower())
-        if not (link.get("site_id") or all(isinstance(link.get(k), str) and link[k] for k in ("cluster_id", "namespace", "kind"))):
-            raise ConfigError(f"{label} needs site_id, or cluster_id, namespace and kind.")
-        for field, required in (("apim", ("service_id", "api")), ("agw", ("gateway_id", "listener", "pool"))):
-            items = link.get(field) or []
-            if not isinstance(items, list) or not all(isinstance(i, dict) and all(isinstance(i.get(r), str) and i[r] for r in required)
-                                                      for i in items):
-                raise ConfigError(f"{label}.{field} must be a list, each with {', '.join(required)}.")
-        for field in ("name", "app", "component", "site_id", "cluster_id", "namespace", "kind"):
-            if field in link and link[field] is not None and not isinstance(link[field], str):
-                raise ConfigError(f"{label}.{field} must be text.")
-
-
-def workload_links(settings, tenant):
-    """This tenant's saved workload links (its own entry, never "*")."""
-    key = next((k for k in entry_keys(settings, tenant) if settings["tenants"][k].get("workload_links")), None)
-    return [dict(link) for link in settings["tenants"][key]["workload_links"]] if key else []
 
 
 def check_alert_rules(rules, where="alert_rules"):
@@ -517,6 +478,7 @@ def from_data(data, where="settings"):
 
 
 def _merge(settings, data, where):
+    data = {k: v for k, v in data.items() if k not in RETIRED_KEYS}
     unknown = set(data) - set(DEFAULTS)
     if unknown:
         raise ConfigError(f"{where}: unknown key(s) {sorted(unknown)}; allowed {sorted(DEFAULTS)}.")

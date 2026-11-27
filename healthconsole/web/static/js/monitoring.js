@@ -252,7 +252,7 @@ function alertCheckHtml(d) {
     ${alertCheckChart(d)}
     <table class="ac-numbers"><tbody>${rows.map(([k, v, extra]) => `<tr><th>${esc(k)}</th><td>${esc(v)}${extra ? ` <span class="muted">${esc(extra)}</span>` : ""}</td></tr>`).join("")}</tbody></table>
     <details class="mon-query"><summary>How it was read</summary>
-      <p><strong>${esc(d.source)}</strong> · ${esc(r.name)}${r.duration_minutes ? ` · must hold ${esc(fmt(r.duration_minutes))} min` : ""}</p>
+      <p><strong>${esc(d.source)}</strong> · ${esc(r.name)}${r.duration_minutes ? ` · must hold ${fmt(r.duration_minutes)} min` : ""}</p>
       ${r.query ? `<div class="muted">${esc(r.query.label)}</div><pre>${esc(r.query.text)}</pre>` : ""}
       <p class="muted">The last ${esc(String(d.days))} days, ${esc(d.scaled)}; the latest bucket is left out while it fills in.</p>
       ${(d.notes || []).map((x) => `<p class="muted">${esc(x)}</p>`).join("")}
@@ -273,7 +273,7 @@ function alertCheckChart(d) {
   const limit = r.threshold != null ? `<line x1="0" x2="${w}" y1="${y(r.threshold).toFixed(1)}" y2="${y(r.threshold).toFixed(1)}" class="ac-threshold"/>` : "";
   return `<svg class="ac-chart" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" role="img"
       aria-label="The last ${esc(String(d.days))} days of what the rule watches${r.threshold != null ? ", with its threshold" : ""}">${limit}<polyline points="${line}" class="ac-line"/></svg>
-    <div class="ac-axis muted"><span>${esc(dayTime(points[0][0]))}</span><span>${r.threshold != null ? `dashed: threshold ${esc(r.operator)} ${esc(fmt(r.threshold))}` : ""}</span><span>${esc(dayTime(points[points.length - 1][0]))}</span></div>`;
+    <div class="ac-axis muted"><span>${esc(dayTime(points[0][0]))}</span><span>${r.threshold != null ? `dashed: threshold ${esc(r.operator)} ${fmt(r.threshold)}` : ""}</span><span>${esc(dayTime(points[points.length - 1][0]))}</span></div>`;
 }
 
 document.addEventListener("click", (event) => {

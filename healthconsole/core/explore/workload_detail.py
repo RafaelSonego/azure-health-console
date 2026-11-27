@@ -9,53 +9,11 @@ from ..arm import ArmError
 from ..investigate.appinsights import kql_string
 from . import aks, aks_checks, appinsights, kube
 from .kube_yaml import yaml_of
-from .workload_path import _owner_regex, app_candidates, common_words, tokens
+from .runtime_caps import heap_max_mib, memory_flags, runtime_cap
+from .workload_names import app_candidates, common_words, owner_regex, tokens
 
 EVENTS_SHOWN = 30
 HPA_TOLERANCE = 0.1  # Kubernetes leaves the replica count alone within 10% of the target
-# Env vars and arguments that carry a runtime's memory settings; only the matching flags are kept, never the value.
-MEMORY_ENV = ("JAVA_OPTS", "JAVA_TOOL_OPTIONS", "JDK_JAVA_OPTIONS", "_JAVA_OPTIONS", "CATALINA_OPTS", "NODE_OPTIONS",
-              "GOMEMLIMIT", "DOTNET_GCHeapHardLimit", "DOTNET_GCHeapHardLimitPercent")
-MEMORY_FLAG = re.compile(r"(-Xm[xs][0-9]+[kKmMgG]?|-XX:(?:Max|Initial|Min)RAMPercentage=[0-9.]+|-XX:MaxMetaspaceSize=[0-9]+[kKmMgG]?"
-                         r"|-XX:MaxDirectMemorySize=[0-9]+[kKmMgG]?|-XX:[+-]UseContainerSupport|--max-old-space-size=[0-9]+)")
-PLAIN_VALUE = re.compile(r"^[0-9]+(\.[0-9]+)?[A-Za-z]{0,3}$|^0x[0-9a-fA-F]+$")  # GOMEMLIMIT=6GiB, DOTNET_…=0x…
-_UNITS = {"k": 1 / 1024, "m": 1, "g": 1024}
-
-
-def memory_flags(container):
-    """[{source, flag}] for the container's runtime memory settings in its env, command and args. Only flags that
-    match MEMORY_FLAG (or a plain number for GOMEMLIMIT and .NET) are returned; the rest of a value is never kept."""
-    out = []
-    for env in container.get("env") or []:
-        name = env.get("name") or ""
-        if name not in MEMORY_ENV:
-            continue
-        if "valueFrom" in env:
-            out.append({"source": f"env {name}", "flag": "", "note": "set from a ConfigMap or Secret, not read"})
-            continue
-        value = str(env.get("value") or "")
-        if name.startswith(("GOMEMLIMIT", "DOTNET_")):
-            if PLAIN_VALUE.match(value.strip()):
-                out.append({"source": f"env {name}", "flag": f"{name}={value.strip()}"})
-            continue
-        out += [{"source": f"env {name}", "flag": flag} for flag in MEMORY_FLAG.findall(value)]
-    for field in ("command", "args"):
-        for part in container.get(field) or []:
-            out += [{"source": field, "flag": flag} for flag in MEMORY_FLAG.findall(str(part))]
-    return out
-
-
-def heap_max_mib(flags, memory_limit_mib=None):
-    """The heap ceiling the flags set, in MiB: -Xmx, or MaxRAMPercentage of the memory limit; None when unset."""
-    for f in flags:
-        m = re.match(r"-Xmx([0-9]+)([kKmMgG]?)$", f["flag"])
-        if m:
-            return int(m.group(1)) * _UNITS.get(m.group(2).lower(), 1 / 2**20)
-    for f in flags:
-        m = re.match(r"-XX:MaxRAMPercentage=([0-9.]+)$", f["flag"])
-        if m and memory_limit_mib:
-            return float(m.group(1)) / 100 * memory_limit_mib
-    return None
 
 
 # ------------------------------------------------------------------ HPA
@@ -80,7 +38,8 @@ def hpa_decision(h):
     return {"name": h["metadata"]["name"], "min": low, "max": high, "current": current, "desired": st.get("desiredReplicas"),
             "metrics": metrics, "decides": top["resource"] if top else None,
             "wants": top["asks"] if top else None, "limited": bool(top and top["asks"] > high),
-            "conditions": conditions, "behavior": spec.get("behavior") or {}, "last_scale": st.get("lastScaleTime")}
+            "conditions": conditions, "behavior": spec.get("behavior") or {}, "last_scale": st.get("lastScaleTime"),
+            "at_max_since": aks_checks.at_max_since(h)}
 
 
 # ------------------------------------------------------------------ containers and pods
@@ -150,7 +109,8 @@ def containers(spec, usage):
                     "cpu": {"request": cpu_req, "limit": cpu_lim, "used": cpu, "of_request": _share(cpu, cpu_req), "of_limit": _share(cpu, cpu_lim)},
                     "memory": {"request": mem_req, "limit": mem_lim, "used": mem, "of_request": _share(mem, mem_req), "of_limit": _share(mem, mem_lim)},
                     "probes": {k: _probe(c.get(f"{k}Probe")) for k in ("startup", "readiness", "liveness")},
-                    "memory_flags": flags, "heap_max": heap, "mounts": mounts, "notes": notes})
+                    "memory_flags": flags, "heap_max": heap, "runtime_cap": runtime_cap(c, mem_lim, flags), "mounts": mounts,
+                    "notes": notes})
     return out
 
 
@@ -225,6 +185,13 @@ def read_lists(k, lists):
         return dict(pool.map(fetch, lists.items())), failed
 
 
+def last_rollout(kind, name, replicasets):
+    """When a Deployment's newest ReplicaSet was created: its last rollout (other kinds keep no such record here)."""
+    owned = [rs["metadata"].get("creationTimestamp") for rs in replicasets if kind == "Deployment"
+             and any(o.get("kind") == "Deployment" and o.get("name") == name for o in rs["metadata"].get("ownerReferences") or [])]
+    return max(filter(None, owned), default=None)
+
+
 def read(client, cluster_id, namespace, kind, name, kube_settings=None):
     k, why = aks._connect(client, cluster_id, kube_settings)
     if k is None:
@@ -252,7 +219,7 @@ def read(client, cluster_id, namespace, kind, name, kube_settings=None):
     checks = aks_checks.analyze({kind: [obj]}, pods, data["replicasets"], [], [hpa] if hpa else [], data["pdbs"], [],
                                 data["pod_metrics"], [], cfg=aks_checks.Thresholds.from_settings(kube_settings), include_system=True)
     rows, spread = pod_rows(pods, data["nodes"])
-    return {"available": True, "source": k.source, "overview": _overview(kind, obj),
+    return {"available": True, "source": k.source, "overview": _overview(kind, obj), "last_rollout": last_rollout(kind, name, data["replicasets"]),
             "hpa": hpa_decision(hpa) if hpa else None,
             "containers": containers(obj["spec"]["template"]["spec"], _usage(data["pod_metrics"], pods)),
             "usage_live": bool(data["pod_metrics"]), "pods": rows, "spread": spread,
@@ -267,7 +234,7 @@ def read(client, cluster_id, namespace, kind, name, kube_settings=None):
 def usage_ci(client, cluster_id, namespace, kind, name):
     """{found, containers: [{container, cpu, memory}], queries} from Container Insights' Perf table: per container,
     p95/p99/max over 7 days and the max over 30 (CPU in cores, memory in bytes)."""
-    owner = kql_string(_owner_regex(kind, name))
+    owner = kql_string(owner_regex(kind, name))
     kql = (f"let pods = KubePodInventory | where TimeGenerated > ago(30d) and Namespace == {kql_string(namespace)}"
            f" and ControllerName matches regex {owner} | distinct PodUid;"
            " Perf | where TimeGenerated > ago(30d) and ObjectName == 'K8SContainer'"
@@ -294,10 +261,8 @@ def usage_ci(client, cluster_id, namespace, kind, name):
             "reason": "" if out else "Container Insights has no CPU or memory rows for this workload in the last 30 days."}
 
 
-def runtime_app(names, link, name):
-    """(the tool's app for this workload, why): the saved link's app, else one whose words are the workload's."""
-    if (link or {}).get("app"):
-        return link["app"], "linked to this workload (Path → Link front doors)"
+def runtime_app(names, name):
+    """(the tool's app for this workload, why): the one whose words are the workload's."""
     noise = common_words(names)  # what most of the tool's app names carry (an environment suffix, say)
     wanted = tokens(name) - noise
     for c in app_candidates(names, name):
@@ -331,11 +296,11 @@ def _tool(call, label):
         return None, f"{label}: {str(error).splitlines()[0][:300]}"
 
 
-def history(client, link, targets, source=None, can=(), app_names=None):
+def history(client, workload, targets, source=None, can=(), app_names=None):
     """CPU and memory over 7 and 30 days (Container Insights, else the monitoring tool), the pod request each HPA target
     needs at the 30-day peak, and the app's runtime memory when the tool reports it. `targets` is {resource: %}."""
     label = getattr(source, "label", "") or "The monitoring tool"
-    cluster, namespace, kind, name = link["cluster_id"], link["namespace"], link["kind"], link["name"]
+    cluster, namespace, kind, name = workload["cluster_id"], workload["namespace"], workload["kind"], workload["name"]
     usage, notes = usage_ci(client, cluster, namespace, kind, name), []
     usage["source"] = "Container Insights"
     if not usage["found"] and source is not None and "workload usage" in can:
@@ -353,9 +318,9 @@ def history(client, link, targets, source=None, can=(), app_names=None):
         runtime["reason"] = f"{label} can't give an app's runtime memory." if source is not None else \
             "No monitoring tool is picked in the Scope bar, so the app's heap can't be read."
     else:
-        app, why = runtime_app(app_names() if app_names else [], link, name)
+        app, why = runtime_app(app_names() if app_names else [], name)
         if not app:
-            runtime["reason"] = (f"No app in {label} has this workload's name; link one in Path → Link front doors.")
+            runtime["reason"] = (f"No app in {label} has this workload's name, so its runtime memory can't be read.")
         else:
             found, error = _tool(lambda: source.runtime_memory(app), label)
             runtime = {"found": False, **(found or {}), "app": app, "why": why, "source": label,

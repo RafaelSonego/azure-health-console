@@ -1,3 +1,4 @@
+import types
 import pytest
 
 from healthconsole.core import health, profiles
@@ -282,3 +283,12 @@ def test_metric_signals_carry_the_display_name_and_follow_the_change_setting():
     assert load.label == "Server Load" and load.baseline == 30.0 and "last week" not in load.detail
     assert health._evaluate(health._Check(spec=redis.metrics[0], source="profile"), 30.0, 10.0, "Percent",
                             HealthOptions(baseline_change_percent=400)).detail == ""  # 3x is under the setting's 4x
+
+
+def test_the_health_check_runs_the_same_detectors_as_the_diagnostics_tab(monkeypatch):
+    from healthconsole.core import health
+    from healthconsole.core.explore import detectors
+    asked = []
+    monkeypatch.setattr(detectors, "run", lambda client, rid, **kw: asked.append(kw) or {"results": []})
+    health._detector_signals(FakeClient(), types.SimpleNamespace(id="/r"))
+    assert asked == [{}]  # no narrower words: the plan's own, as the tab uses
