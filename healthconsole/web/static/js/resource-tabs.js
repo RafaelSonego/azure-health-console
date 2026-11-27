@@ -48,14 +48,16 @@ function showDetail(nodeId, tab = "overview", { push = false } = {}) {
     const key = event.target.closest("[data-tab]")?.dataset.tab;
     if (key) showDetail(node.id, key, { push: true });
   });
-  for (const [key, count] of Object.entries((state.tabBadges || {})[node.id] || {})) {
+  for (const [key, badge] of Object.entries((state.tabBadges || {})[node.id] || {})) {
     const button = $("detail").querySelector(`.tabs [data-tab="${key}"]`);
-    if (button && count) button.insertAdjacentHTML("beforeend", ` <span class="tab-badge critical">${count}</span>`);
+    if (button) button.insertAdjacentHTML("beforeend", tabBadgeHtml(badge));
   }
+  if (state.detailNode !== node.id) Object.assign(state, { aksNsPick: null, aksSystem: false, aksCiHours: "" });  // a resource opens unfiltered
   state.detailNode = node.id;
   state.detailTab = tab;
   navRecord(push);
   renderTab(node, tab);
+  checkDiagnostics(node);
 }
 
 async function renderTab(node, tab) {
@@ -249,16 +251,22 @@ function tabOverview(node, body) {
 
 const PROBLEM = new Set(["critical", "warning"]);
 
-function setTabBadge(key, count, tone = "critical") {
-  if (state.exploreNode) {
+// A tab's count, kept per resource ({count, tone, title}); `nodeId` for a read that may end after you moved on.
+const tabBadgeHtml = (b) => {
+  const { count, tone = "critical", title = "" } = typeof b === "object" && b ? b : { count: b };
+  return count ? ` <span class="tab-badge ${esc(tone)}"${title ? ` title="${esc(title)}"` : ""}>${fmt(count)}</span>` : "";
+};
+function setTabBadge(key, count, tone = "critical", { nodeId = (state.exploreNode || {}).id, title = "" } = {}) {
+  if (nodeId) {
     state.tabBadges = state.tabBadges || {};
-    (state.tabBadges[state.exploreNode.id] = state.tabBadges[state.exploreNode.id] || {})[key] = count;
+    (state.tabBadges[nodeId] = state.tabBadges[nodeId] || {})[key] = { count, tone, title };
   }
+  if (nodeId && nodeId !== state.detailNode) return;
   const button = $("detail").querySelector(`.tabs [data-tab="${key}"]`);
   if (!button) return;
   const old = button.querySelector(".tab-badge");
   if (old) old.remove();
-  if (count) button.insertAdjacentHTML("beforeend", ` <span class="tab-badge ${tone}">${count}</span>`);
+  button.insertAdjacentHTML("beforeend", tabBadgeHtml({ count, tone, title }));
 }
 
 async function renderOverviewEvents(node) {
@@ -499,6 +507,37 @@ async function helpGuides(node, box, portalLink) {
 }
 
 const DETECTORS_AT_ONCE = 6;
+const FLAGGED = new Set(["critical", "warning"]);
+
+// The Diagnostics tab's count: what Azure's detectors flag (critical or warning, last 24 h).
+function diagnosticsBadge(nodeId, results) {
+  const flagged = results.filter((r) => FLAGGED.has(r.status));
+  setTabBadge("diagnostics", flagged.length, flagged.some((r) => r.status === "critical") ? "critical" : "warning",
+    { nodeId, title: `${flagged.length} of Azure's detectors report a warning or critical finding in the last 24 hours` });
+}
+
+// Opening a resource runs its default detectors in the background (the tab's own reads, so the tab then opens at once)
+// and counts what they flag on the Diagnostics tab. Once per resource per session; types without detectors stop at the list.
+async function checkDiagnostics(node) {
+  state.diagChecked = state.diagChecked || new Set();
+  if (state.diagChecked.has(node.id) || !$("detail").querySelector('.tabs [data-tab="diagnostics"]')) return;
+  state.diagChecked.add(node.id);
+  try {
+    const plan = await exploreGet("diagnostics", node, { plan: "1" });
+    if (plan.error || !plan.supported) return;
+    const queue = [...plan.detectors], results = [];
+    const worker = async () => {
+      while (queue.length) {
+        const d = queue.shift();
+        results.push(await exploreGet("diagnostics", node, { detector: d.name }).catch(() => ({ status: "unknown" })));
+      }
+    };
+    await Promise.all(Array.from({ length: 3 }, worker));  // fewer at once than the tab: it runs behind what you're reading
+    diagnosticsBadge(node.id, results);
+  } catch (error) {
+    state.diagChecked.delete(node.id);  // a failed list is tried again on the next visit
+  }
+}
 
 // The list first (one read), then each detector on its own, six at a time, drawn as it answers: one can take 25 s.
 async function tabDiagnostics(node, body, all = false) {
@@ -537,9 +576,10 @@ async function tabDiagnostics(node, body, all = false) {
     if (!body.isConnected) return;
     const opened = new Set([...body.querySelectorAll("details[data-detector][open]")].map((d) => d.dataset.detector));
     const done = [...results.values()].sort((a, b) => (ORDER[a.status] ?? 5) - (ORDER[b.status] ?? 5) || (a.title || "").localeCompare(b.title || ""));
-    const flagged = done.filter((r) => ["critical", "warning"].includes(r.status));
-    const quiet = done.filter((r) => !["critical", "warning"].includes(r.status));
+    const flagged = done.filter((r) => FLAGGED.has(r.status));
+    const quiet = done.filter((r) => !FLAGGED.has(r.status));
     const waiting = plan.detectors.length - results.size;
+    if (!waiting) diagnosticsBadge(node.id, done);
     body.innerHTML = `<p class="muted">These are Azure's own checks, the same as the portal's ${portalLink.replace("Diagnose and solve problems in the portal", "Diagnose and solve problems")}
         (look under the category shown next to each one). They cover the <strong>last 24 hours</strong>, so a finding can be
         something that happened earlier today, not the current state, and the severity is Azure's own rating.</p>

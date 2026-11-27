@@ -455,12 +455,13 @@ def capacity(nodes, pods, node_metrics, cfg, profiles=None):
     profiles = profiles or {}
     pools = defaultdict(lambda: dict(nodes=0, not_ready=0, alloc_cpu=0.0, alloc_mem=0.0,
                                      req_cpu=0.0, req_mem=0.0, used_cpu=0.0, used_mem=0.0))
-    node_pool, shapes = {}, defaultdict(dict)  # pool -> {vm size: one node's capacity and allocatable}
+    node_pool, shapes, modes = {}, defaultdict(dict), {}  # pool -> {vm size: one node's capacity and allocatable}
     for n in nodes:
         name = n["metadata"]["name"]
         pool = pools[_pool_of(n)]
         node_pool[name] = _pool_of(n)
         pool["nodes"] += 1
+        modes[_pool_of(n)] = (n["metadata"].get("labels") or {}).get(_NODE_LABELS["mode"]) or modes.get(_pool_of(n), "")
         size = (n["metadata"].get("labels") or {}).get(_NODE_LABELS["vm_size"], "")
         cap, alloc = n["status"].get("capacity") or {}, n["status"].get("allocatable") or {}
         shapes[_pool_of(n)].setdefault(size, {"vm_size": size, "cpu": parse_cpu(cap.get("cpu")), "memory": parse_mem(cap.get("memory")),
@@ -514,7 +515,8 @@ def capacity(nodes, pods, node_metrics, cfg, profiles=None):
                                  "new pods stop fitting soon, and no node will be added for them",
                                  "Raise the pool's maximum (or add a pool), and check VM quota and subnet IPs.",
                                  basis=rule(THRESHOLD, "aks-autoscaler", "pool_requests_percent", f"over {cfg.pool_requests:.0%} of allocatable")))
-    rows = [{"pool": name, **{k: round(v) if isinstance(v, float) else v for k, v in p.items()}, **growth[name],
+    rows = [{"pool": name, "mode": modes.get(name) or (profiles.get(name) or {}).get("mode") or "",
+             **{k: round(v) if isinstance(v, float) else v for k, v in p.items()}, **growth[name],
              "shapes": [{k: round(v) if isinstance(v, float) else v for k, v in s.items()} for s in shapes[name].values()]}
             for name, p in sorted(pools.items())]
     return rows, f

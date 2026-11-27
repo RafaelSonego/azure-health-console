@@ -6,6 +6,10 @@
 
 const cores = (m) => `${(Number(m || 0) / 1000).toFixed(1)}`;
 const gib = (mi) => `${(Number(mi || 0) / 1024).toFixed(1)}`;
+// A pool's mode as a tag: System pools run the cluster's own pods (CoreDNS, metrics-server…), User pools the team's.
+const poolModeHtml = (mode) => (mode === "System"
+  ? pillHtml("info", "System pool", { rank: null, title: "Runs the cluster's own pods (CoreDNS, metrics-server, konnectivity…). AKS needs at least one." })
+  : mode ? `<span class="muted" title="Runs the team's workloads">${esc(mode.toLowerCase())} pool</span>` : "");
 
 function shareCell(x, unit, warn = 0.8) {  // warn: aks.pool_requests_percent, as Capacity
   if (!x || x.requested_pct == null) return '<span class="muted">–</span>';
@@ -39,7 +43,7 @@ async function tabNodes(node, body) {
       ${data.via ? `<br><span class="muted">via ${esc(data.via)} · pool scaling settings are on the Scaling tab</span>` : ""}</p>
     ${unreadableHtml(data.unreadable, node.id)}
     ${pools.length ? `<h4>Pools ${kubeHowButton("nodes-pools")}</h4>${table(["Pool", "Nodes", "Not ready", "CPU (cores) allocatable / requested / used", "Memory (GiB) allocatable / requested / used"],
-      pools.map((p) => [esc(p.pool), fmt(p.nodes), p.not_ready ? `${pill("critical")} ${fmt(p.not_ready)}` : "0",
+      pools.map((p) => [`${esc(p.pool)} ${poolModeHtml(p.mode)}`, fmt(p.nodes), p.not_ready ? `${pill("critical")} ${fmt(p.not_ready)}` : "0",
         `${cores(p.alloc_cpu)} / ${cores(p.req_cpu)} / ${p.used_cpu ? cores(p.used_cpu) : "–"}`,
         `${gib(p.alloc_mem)} / ${gib(p.req_mem)} / ${p.used_mem ? gib(p.used_mem) : "–"}`]))}` : ""}
     <h4>Nodes ${kubeHowButton("nodes-list")}</h4>
@@ -55,7 +59,7 @@ async function tabNodes(node, body) {
     $("nodes-table").innerHTML = shown.length ? `<table class="data-table nodes-table"><thead><tr><th>Node</th><th>State</th>
         ${fromInsights ? "" : "<th>CPU</th><th>Memory</th><th>Pods</th>"}<th>Versions</th><th>Age</th></tr></thead><tbody>${shown.map((r, i) => `
       <tr class="clickable" data-node-row="${i}"><td>${pill(r.status)} <strong>${esc(r.name)}</strong>
-          <div class="muted">${esc([r.pool, r.mode, r.vm_size, r.zone].filter(Boolean).join(" · "))}</div></td>
+          <div class="muted">${esc([r.pool, r.vm_size, r.zone].filter(Boolean).join(" · "))} ${poolModeHtml(r.mode)}</div></td>
         <td>${r.ready ? "Ready" : '<span class="critical">NotReady</span>'}${r.problems.filter((x) => !x.startsWith("NotReady")).map((x) => `<div class="warning">${esc(x)}</div>`).join("")}
           ${r.taints && r.taints.length ? `<div class="muted">${r.taints.length} taint(s)</div>` : ""}</td>
         ${fromInsights ? "" : `<td>${shareCell(r.cpu, "cores", data.pool_requests_warn)}</td><td>${shareCell(r.memory, "GiB", data.pool_requests_warn)}</td>
@@ -148,7 +152,7 @@ document.addEventListener("click", (event) => {
   if (next && next.classList.contains("kube-how")) { next.remove(); return; }
   const how = KUBE_HOW[button.dataset.kubeHow];
   anchor.insertAdjacentHTML("afterend", `<div class="kube-how"><p class="muted">${esc(how.from)}</p>${kubeCmdHtml(how.cmd)}
-    <p class="muted">The console leaves out system namespaces unless you tick them; <code>-A</code> shows every namespace, <code>-n &lt;namespace&gt;</code> one. The kubectl tab has the rest.</p></div>`);
+    <p class="muted">The console leaves system namespaces out of <em>All namespaces</em> unless you pick one, or <em>All namespaces, including system</em>; <code>-A</code> shows every namespace, <code>-n &lt;namespace&gt;</code> one. The kubectl tab has the rest.</p></div>`);
   const part = button.closest("details");
   if (part) part.open = true;
 });
@@ -301,7 +305,11 @@ function wireAksParts(body) {
     }, true);
   }
   const filter = $("aks-filter"), nsPick = $("aks-ns");
-  const apply = () => { filterAksParts(body, filter ? filter.value.trim() : "", nsPick ? nsPick.value : ""); renderTabTools(body); };
+  const apply = () => {
+    filterAksParts(body, filter ? filter.value.trim() : "", nsPick ? nsPick.value.replace(ALL_WITH_SYSTEM, "") : "");
+    if (body.recountAksSubs) body.recountAksSubs();
+    renderTabTools(body);
+  };
   if (filter) filter.addEventListener("input", apply);
   if (nsPick) nsPick.addEventListener("change", apply);
   body.reapplyFilter = apply;
@@ -330,8 +338,8 @@ function renderTabTools(body, reset) {
   const tools = body.querySelector(".tab-tools");
   if (!tools) return;
   if (reset) tools.reset = reset;
-  const filter = tools.querySelector('input[type="search"]'), nsPick = tools.querySelector("[data-ns-filter]");
-  const text = filter ? filter.value.trim() : "", ns = nsPick ? nsPick.value : "";
+  const filter = tools.querySelector('input[type="search"]:not([role="combobox"])'), nsPick = tools.querySelector("[data-ns-filter]");
+  const text = filter ? filter.value.trim() : "", ns = nsPick ? nsPick.value.replace(ALL_WITH_SYSTEM, "") : "";
   const folded = keptAksParts(body);
   const parts = [...JSON.parse(tools.dataset.showing || "[]"), ...(ns ? [`namespace ${esc(ns)}`] : []), ...(text ? [`filter “${esc(text)}”`] : []),
     ...(folded ? ["sections you opened or closed"] : [])];
@@ -361,8 +369,9 @@ function renderTabTools(body, reset) {
     if (!event.target.closest("[data-tools-reset]")) return;
     if (filter) filter.value = "";
     forgetAksParts(body);
-    if (nsPick && nsPick.value) { nsPick.value = ""; nsPick.dispatchEvent(new Event("change")); }
-    if (tools.dataset.changed === "1" && tools.reset) tools.reset();
+    const redraws = tools.dataset.changed === "1" && tools.reset;
+    if (nsPick && nsPick.value) { nsPick.value = ""; state.aksNsPick = null; if (!redraws) nsPick.dispatchEvent(new Event("change")); }
+    if (redraws) tools.reset();
     else if (filter) filter.dispatchEvent(new Event("input"));
     else renderTabTools(body);
   });

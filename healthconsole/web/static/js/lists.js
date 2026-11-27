@@ -63,12 +63,12 @@ function headedColumn(table, name) {
 }
 const namespaceColumn = (table) => headedColumn(table, "Namespace");
 
-function rowMatches(table, row) {
+function rowMatches(table, row, { kind: byKind = true } = {}) {
   const text = (table.dataset.filterText || "").toLowerCase(), ns = table.dataset.filterNs || "";
   if (text && !row.textContent.toLowerCase().includes(text)) return false;
   const col = ns ? namespaceColumn(table) : -1;
   if (col >= 0 && !(row.cells[col] && row.cells[col].textContent.trim() === ns)) return false;
-  const kind = table.dataset.filterKind || "", kcol = kind ? headedColumn(table, "Kind") : -1;
+  const kind = byKind ? table.dataset.filterKind || "" : "", kcol = kind ? headedColumn(table, "Kind") : -1;
   return kcol < 0 || (row.cells[kcol] && row.cells[kcol].textContent.trim() === kind);
 }
 

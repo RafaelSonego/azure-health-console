@@ -219,7 +219,7 @@ const pctOf = (part, whole) => (whole ? Math.round((100 * part) / whole) : null)
 function poolsTable(pools, usage, warn) {
   const shape = (s) => `${s.vm_size || "VM size not labelled"}: ${coresText(s.cpu)} and ${gibText(s.memory)} per node. Each node keeps `
     + `${coresText(s.cpu - s.alloc_cpu)} and ${gibText(s.memory - s.alloc_memory)} for Kubernetes and the OS, so pods can use ${coresText(s.alloc_cpu)} and ${gibText(s.alloc_memory)} of it.`;
-  const pool = (p) => `<strong title="${esc((p.shapes || []).map(shape).join("\n"))}">${esc(p.pool)}</strong>${(p.shapes || []).map((s) =>
+  const pool = (p) => `<strong title="${esc((p.shapes || []).map(shape).join("\n"))}">${esc(p.pool)}</strong> ${poolModeHtml(p.mode)}${(p.shapes || []).map((s) =>
     `<div class="muted" title="${esc(shape(s))}"><code>${esc(s.vm_size || "?")}</code> · ${esc(coresText(s.cpu).replace(" cores", " vCPU"))} · ${esc(gibText(s.memory))} per node</div>`).join("")}`;
   const toNodes = (p, label, problems = false) => `<button type="button" class="link" data-goto-nodes="${esc(JSON.stringify({ pool: p.pool, problems }))}"
     title="${problems ? "Its nodes that need a look" : "Its nodes"}, on the Nodes tab: conditions, taints, what runs on each, versions">${label} ›</button>`;
@@ -278,6 +278,25 @@ function subBadge(body, key, n, bad) {
   badge.classList.toggle("critical", !!bad);
 }
 
+// The sub-tabs' and kind buttons' counts for what the Namespace pick and Filter leave (their rows, as each table shows).
+function recountAksSubs(body, problemsBad) {
+  const matching = (key, keep = () => true) => {
+    const t = body.querySelector(`table[data-list="${key}"]`);
+    return t ? listGroups(t).filter((rows) => rowMatches(t, rows[0], { kind: false }) && keep(t, rows[0])).length : 0;
+  };
+  const named = (t, row) => { const col = namespaceColumn(t); return col < 0 || !!(row.cells[col] && row.cells[col].textContent.trim()); };
+  subBadge(body, "problems", matching("aks-problems", named), problemsBad);
+  subBadge(body, "workloads", matching("k-workloads"), false);
+  subBadge(body, "setup", matching("k-config"), false);
+  const list = body.querySelector('table[data-list="k-workloads"]'), kindCol = list ? headedColumn(list, "Kind") : -1;
+  for (const b of body.querySelectorAll("[data-k-kind]")) {
+    const kind = b.dataset.kKind, [, , view] = K_KINDS.find(([v]) => v === kind) || K_KINDS[0];
+    const n = view === "pods" ? matching("k-pods") : view === "jobs" ? matching("k-jobs")
+      : matching("k-workloads", (t, row) => !kind || (kindCol >= 0 && row.cells[kindCol].textContent.trim() === kind));
+    b.querySelector(".muted").textContent = fmt(n);
+  }
+}
+
 function wireAksSubs(body, counts) {
   const show = (key) => {
     body.querySelectorAll(".aks-sub").forEach((d) => d.classList.toggle("hidden", d.dataset.sub !== key));
@@ -313,13 +332,12 @@ async function tabWorkloads(node, body, includeSystem = state.aksSystem || false
     lookBack ? `restarts, OOM kills and warning events: ${state.aksCiHours ? esc(ciSpan(Number(state.aksCiHours))) : `default (${esc(lookBackDefaults)})`}; the rest right now` : "",
     k.available ? (includeSystem ? "system namespaces included" : "system namespaces hidden") : ""];
   let html = `<div class="tab-tools" data-showing="${esc(JSON.stringify(showing.filter(Boolean)))}" data-changed="${state.aksCiHours || includeSystem ? 1 : 0}">
-    <div class="list-tools aks-tools"><label class="tool-field"><span class="tool-label">Namespace</span><select id="aks-ns" data-ns-filter aria-label="Show one namespace" title="Every section to one namespace; the count is its rows in the sections with problems"><option value="">All namespaces</option></select></label>
-      <label class="tool-field"><span class="tool-label">Go to workload</span><span class="go-wrap"><input type="text" id="aks-go" autocomplete="off" spellcheck="false" placeholder="Go to workload…" aria-label="Go to a workload"
+    <div class="list-tools aks-tools"><label class="tool-field"><span class="tool-label">Namespace</span><select id="aks-ns" data-ns-filter aria-label="Show one namespace" title="Every section to one namespace; the count is its rows in the sections with problems. System namespaces are hidden from All namespaces: pick one, or All namespaces, including system"><option value="">All namespaces</option></select></label>
+      <label class="tool-field"><span class="tool-label">Go to workload</span><span class="go-wrap"><input type="search" id="aks-go" autocomplete="off" spellcheck="false" placeholder="Go to workload…" aria-label="Go to a workload"
         title="Type part of its name (or namespace/name) and pick it: its Details, Dependencies and Path open below" role="combobox" aria-expanded="false" aria-controls="aks-go-list"><span class="go-list" id="aks-go-list" role="listbox" hidden></span></span></label>
       <label class="tool-field"><span class="tool-label">Filter</span><input type="search" id="aks-filter" placeholder="workload, pod, reason…" aria-label="Filter the workload sections"></label>
       ${lookBack ? `<label class="tool-field" title="How far back restarts, OOM kills and warning events look, in Container Insights and ${esc(oomTool ? toolLabel(oomTool) : "the monitoring tool")}. Default: ${esc(lookBackDefaults)} (Settings → AKS). The workspace keeps 30 days by default"><span class="tool-label">Look back</span>
         <select id="ci-look-back">${CI_LOOK_BACK.map(([v, l]) => `<option value="${v}" ${v === (state.aksCiHours || "") ? "selected" : ""}${v ? "" : ` title="${esc(lookBackDefaults)}"`}>${l}</option>`).join("")}</select></label>` : ""}
-      ${k.available ? `<label class="tool-field" title="Kubernetes' own namespaces and those AKS or its add-ons manage, found in the cluster (listed under Workload checks)"><span class="tool-label">System namespaces</span><span class="tool-check"><input type="checkbox" id="k-system" ${includeSystem ? "checked" : ""}> include</span></label>` : ""}
       <span class="tool-field"><span class="tool-label">Sections</span><span class="tool-links"><button type="button" class="link" data-aks-parts="open">Expand all</button> · <button type="button" class="link" data-aks-parts="close">Collapse all</button></span></span></div>
     <div class="showing muted"></div><nav class="jump-bar" aria-label="Sections"></nav></div><div id="aks-go-out"></div>
     <nav class="subtabs aks-subtabs" aria-label="Workloads">${AKS_SUBS.map(([key, label]) => `<button type="button" data-aks-sub="${key}">${label}<span class="tab-badge" data-sub-n="${key}" hidden></span></button>`).join("")}</nav>
@@ -329,14 +347,14 @@ async function tabWorkloads(node, body, includeSystem = state.aksSystem || false
   const depList = Array.isArray(k.workloads) ? k.workloads : [];
   const depNamespaces = [...new Set(phases.map((r) => r.namespace).filter(Boolean))].sort();
   const needsApi = (what) => `${noticeHtml(k.reason || "The Kubernetes API couldn't be read.")}<p class="muted">${what} come${what.endsWith("s") ? "" : "s"} from the Kubernetes API only.</p>`;
-  const findingsTable = (rows) => table(["Severity", "Namespace", "Workload", "Container", "Problem", "What to do"], rows
+  const findingsTable = (rows, key) => table(["Severity", "Namespace", "Workload", "Container", "Problem", "What to do"], rows
     .filter((f) => f.severity !== "INFO").map((f) => [
       pill(SEVERITY_STATUS[f.severity]) + ` <span class="muted">${esc(f.severity)}</span>`, esc(f.namespace), workloadButton(f.namespace, f.workload),
-      esc(f.container), `${esc(f.problem)}<br><span class="muted">${esc(f.why)}</span>`, `${esc(f.action)}${ruleHtml(f.rule)}`]));
+      esc(f.container), `${esc(f.problem)}<br><span class="muted">${esc(f.why)}</span>`, `${esc(f.action)}${ruleHtml(f.rule)}`]), key);
   const visible = (k.findings || []).filter((f) => f.severity !== "INFO");
   const nowRows = visible.filter((f) => f.kind === "now"), configRows = visible.filter((f) => f.kind === "config");
   const clusterRows = nowRows.filter((f) => !f.workload);
-  const systemNote = (k.system_namespaces || []).length ? `<p class="muted">${includeSystem ? "System namespaces, included" : "Hidden as system (tick <em>include</em> in the toolbar to show them)"}:
+  const systemNote = (k.system_namespaces || []).length ? `<p class="muted">${includeSystem ? "System namespaces, included" : "Hidden from <em>All namespaces</em> as system (pick one in <em>Namespace</em>, or <em>All namespaces, including system</em>)"}:
     ${k.system_namespaces.map((s) => `<span title="${esc(s.why)}">${esc(s.namespace)}</span>`).join(", ")}. Found in the cluster: Kubernetes' own
     namespaces, and those where every workload carries a label AKS or its add-on manager sets.
     <a href="https://kubernetes.io/docs/concepts/overview/working-with-objects/namespaces/" target="_blank" rel="noopener">docs</a></p>` : "";
@@ -358,13 +376,13 @@ async function tabWorkloads(node, body, includeSystem = state.aksSystem || false
         <em>at max</em> is the same requests if the autoscaler grows it fully; a full pool (past ${Math.round(100 * (k.pool_requests_warn || 0.8))}%,
         ${settingLink("aks.pool_requests_percent", "change")}) is amber only when it can't grow.</p>
       ${poolsTable(k.pools, k.usage_available, k.pool_requests_warn)}
-      ${clusterRows.length ? `<h5>The cluster now</h5>${findingsTable(clusterRows)}` : '<p class="ok">✓ No Pending pods, NotReady nodes or full pools that can\'t grow.</p>'}` : needsApi("Node pools")}</section>
+      ${clusterRows.length ? `<h5>The cluster now</h5>${findingsTable(clusterRows, "k-cluster")}` : '<p class="ok">✓ No Pending pods, NotReady nodes or full pools that can\'t grow.</p>'}` : needsApi("Node pools")}</section>
     <section class="layer" data-jump="Top consumers"><h4>Top consumers <span class="muted">· now</span></h4>
       ${k.available ? `<div class="top-consumers">${topConsumersHtml(k.top, k.pools || [])}</div>` : needsApi("Live use per workload")}</section></div>`;
 
   html += `<div class="aks-sub" data-sub="setup"><section class="layer" data-jump="Setup risks"><h4>Setup risks ${kubeHowButton("k-config")}</h4>
     ${k.available ? `<p class="muted">How workloads are set up: single replicas, missing requests or limits, HPA and PodDisruptionBudget settings. Worth fixing before a
-      peak, but common on healthy clusters, so yellow at most.</p>${configRows.length ? findingsTable(configRows) : '<p class="ok">✓ None.</p>'}` : needsApi("Setup risks")}</section></div>`;
+      peak, but common on healthy clusters, so yellow at most.</p>${configRows.length ? findingsTable(configRows, "k-config") : '<p class="ok">✓ None.</p>'}` : needsApi("Setup risks")}</section></div>`;
 
   // Pods & events: each pod and event behind What's wrong now, whichever source saw it, one row each.
   const ciRows = (name) => (ci.available && Array.isArray(ci[name]) ? ci[name] : []);
@@ -425,31 +443,37 @@ async function tabWorkloads(node, body, includeSystem = state.aksSystem || false
     capacity: [clusterRows.length, clusterRows.length > 0],
     setup: [configRows.length, false],
   });
+  body.recountAksSubs = () => recountAksSubs(body, problems.groups.length > 0);
   wireAksParts(body);
   wireKindPick(body);
-  renderTabTools(body, () => { state.aksCiHours = ""; state.aksSystem = false; tabWorkloads(node, body, false); });
+  renderTabTools(body, () => { state.aksCiHours = ""; state.aksSystem = false; state.aksNsPick = null; tabWorkloads(node, body, false); });
   const namespaces = [...depNamespaces, ...depList.map((w) => w.namespace)];
+  // A tool's rows skip the server's system-namespace filter, so the same one applies here.
+  const systemNs = new Set(k.available ? (k.system_namespaces || []).map((s) => s.namespace) : ["kube-system", "kube-public", "kube-node-lease"]);
+  const shownNs = (r) => includeSystem || !systemNs.has(r.namespace ?? r.Namespace);
+  const nsChoice = { system: [...systemNs], includeSystem, reload: (system) => { state.aksSystem = system; tabWorkloads(node, body, system); } };
   if (oomTool) loadEventsMonitor(node, oomTool, eventRows).then((extra) => {
     if (!extra || !body.isConnected) return;
+    extra.rows = extra.rows.filter(shownNs);
     setPartCount(body, "ev-events", eventRows.length + extra.extra);
     if (!extra.rows.length || !$("aks-problems")) return;
     mergeMonitorEvents(problems, extra.rows, extra.label, extra.hours);
     renderProblems(body, problems, data.timings);
-    subBadge(body, "problems", problems.groups.filter((g) => g.namespace || g.workload).length, true);
     body.reapplyFilter();
   });
   if (oomTool) loadOomMonitor(node, oomTool, Array.isArray(ci.oomkilled) ? ci.oomkilled : []).then((extra) => {
     if (!extra || !body.isConnected) return;
+    extra.rows = extra.rows.filter(shownNs);
+    if (extra.byWorkload) extra.byWorkload = extra.byWorkload.filter(shownNs);
     setPartCount(body, "ev-oom", ciRows("oomkilled").length + extra.extra);
     if (!extra.rows.length || !$("aks-problems")) return;
     mergeMonitorOom(problems, extra.rows, extra.label, extra.byWorkload);
     renderProblems(body, problems, data.timings);
-    subBadge(body, "problems", problems.groups.filter((g) => g.namespace || g.workload).length, true);
-    wireNamespacePick(body, node, namespaces);
+    wireNamespacePick(body, node, namespaces, nsChoice);
     body.reapplyFilter();
     renderTabTools(body);
   });
-  wireNamespacePick(body, node, namespaces);
+  wireNamespacePick(body, node, namespaces, nsChoice);
   const goList = [...depList];  // plus the workloads other sources named, for clusters whose API can't be read
   for (const g of problems.groups) {
     const at = g.workload.indexOf("/"), kind = g.workload.slice(0, at), name = g.workload.slice(at + 1);
@@ -459,8 +483,6 @@ async function tabWorkloads(node, body, includeSystem = state.aksSystem || false
   }
   wireGoTo(body, node, goList, oomTool);
 
-  const toggle = $("k-system");
-  if (toggle) toggle.addEventListener("change", () => { state.aksSystem = toggle.checked; tabWorkloads(node, body, toggle.checked); });
   const back = $("ci-look-back");
   if (back) back.addEventListener("change", () => { state.aksCiHours = back.value; tabWorkloads(node, body, includeSystem); });
   body.onclick = (event) => {

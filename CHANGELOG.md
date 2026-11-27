@@ -4,6 +4,38 @@ All notable changes to this project are documented here. The format is based
 on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.0] - 2026-11-27
+
+### Added
+
+- **The Diagnostics tab says when Azure's detectors found something, for any resource.** Opening a resource runs its
+  default detectors in the background (three at a time, once per resource per session) and the tab shows how many
+  report a warning or critical finding, red when one is critical. The tab then opens at once, from the same reads.
+- **★ Favourites at the top of Browse's tree.** ☆ on a resource keeps it there, in this browser; a click opens it from
+  any group, and the filter box narrows them.
+- **An × in every search box** empties it, and whatever it filters redraws.
+- **Application Gateway scaling.** The Scaling tab was empty for every v2 gateway: it looked for an autoscale setting
+  and a top-level SKU capacity, and a gateway has neither. It now shows the gateway's own range
+  (`autoscaleConfiguration`) or its fixed instance count, and the instances now and at most in the last hour,
+  estimated from the `CapacityUnits` metric (about 10 per instance), red at the maximum.
+- AKS node pools are marked *System pool* or *user pool* on Capacity and on the Nodes tab.
+
+### Changed
+
+- **No more System namespaces checkbox.** *All namespaces* leaves system namespaces out; picking one (they're listed
+  under *System*) or *All namespaces, including system* reads them in.
+- **The namespace pick lasts while you stay on a cluster**, not across visits: opening a resource again starts with no
+  namespace, no system namespaces and the default look-back.
+- **Headings in a resource's tabs and opened panels are title bars** (Scaling: HPA, Containers, Pods, Events, YAML…),
+  so a section is found by eye; Azure's own detector text keeps its small headings.
+
+### Fixed
+
+- The Workloads sub-tabs' counts and the kind buttons' counts stayed cluster-wide when a namespace or filter was
+  picked; they now count what's shown.
+- A monitoring tool's OOM kills and warning events showed system namespaces in What's wrong now while every other
+  section hid them.
+
 ## [1.3.0] - 2026-11-26
 
 ### Added

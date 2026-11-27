@@ -91,10 +91,41 @@ function renderGroups() {
         ${open ? `<div class="tree-children" role="group">${pagedHtml(`rgs:${id}`, list, groupHtml, openAt(list))}</div>` : ""}`;
     }).join("");
   }
-  $("rgs").innerHTML = treeFindNote(found) + html
+  $("rgs").innerHTML = favouritesHtml(filter) + treeFindNote(found) + html
     || (state.groups.length || currentScope().subscriptions.length ? '<p class="muted">Nothing matches.</p>'
       : pickScopeHtml("Browse lists the resource groups and resources in scope."));
   $("rg-count").textContent = `(${appliedGroups().length} groups)`;
+}
+
+// Favourites: resources you starred, listed at the top of In scope, kept in this browser.
+const favourites = () => stored.json("ahc.favourites", []);
+const isFavourite = (id) => favourites().some((f) => sameId(f.id, id));
+function toggleFavourite(item) {
+  const list = favourites();
+  stored.set("ahc.favourites", isFavourite(item.id) ? list.filter((f) => !sameId(f.id, item.id))
+    : [...list, { id: item.id, name: item.name, type: item.type || "" }].sort((a, b) => byName(a.name, b.name)));
+  renderGroups();
+}
+function favButton(r) {
+  const on = isFavourite(r.id);
+  return `<button type="button" class="fav-btn${on ? " on" : ""}" data-fav="${esc(JSON.stringify({ id: r.id, name: r.name, type: r.display_type || r.type || "" }))}"
+    aria-pressed="${on}" title="${on ? "In Favourites; click to remove" : "Add to Favourites, at the top of this list"}" aria-label="${on ? "Remove from" : "Add to"} Favourites">${on ? "★" : "☆"}</button>`;
+}
+// The starred resources in the subscriptions in scope (filtered by the box above), and how many sit outside it.
+function favouritesHtml(filter) {
+  const subs = state.applied ? state.applied.subs : new Set();
+  const subOf = (id) => (id.split("/")[2] || "").toLowerCase();
+  const inScope = favourites().filter((f) => [...subs].some((s) => s.toLowerCase() === subOf(f.id)));
+  const shown = inScope.filter((f) => !filter || f.name.toLowerCase().includes(filter) || f.type.toLowerCase().includes(filter));
+  if (!inScope.length) return "";
+  state.favOpen = state.favOpen ?? true;
+  const outside = favourites().length - inScope.length;
+  return `<div class="item sub-head fav-head" data-fav-toggle role="treeitem" aria-expanded="${state.favOpen}">
+      <button type="button" class="chev" aria-label="${state.favOpen ? "Close" : "Open"} Favourites">${state.favOpen ? "▾" : "▸"}</button>
+      <span class="grp-name">★ Favourites</span><span class="count">${shown.length}</span></div>
+    ${state.favOpen ? `<div class="tree-children fav-list" role="group">${shown.length ? shown.map((f) => `<div class="item res ${sameId(state.selectedResource, f.id) ? "active" : ""}" data-id="${esc(f.id)}" data-name="${esc(f.name)}" role="treeitem">
+      <span class="dot ${lastStatus(f.id)}" aria-hidden="true"></span><span class="res-name">${esc(f.name)}${f.type ? `<span class="meta">${esc(f.type)}</span>` : ""}</span>${favButton(f)}</div>`).join("")
+      : '<p class="muted tree-note">None matches the filter.</p>'}${outside ? `<p class="muted tree-note">${fmt(outside)} more outside this scope.</p>` : ""}</div>` : ""}`;
 }
 
 const DOT_STATUS = { critical: "critical", warning: "warning", healthy: "healthy", unknown: "unknown" };
@@ -127,7 +158,7 @@ function treeResourceRow(r) {
   return `<div class="item res ${sameId(state.selectedResource, r.id) ? "active" : ""}" data-id="${esc(r.id)}" role="treeitem">
     <span class="dot ${lastStatus(r.id)}" aria-hidden="true"></span><span class="res-name">${esc(r.name)}</span>${busy}${failed ? `<span class="sub">${esc(r.provisioning_state)}</span>` : ""}
     ${r.exposure && r.exposure.level === "open" ? exposureChip(r.exposure) : ""}
-    ${watchButton({ id: r.id, name: r.name, kind: "resource" })}</div>`;
+    ${favButton(r)}${watchButton({ id: r.id, name: r.name, kind: "resource" })}</div>`;
 }
 
 function treeResources(all, key, busy = state.resourcesLoading, settingsLike = []) {

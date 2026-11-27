@@ -55,3 +55,10 @@ def test_top_consumers_add_pods_up_by_workload_against_their_requests():
     assert web["pools"] == ["spot", "user"]  # where its pods run
     assert [r["workload"] for r in top["by_memory"]] == ["Deployment/web", "Deployment/cart"]
     assert aks_checks.top_consumers(pods, [], owner, lambda ns: True) == {"available": False, "by_cpu": [], "by_memory": []}
+
+
+def test_each_pool_says_whether_it_is_the_system_pool():
+    sys_node = node("s0", "sys")
+    sys_node["metadata"]["labels"]["kubernetes.azure.com/mode"] = "system".capitalize()
+    rows, _ = aks_checks.capacity([sys_node, node("u0", "user")], [], [], aks_checks.Thresholds(), {"user": {"mode": "User"}})
+    assert {r["pool"]: r["mode"] for r in rows} == {"sys": "System", "user": "User"}  # the node's label, else the record

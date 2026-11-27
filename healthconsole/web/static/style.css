@@ -132,8 +132,6 @@ main { display: flex; flex-direction: column; min-width: 0; overflow: auto; padd
 .dg-count { color: var(--muted); min-width: 5.5em; }
 .detail { border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; }
 .detail h3 { margin: 0 0 4px; font-size: 15px; }
-.detail h4 { margin: 14px 0 4px; font-size: 13px; }
-.detail h5 { margin: 10px 0 2px; font-size: 12px; color: var(--muted); }
 .explore-head { display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
 .tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--border); margin: 10px 0 8px; flex-wrap: wrap; }
 .tabs button { border: 0; border-bottom: 2px solid transparent; border-radius: 0; background: none; padding: 6px 10px; color: var(--muted); }
@@ -1227,7 +1225,6 @@ table[data-list] tbody tr:hover > td, .data-table tbody tr:hover > td { backgrou
 .path-pick { display: block; margin: 4px 0; }
 
 /* Workload details, opened under a workload's line */
-.logs-panel-body h5 { margin: 14px 0 4px; font-size: 0.95em; }
 .wl-notes { margin: 4px 0 8px 18px; padding: 0; }
 .wl-notes li { margin: 2px 0; }
 
@@ -1309,3 +1306,32 @@ pre.yaml { max-height: 60vh; overflow: auto; background: var(--panel); border: 1
 #logs-out table[data-list^="log-requests"] th:nth-child(1) { width: 80px; }
 #logs-out table[data-list^="log-requests"] th:nth-child(3) { width: 100px; }
 #logs-out table[data-list^="log-requests"] th:nth-child(4) { width: 200px; }
+
+/* every search box: an × at its right end while it holds text (core.js clears it on click); the browser's own is hidden */
+input[type="search"]::-webkit-search-cancel-button { -webkit-appearance: none; appearance: none; display: none; }
+input[type="search"]:not(:placeholder-shown) { padding-right: 26px; background-repeat: no-repeat; background-position: right 8px center;
+  background-size: 11px; background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M3 3l10 10M13 3L3 13' stroke='%238b949e' stroke-width='2.4' stroke-linecap='round'/%3E%3C/svg%3E"); }
+.tab-badge.warning { background: var(--warning-bg); color: var(--warning); }
+/* Favourites: a star on each resource in the tree (shown on hover, always once starred) and their list on top */
+.fav-btn { border: 0; background: none; padding: 0 2px; font-size: 14px; line-height: 1; color: var(--muted); flex: none; }
+.fav-btn:hover, .fav-btn.on { color: var(--warning); }
+.tree .item .fav-btn:not(.on) { visibility: hidden; }
+.tree .item:hover .fav-btn, .tree .item.active .fav-btn, .tree .item .fav-btn:focus-visible { visibility: visible; }
+.fav-list .res-name .meta { display: block; font-size: 11px; color: var(--muted); }
+.tree .fav-head { margin-top: 0; }
+
+/* Headings inside a resource's tabs and opened panels (workload, pod, node): a clear step above body text, so a
+   section (Scaling, Containers, Pods, YAML…) is found by eye. h4 a titled bar, h5 a rule above a bold line. */
+.detail h4, .section-body h4 { font-size: 15px; font-weight: 650; color: var(--section-title); margin: 20px 0 8px; }
+.detail h5, .section-body h5, .logs-panel-body h5 { font-size: 14px; font-weight: 700; color: var(--section-title);
+  margin: 22px 0 8px; padding: 6px 10px; background: var(--section-head); border-left: 3px solid var(--accent); border-radius: 0 6px 6px 0; }
+.detail :is(h4, h5):first-child, .logs-panel-body > h5:first-child { margin-top: 4px; }
+/* small headings inside Azure's own text (detector details) and folds stay small */
+.detail :is(.insight, .md, details.more, .mon-query, .node-detail) h5 { font-size: 12.5px; font-weight: 650; margin: 10px 0 4px;
+  padding: 0; border: 0; background: none; }
+/* a YAML fold reads as a section of its own, with its arrow */
+.yaml-fold { margin: 22px 0 8px; }
+.yaml-fold > summary { font-size: 14px; font-weight: 700; color: var(--section-title); cursor: pointer; padding: 6px 10px;
+  background: var(--section-head); border-left: 3px solid var(--accent); border-radius: 0 6px 6px 0; }
+.yaml-fold > summary::after { content: " · show the manifest"; font-weight: 400; font-size: 12px; color: var(--muted); }
+.yaml-fold[open] > summary::after { content: ""; }

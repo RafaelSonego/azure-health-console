@@ -234,6 +234,41 @@ def test_scaling_items():
     assert items == {"as": CRITICAL, "user": CRITICAL, "fixed": WARNING, "sys": INFO}
 
 
+AGW = "/subscriptions/s/resourceGroups/rg/providers/Microsoft.Network/applicationGateways/gw"
+
+
+def _gateway(props):
+    return {"id": AGW, "type": "microsoft.network/applicationgateways", "sku": None, "properties": props}
+
+
+def _units(values):
+    points = [{"timeStamp": f"t{i}", "maximum": v} for i, v in enumerate(values)]
+    return {"value": [{"unit": "Count", "timeseries": [{"data": points}]}]}
+
+
+def test_a_gateway_s_own_autoscale_range_is_its_scaling(monkeypatch):
+    from tests.conftest import FakeClient
+    row = _gateway({"sku": {"tier": "WAF_v2"}, "autoscaleConfiguration": {"minCapacity": 8, "maxCapacity": 125}})
+    client = FakeClient(query_handlers=[("autoscalesettings", lambda q: []), ("tolower(id) ==", lambda q: [row])],
+                        gets={"/providers/Microsoft.Insights/metrics": _units([400, 1250, 88])})
+    [item] = scaling.scaling(client, AGW)["items"]
+    assert (item["min"], item["max"], item["current"]) == (8, 125, 9)  # 88 units now -> 9 instances
+    assert item["status"] == CRITICAL and "125 at most" in item["detail"]  # 1250 units = the maximum reached
+
+
+def test_a_gateway_without_capacity_units_still_shows_its_range():
+    from tests.conftest import FakeClient
+    row = _gateway({"autoscaleConfiguration": {"minCapacity": 1, "maxCapacity": 4}})
+    client = FakeClient(query_handlers=[("autoscalesettings", lambda q: []), ("tolower(id) ==", lambda q: [row])])
+    [item] = scaling.scaling(client, AGW)["items"]
+    assert (item["min"], item["max"], item["current"], item["status"]) == (1, 4, None, INFO)
+
+
+def test_a_fixed_size_gateway_shows_its_instance_count():
+    [item] = scaling.items_for(_gateway({"sku": {"tier": "Standard_v2", "capacity": 3}}), [])
+    assert (item["kind"], item["current"]) == ("fixed", 3)
+
+
 def test_detector_categories():
     assert detectors._wanted("Availability and Performance")
     assert detectors._wanted("Node Health")

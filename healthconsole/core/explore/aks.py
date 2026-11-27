@@ -540,21 +540,21 @@ def nodes(client, cluster_id, kube_settings=None):
         ready = (r.get("Status") or "").lower() == "ready"
         out.append({"name": r.get("Computer") or "", "status": "healthy" if ready else "critical", "ready": ready,
                     "pool": labels.get("kubernetes.azure.com/agentpool") or labels.get("agentpool") or "",
-                    "vm_size": labels.get("node.kubernetes.io/instance-type") or "",
+                    "vm_size": labels.get("node.kubernetes.io/instance-type") or "", "mode": labels.get("kubernetes.azure.com/mode") or "",
                     "zone": labels.get("topology.kubernetes.io/zone") or "", "kubelet": r.get("KubeletVersion") or "",
                     "problems": [] if ready else [f"status {r.get('Status') or 'unknown'}"], "last_seen": r.get("LastSeen")})
     return {"available": True, "source": "container_insights", "reason": why, "nodes": out, "pools": []}
 
 
 def pool_profiles(client, cluster_id):
-    """{pool: {autoscale, min, max, count, vm_size}} from the cluster's ARM record, {} when it can't be read."""
+    """{pool: {autoscale, min, max, count, vm_size, mode}} from the cluster's ARM record, {} when it can't be read."""
     try:
         rows = client.query(f"Resources | where tolower(id) == {json.dumps(cluster_id.lower())} | project properties")
     except Exception:  # an extra beside the Kubernetes lists: never the reason they don't show
         return {}
     pools = ((rows[0].get("properties") or {}).get("agentPoolProfiles") or []) if rows else []
     return {p.get("name"): {"autoscale": bool(p.get("enableAutoScaling")), "min": p.get("minCount"), "max": p.get("maxCount"),
-                            "count": p.get("count"), "vm_size": p.get("vmSize")} for p in pools}
+                            "count": p.get("count"), "vm_size": p.get("vmSize"), "mode": p.get("mode") or ""} for p in pools}
 
 
 def workloads(client, cluster_id, include_system=False, kube_settings=None, ci_hours=None):

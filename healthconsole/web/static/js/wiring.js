@@ -121,6 +121,9 @@ $("rgs").addEventListener("keydown", (event) => {
 });
 $("rgs").addEventListener("click", (event) => {
   if (event.target.closest("[data-watch]")) return;
+  const fav = event.target.closest("[data-fav]");
+  if (fav) { toggleFavourite(JSON.parse(fav.dataset.fav)); return; }
+  if (event.target.closest("[data-fav-toggle]")) { state.favOpen = !state.favOpen; renderGroups(); return; }
   const more = event.target.closest("[data-more]");
   if (more) { showMore(more); renderGroups(); return; }
   const page = event.target.closest("[data-sub-summary]");
@@ -132,7 +135,7 @@ $("rgs").addEventListener("click", (event) => {
     return;
   }
   const res = event.target.closest(".item.res");
-  if (res) { startSnapshot(res.dataset.id); return; }
+  if (res) { startSnapshot(res.dataset.name ? { kind: "resource", id: res.dataset.id, name: res.dataset.name } : res.dataset.id); return; }
   const typeHead = event.target.closest("[data-type-toggle]");
   if (typeHead) { foldType(typeHead.dataset.foldKey, typeHead.dataset.typeToggle); return; }
   const typeAll = event.target.closest("[data-type-all]");

@@ -544,28 +544,34 @@ async function editPathLinks(box, params, link) {
   });
 }
 
-// The toolbar's namespace picker: namespaces with problems first, with their counts; kept per cluster in this browser.
-// Picking one also sets the Dependencies picker's namespace.
-function wireNamespacePick(body, node, known) {
+// The toolbar's namespace picker: namespaces with problems first, with their counts. System namespaces sit apart:
+// picking one, or "All namespaces, including system", reads them in (`choice.reload`). Kept for this visit only.
+const ALL_WITH_SYSTEM = "*system";
+function wireNamespacePick(body, node, known, choice) {
   const pick = $("aks-ns");
   if (!pick) return;
-  const counts = namespaceProblems(body);
+  stored.set("ahc.aksNs", null);  // where 1.3 kept the pick across visits
+  const counts = namespaceProblems(body), system = new Set(choice.system);
   const inTables = tabLists(body).flatMap((t) => {
     const col = namespaceColumn(t);
     return col < 0 ? [] : listGroups(t).map((rows) => (rows[0].cells[col] ? rows[0].cells[col].textContent.trim() : ""));
   });
   const all = [...new Set([...known, ...inTables].filter(Boolean))].sort();
+  const own = all.filter((n) => !system.has(n)), theirs = all.filter((n) => system.has(n));
   const hot = all.filter((n) => counts[n]).sort((a, b) => counts[b] - counts[a] || a.localeCompare(b));
   const option = (n) => `<option value="${esc(n)}">${esc(n)}${counts[n] ? ` (${fmt(counts[n])})` : ""}</option>`;
-  pick.innerHTML = `<option value="">All namespaces (${fmt(all.length)})</option>${hot.length
-    ? `<optgroup label="With problems">${hot.map(option).join("")}</optgroup><optgroup label="All">${all.map(option).join("")}</optgroup>` : all.map(option).join("")}`;
-  pick.addEventListener("change", () => {
-    const saved = stored.json("ahc.aksNs", {});
-    if (pick.value) saved[node.id] = pick.value; else delete saved[node.id];
-    stored.set("ahc.aksNs", saved);
-  });
-  const saved = stored.json("ahc.aksNs", {})[node.id];
-  if (saved && all.includes(saved)) { pick.value = saved; body.reapplyFilter(); }
+  pick.innerHTML = `<option value="">All namespaces (${fmt(own.length)})</option>${theirs.length
+    ? `<option value="${ALL_WITH_SYSTEM}">All namespaces, including system (${fmt(all.length)})</option>` : ""}${hot.length
+    ? `<optgroup label="With problems">${hot.map(option).join("")}</optgroup>` : ""}${hot.length || theirs.length
+    ? `<optgroup label="${hot.length ? "All" : "Namespaces"}">${own.map(option).join("")}</optgroup>` : own.map(option).join("")}${theirs.length
+    ? `<optgroup label="System">${theirs.map(option).join("")}</optgroup>` : ""}`;
+  pick.onchange = () => {  // a property, not a listener: this runs again when a later read adds rows
+    state.aksNsPick = pick.value ? { id: node.id, ns: pick.value } : null;
+    const wants = pick.value === ALL_WITH_SYSTEM || system.has(pick.value);
+    if (wants !== choice.includeSystem) choice.reload(wants);
+  };
+  const kept = state.aksNsPick && state.aksNsPick.id === node.id ? state.aksNsPick.ns : "";
+  if (kept && (kept === ALL_WITH_SYSTEM ? theirs.length : all.includes(kept))) { pick.value = kept; body.reapplyFilter(); }
 }
 
 // "Go to workload": the cluster's workloads matching what's typed (a name match first, then the picked namespace's), and
@@ -585,11 +591,12 @@ function wireGoTo(body, node, list, tool) {
     if (document.activeElement === input) show();
   };
   const nsPick = $("aks-ns");
-  if (nsPick) { nsPick.addEventListener("change", () => readNamespace(nsPick.value)); readNamespace(nsPick.value); }
+  const pickedNs = () => nsPick.value.replace(ALL_WITH_SYSTEM, "");
+  if (nsPick) { nsPick.addEventListener("change", () => readNamespace(pickedNs())); readNamespace(pickedNs()); }
   const hide = () => { menu.hidden = true; input.setAttribute("aria-expanded", "false"); };
   const mark = () => menu.querySelectorAll("[data-go]").forEach((b, i) => { b.classList.toggle("on", i === at); if (i === at) b.scrollIntoView({ block: "nearest" }); });
   const show = () => {
-    const q = input.value.trim().toLowerCase(), ns = ($("aks-ns") || {}).value || "";
+    const q = input.value.trim().toLowerCase(), ns = (($("aks-ns") || {}).value || "").replace(ALL_WITH_SYSTEM, "");
     if (!q) { hide(); return; }
     const rank = (w) => (w.name.toLowerCase() === q ? 0 : w.name.toLowerCase().startsWith(q) ? 2 : 4) - (w.namespace === ns ? 1 : 0);
     found = list.filter((w) => `${w.namespace}/${w.name}`.toLowerCase().includes(q))

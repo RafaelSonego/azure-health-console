@@ -759,8 +759,10 @@ of more than 20 resources opens folded (the type of the resource you're on stays
 deployments and similar settings come last, under their own folded heading. One filter box finds groups by name and
 resources by name or type across every group in scope: "kubernetes" lists each AKS cluster (Azure's own product names
 count too, such as Kubernetes service or Azure Cache for Redis), each group with a match opened to just its matches
-(its arrow folds them; **collapse all** and **expand all** above). A dot next to a resource shows its last check; **+ Watch** appears when you point at a
-row.
+(its arrow folds them; **collapse all** and **expand all** above). A dot next to a resource shows its last check; **☆** and **+ Watch** appear when you point at a
+row. **☆** puts the resource in **★ Favourites** at the top of the tree (kept in this browser), where a click opens
+it from any group; the filter box narrows them too, and those in subscriptions outside the scope are counted, not
+listed. Every search box has an **×** that empties it.
 
 **A resource group's summary** shows what's in it and when it was last checked. Once a group is checked, going back
 to it (in the tree or the breadcrumb) shows that check again, kept for the last 10 groups until each is checked anew;
@@ -842,7 +844,10 @@ Its tabs, in order (a red count means something is open there):
   are read, and the tab says when the window held more.
 - **Metrics:** any metric over 1 h to 90 days (Azure keeps platform metrics 93 days), split by any dimension
   (status code, instance, namespace…).
-- **Nodes** (AKS): every node with its pool, VM size and zone, Ready or NotReady (with the reason), memory, disk or
+- **System namespaces** (Kubernetes' own, and those where every workload carries a label AKS or its add-on manager
+  sets) are left out of *All namespaces*. Picking one in the namespace picker shows it, and *All namespaces, including
+  system* shows everything; either reads the cluster again with them in.
+- **Nodes** (AKS): every node with its pool (*System pool* marked; Capacity's pool table too), VM size and zone, Ready or NotReady (with the reason), memory, disk or
   PID pressure, cordoned and taints, CPU, memory and pods requested and used against what it holds, kubelet version,
   node image and its age, and the pools in total; click a node for its conditions, OS, kernel and runtime. Worst
   first, with a filter and "only nodes with something to look at". Without the Kubernetes API (a private cluster off
@@ -852,9 +857,10 @@ Its tabs, in order (a red count means something is open there):
   **Configuration risks** (single replicas, missing requests or limits, HPA and PDB settings). A part your role
   can't read is named with the role it needs. Each section folds (ones with problems open, your own open/close kept
   in this browser; empty ones are one grey line). A toolbar that stays at the top holds one filter over every
-  section, a **namespace** picker (namespaces with problems first, with their counts; kept per cluster), **Go to
+  section, a **namespace** picker (namespaces with problems first, with their counts; kept while you stay on the cluster, so
+  opening it again starts on *All namespaces*), **Go to
   workload** (type part of a name; its details open under the toolbar), **Look back** (1 hour to 30 days, for restarts, OOMKilled and warning events; the workspace keeps 30 days
-  by default), *include system namespaces* and **Expand all / Collapse all**, with a *Showing:* line (and Reset) and a
+  by default) and **Expand all / Collapse all**, with a *Showing:* line (and Reset) and a
   jump bar to each section with its count. **logs** opens under the row you clicked, one at a time (✕, Esc), JSON
   lines as time · level · message, with a filter, errors-and-warnings only, wrap and copy. **OOMKilled** lists each kill with its pod, node and time, and whether the container hit its own memory
   limit or the node ran out (the kernel's message on the node, else memory just before), with the killed instance's
@@ -863,7 +869,8 @@ Its tabs, in order (a red count means something is open there):
   kill in the look-back is counted (in the section's header and in What's wrong now), the newest 200 are listed and
   the newest 25 get memory readings. **Warning events** (BackOff, FailedMount, a node's OOMKilling…) come from
   Container Insights over the look-back; without it, from the cluster itself (what Kubernetes still keeps, about an
-  hour), and from the monitoring tool over the look-back. A read that reaches a tool's own limit says so.
+  hour), and from the monitoring tool over the look-back. A read that reaches a tool's own limit says so. The
+  sub-tabs' counts and the kind buttons' counts follow the namespace and the filter.
   **Dependencies of a workload** (namespace and Deployment, StatefulSet or DaemonSet, picked from the cluster's own, or for one namespace from Container Insights or the monitoring tool; also Investigate → pod): the
   Azure resources it uses, from the host names in its env and ConfigMaps (scanned on your machine, values never
   shown, Secrets never read) and from what its workload identity holds roles on, Cosmos DB data roles included.
@@ -905,9 +912,13 @@ Its tabs, in order (a red count means something is open there):
 - **ServiceNow** and one tab per **monitoring tool:** the records and entities that name this resource.
 - **Details:** type-specific facts, e.g. Key Vault expiry (names only), SQL usage and replication, Redis patch
   schedule, Service Bus dead letters, private endpoint state.
-- **Scaling:** autoscale and AKS node pools against their maximum.
+- **Scaling:** autoscale and AKS node pools against their maximum. An Application Gateway v2 shows its own range
+  (`autoscaleConfiguration`; it uses no autoscale setting) or its fixed instance count, and the instances now and at
+  most in the last hour, estimated from capacity units (Azure reports no instance count; one instance is about 10).
 - **Diagnostics:** Azure's "Diagnose and solve problems" checks over the last 24 hours, with the same details as
-  the portal. A detector alone only turns a resource yellow. Azure's read API has detectors for App Service, AKS,
+  the portal. Opening any resource runs its default detectors in the background (once per resource per session), and
+  the tab shows how many report a warning or critical finding (red when one is critical), so a problem is seen
+  without opening the tab. A detector alone only turns a resource yellow. Azure's read API has detectors for App Service, AKS,
   Redis, Logic Apps and Batch; for other types (API Management among them) the portal runs its checks through
   Microsoft's Help service, which starts a diagnostic run, a write the console doesn't make, so the tab links to the
   portal's page. A type whose detectors API never answers (Event Hubs, Service Bus, Storage and Container Registry

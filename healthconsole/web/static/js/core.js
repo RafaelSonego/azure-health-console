@@ -91,6 +91,20 @@ const stored = {
   },
 };
 
+// Every search box's × (drawn by style.css while it holds text): a click on its right end empties the box, and the
+// box's own `input` listeners then redraw whatever it filters.
+const nearClear = (event) => event.target.matches && event.target.matches('input[type="search"]') && event.target.value
+  && event.clientX > event.target.getBoundingClientRect().right - 26;
+document.addEventListener("click", (event) => {
+  if (!nearClear(event)) return;
+  event.target.value = "";
+  event.target.dispatchEvent(new Event("input", { bubbles: true }));
+  event.target.style.cursor = "";
+});
+document.addEventListener("mousemove", (event) => {
+  if (event.target.matches && event.target.matches('input[type="search"]')) event.target.style.cursor = nearClear(event) ? "pointer" : "";
+});
+
 // A Refresh button: every read `work` starts asks Azure again instead of the server's one-minute cache.
 async function freshly(work) {
   state.fresh = (state.fresh || 0) + 1;
